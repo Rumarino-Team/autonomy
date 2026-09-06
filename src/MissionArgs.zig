@@ -14,9 +14,6 @@ live_config_path: []const u8,
 
 pub fn init(p_init: std.process.Init) !MissionArgs {
     const argsSlice = try p_init.minimal.args.toSlice(p_init.arena.allocator());
-    for (argsSlice) |arg| {
-        std.log.debug("- {s}", .{arg});
-    }
     if (argsSlice.len < 3) {
         std.log.err("usage: {s} <auv_dynlib_path> <mission_name> <live_config_path>", .{argsSlice[0]});
         return error.MissingArgs;
