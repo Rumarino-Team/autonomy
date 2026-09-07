@@ -53,6 +53,7 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
         std.log.err("failed to load auv: {s}", .{auv_loader.auv_path});
         return err;
     };
+    auv.init();
     std.log.debug("succesfully loaded auv: {s}", .{auv_loader.auv_path});
     std.log.debug("{any}", .{auv});
 
