@@ -32,17 +32,12 @@ pid_prev_pose_err: Auv.Vector6f,
 pid_prev_timestamp_ns: ?u64,
 
 auv: Auv,
-auv_loop_future: Io.Future(void),
 auv_loader: AuvLoader,
 auv_watcher: FileWatcher,
 
 config: ConfigLoader.Config,
 config_loader: ConfigLoader,
 config_watcher: FileWatcher,
-
-fn loopFuncWrapper(loop_func: *const Auv.LoopFunc) void {
-    loop_func();
-}
 
 pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     var config_loader: ConfigLoader = try .init(gpa, args.live_config_path);
@@ -60,8 +55,6 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     };
     std.log.debug("succesfully loaded auv: {s}", .{auv_loader.auv_path});
     std.log.debug("{any}", .{auv});
-    
-    const auv_loop_future = try io.concurrent(loopFuncWrapper, .{auv.loop});
 
     return .{
         .frame = undefined,
@@ -83,7 +76,6 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
         .pid_prev_timestamp_ns = null,
 
         .auv = auv,
-        .auv_loop_future = auv_loop_future,
         .auv_loader = auv_loader,
         .auv_watcher = try .init(gpa, args.auv_dynlib_path),
 
@@ -141,8 +133,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
     }) {
-        ctx.auv.setStop();
-        ctx.auv_loop_future.await(ctx.io);
+        ctx.auv.deinit();
         if (ctx.auv_loader.load(ctx.io)) |auv| {
             std.log.debug("succesfully reloaded auv: {s}/{s}", .{ctx.auv_watcher.dir, ctx.auv_watcher.name});
             std.log.debug("{any}", .{auv});
@@ -153,7 +144,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
             std.log.err("{s}", .{@errorName(err)});
             std.log.info("kept previous auv", .{});
         }
-        ctx.auv_loop_future = ctx.io.concurrent(loopFuncWrapper, .{ctx.auv.loop}) catch unreachable;
+        ctx.auv.init();
     }
 
     _ = linux.clock_gettime(.MONOTONIC, &end);

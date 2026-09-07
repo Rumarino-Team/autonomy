@@ -38,10 +38,10 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
     errdefer dynlib.close();
 
     const auv: Auv = .{
-        .loop = dynlib.lookup(
-            *const Auv.LoopFunc,
-            "auv_loop",
-        ) orelse return error.MissingAuvLoop,
+        .init = dynlib.lookup(
+            *const Auv.InitFunc,
+            "auv_init",
+        ) orelse return error.MissingAuvInit,
 
         .yieldUntilNextFrame = dynlib.lookup(
             *const Auv.YieldUntilNextFrameFunc,
@@ -53,10 +53,10 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
             "auv_set_thrustor_values",
         ) orelse return error.MissingAuvSetThrustorsInput,
 
-        .setStop = dynlib.lookup(
-            *const Auv.SetStop,
-            "auv_set_stop",
-        ) orelse return error.MissingAuvSetStop,
+        .deinit = dynlib.lookup(
+            *const Auv.DeinitFunc,
+            "auv_deinit",
+        ) orelse return error.MissingAuvDeinit,
     };
 
     if (loader.prev_dynlib) |*prev_dynlib| {

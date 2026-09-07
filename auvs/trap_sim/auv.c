@@ -1,9 +1,6 @@
 #include "../../include/auv.h"
-#include <assert.h>
-#include <stdbool.h>
-#include <stdatomic.h>
 
-void auv_loop(void) {
+void auv_init(void) {
   __builtin_trap();
 }
 
@@ -18,6 +15,6 @@ void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_valu
   __builtin_trap();
 }
 
-void auv_set_stop(void) {
+void auv_deinit(void) {
   __builtin_trap();
 }

@@ -33,17 +33,17 @@ pub const Frame = extern struct {
     timestamp: u64,
 };
 
-pub const LoopFunc = fn () callconv(.c) void;
+pub const InitFunc = fn () callconv(.c) void;
 pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
-pub const SetStop = fn () callconv(.c) void;
+pub const DeinitFunc = fn () callconv(.c) void;
 
 const Auv = @This();
 
-loop: *const LoopFunc,
+init: *const InitFunc,
 yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
 setThrustorValues: *const SetThrustorValuesFunc,
-setStop: *const SetStop,
+deinit: *const DeinitFunc,
 
 // below I'm double checking the ABI matches
 fn assertSameLayout(comptime Zig: type, comptime C: type) void {
@@ -129,7 +129,8 @@ comptime {
     assertSameLayout(Object, c.AuvObject);
     assertSameLayout(Frame, c.AuvFrame);
 
-    assertSameFunctionLayout(LoopFunc, c.AuvLoopFunc);
+    assertSameFunctionLayout(InitFunc, c.AuvInitFunc);
     assertSameFunctionLayout(YieldUntilNextFrameFunc, c.AuvYieldUntilNextFrameFunc);
     assertSameFunctionLayout(SetThrustorValuesFunc, c.AuvSetThrustorsInputFunc);
+    assertSameFunctionLayout(DeinitFunc, c.AuvDeinitFunc);
 }

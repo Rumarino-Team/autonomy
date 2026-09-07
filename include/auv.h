@@ -46,22 +46,24 @@ typedef struct {
   uint64_t timestamp;
 } AuvFrame;
 
-void auv_loop(void);
+void auv_init(void);
 void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
-void auv_set_stop(void);
+void auv_deinit(void);
 
 #ifdef __cplusplus
 
-using AuvLoopFunc = decltype(auv_loop);
+using AuvInitFunc = decltype(auv_init);
 using AuvYieldUntilNextFrameFunc = decltype(auv_yield_until_next_frame);
 using AuvSetThrustorsInputFunc = decltype(auv_set_thrustor_values);
+using AuvDeinitFunc = decltype(auv_deinit);
 
 #else
 
-typedef typeof(auv_loop) AuvLoopFunc;
+typedef typeof(auv_init) AuvInitFunc;
 typedef typeof(auv_yield_until_next_frame) AuvYieldUntilNextFrameFunc;
 typedef typeof(auv_set_thrustor_values) AuvSetThrustorsInputFunc;
+typedef typeof(auv_deinit) AuvDeinitFunc;
 
 #endif
 
