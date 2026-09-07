@@ -7,7 +7,6 @@ const MissionLoader = @This();
 const max_thrustors = 8;
 
 config_path: []const u8,
-io: Io,
 use_ping: bool,
 ping: std.heap.FixedBufferAllocator,
 pong: std.heap.FixedBufferAllocator,
@@ -20,10 +19,9 @@ pub const Config = struct {
     tam: []Auv.Vector6f,
 };
 
-pub fn init(gpa: std.mem.Allocator, io: Io, config_path: []const u8) !MissionLoader {
+pub fn init(gpa: std.mem.Allocator, config_path: []const u8) !MissionLoader {
     return .{
         .config_path = config_path,
-        .io = io,
         .use_ping = false,
         .ping = .init(try gpa.alloc(u8, 4098)),
         .pong = .init(try gpa.alloc(u8, 4098)),
@@ -31,10 +29,10 @@ pub fn init(gpa: std.mem.Allocator, io: Io, config_path: []const u8) !MissionLoa
     };
 }
 
-pub fn load(loader: *MissionLoader) !Config {
+pub fn load(loader: *MissionLoader, io: Io) !Config {
     const fba = if (loader.use_ping) &loader.ping else &loader.pong; 
-    const file = try Io.Dir.cwd().openFile(loader.io, loader.config_path, .{ .mode = .read_only });
-    var file_reader = file.reader(loader.io, &loader.reader_buf);
+    const file = try Io.Dir.cwd().openFile(io, loader.config_path, .{ .mode = .read_only });
+    var file_reader = file.reader(io, &loader.reader_buf);
     const file_contents = try file_reader.interface.allocRemaining(fba.allocator(), .unlimited);
 
     const config = std.json.parseFromSliceLeaky(Config, fba.allocator(), file_contents, .{});

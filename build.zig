@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.link_libc = true;
     exe.root_module.addIncludePath(b.path("include"));
     exe.root_module.addCSourceFile(.{
-        .file = b.path("auvs/sleep_sim/auv.c"),
+        .file = b.path("auvs/trap_sim/auv.c"),
     });
 
     // This declares intent for the executable to be installed into the
@@ -184,10 +184,10 @@ pub fn build(b: *std.Build) void {
         }),
         .linkage = .dynamic,
     });
-    lib_auv_proteus_sim.root_module.link_libc = true;
+    lib_auv_proteus_sim.root_module.link_libcpp = true;
     lib_auv_proteus_sim.root_module.addCSourceFile(.{
         .file = b.path("auvs/proteus_sim/auv.cpp"),
-        .flags = &.{"-fPIC"},
+        .flags = &.{"-fPIC", "-std=c++17"},
     });
     b.installArtifact(lib_auv_proteus_sim);
 
@@ -199,10 +199,10 @@ pub fn build(b: *std.Build) void {
         }),
         .linkage = .dynamic,
     });
-    lib_auv_proteus_hwd.root_module.link_libc = true;
+    lib_auv_proteus_hwd.root_module.link_libcpp = true;
     lib_auv_proteus_hwd.root_module.addCSourceFile(.{
         .file = b.path("auvs/proteus_hwd/auv.cpp"),
-        .flags = &.{"-fPIC"},
+        .flags = &.{"-fPIC", "-std=c++17"},
     });
     b.installArtifact(lib_auv_proteus_hwd);
 }
