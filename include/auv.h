@@ -1,5 +1,12 @@
+#ifndef AUV_H
+#define AUV_H
+
 #include <stdalign.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // for simd vector sizes
 #define AUV_VECTOR3F_ALIGN 16
@@ -44,6 +51,22 @@ void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
 void auv_set_stop(void);
 
+#ifdef __cplusplus
+
+using AuvLoopFunc = decltype(auv_loop);
+using AuvYieldUntilNextFrameFunc = decltype(auv_yield_until_next_frame);
+using AuvSetThrustorsInputFunc = decltype(auv_set_thrustor_values);
+
+#else
+
 typedef typeof(auv_loop) AuvLoopFunc;
 typedef typeof(auv_yield_until_next_frame) AuvYieldUntilNextFrameFunc;
 typedef typeof(auv_set_thrustor_values) AuvSetThrustorsInputFunc;
+
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
