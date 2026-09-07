@@ -1,4 +1,5 @@
 const std = @import("std");
+const math = @import("math.zig");
 const Io = std.Io;
 const Auv = @import("Auv.zig");
 
@@ -13,10 +14,10 @@ pong: std.heap.FixedBufferAllocator,
 reader_buf: [4098]u8,
 
 pub const Config = struct {
-    kp: Auv.Vector6f,
-    ki: Auv.Vector6f,
-    kd: Auv.Vector6f,
-    tam: []Auv.Vector6f,
+    kp: math.Vector6f,
+    ki: math.Vector6f,
+    kd: math.Vector6f,
+    tam: []math.Vector6f,
 };
 
 pub fn init(gpa: std.mem.Allocator, config_path: []const u8) !MissionLoader {

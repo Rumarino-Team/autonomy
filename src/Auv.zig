@@ -1,25 +1,16 @@
 const std = @import("std");
+const math = @import("math.zig");
 
 const c = @cImport({
     @cInclude("auv.h");
 });
-
-pub const Vector3f = @Vector(3, f32);
-pub const Vector6f = @Vector(6, f32);
-pub const Quaternionf = @Vector(4, f32);
-
-pub const Pose = extern struct {
-    pos: Vector3f,
-    quat: Quaternionf,
-};
 
 pub const ObjectCls = enum(u8) {
     cube,
     rect,
 };
 pub const Object = extern struct {
-    pose: Pose,
-    bounding_box: [8]Vector3f,
+    bbox: math.BoundingBox,
     id: u32,
     cls: ObjectCls,
 };
@@ -29,7 +20,7 @@ pub const Frame = extern struct {
 
     objects: [max_objects]Object,
     objects_len: u8,
-    camera_pose: Pose,
+    camera_pose: math.Pose,
     timestamp: u64,
 };
 
@@ -121,10 +112,11 @@ fn assertSameFunctionLayout(comptime Zig: type, comptime C: type) void {
 }
 
 comptime {
-    assertSameLayout(Vector3f, c.AuvVector3f);
-    assertSameLayout(Quaternionf, c.AuvQuaternionf);
-    assertSameLayout(Vector6f, c.AuvVector6f);
-    assertSameLayout(Pose, c.AuvPose);
+    assertSameLayout(math.Vector3f, c.MathVector3f);
+    assertSameLayout(math.Quaternionf, c.MathQuaternionf);
+    assertSameLayout(math.Vector6f, c.MathVector6f);
+    assertSameLayout(math.Pose, c.MathPose);
+    assertSameLayout(math.BoundingBox, c.MathBoundingBox);
     assertSameLayout(ObjectCls, c.AuvObjectCls);
     assertSameLayout(Object, c.AuvObject);
     assertSameLayout(Frame, c.AuvFrame);

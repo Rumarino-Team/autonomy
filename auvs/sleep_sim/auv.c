@@ -49,7 +49,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     next_frame = timestamp + FRAME_INTERVAL_NS;
 
   frame->objects_len = 0;
-  frame->camera_pose = (AuvPose){
+  frame->camera_pose = (MathPose){
       .pos = {0, 0, 0},
       .quat = {0, 0, 0, 1},
   };

@@ -25,10 +25,10 @@ thrustor_saturate: f32,
 log_counter: u32,
 log_freq_div: u16,
 
-goal: Auv.Vector6f,
+goal: math.Vector6f,
 
-pid_sum_err: Auv.Vector6f,
-pid_prev_pose_err: Auv.Vector6f,
+pid_sum_err: math.Vector6f,
+pid_prev_pose_err: math.Vector6f,
 pid_prev_timestamp_ns: ?u64,
 
 auv: Auv,
@@ -194,7 +194,7 @@ fn pidStep(ctx: *MissionContext) void {
     const current_rpy = math.quaternionToEuler(rot);
     _, _, const current_yaw = current_rpy;
 
-    const dir = Auv.Vector3f{
+    const dir = math.Vector3f{
         pose_err[0],
         pose_err[1],
         0.0,
@@ -217,7 +217,7 @@ fn pidStep(ctx: *MissionContext) void {
 
     pose_err[5] = yaw_error;
 
-    // const dir: Auv.Vector3f = .{ pose_err[0], pose_err[1], 0.0 };
+    // const dir: math.Vector3f = .{ pose_err[0], pose_err[1], 0.0 };
     //
     // const yaw_error = if (math.length3f(dir) > ctx.close_enough) blk: {
     //     const dir_normalized = math.normalize3f(dir);
@@ -232,10 +232,10 @@ fn pidStep(ctx: *MissionContext) void {
     //
     // pose_err[5] = yaw_error;
 
-    const vel_err: Auv.Vector6f = if (dt) |delta_t| blk: {
-        ctx.pid_sum_err += pose_err * @as(Auv.Vector6f, @splat(delta_t));
+    const vel_err: math.Vector6f = if (dt) |delta_t| blk: {
+        ctx.pid_sum_err += pose_err * @as(math.Vector6f, @splat(delta_t));
 
-        break :blk (pose_err - ctx.pid_prev_pose_err) / @as(Auv.Vector6f, @splat(delta_t));
+        break :blk (pose_err - ctx.pid_prev_pose_err) / @as(math.Vector6f, @splat(delta_t));
     } else @splat(0.0);
 
     const kp = ctx.config.kp;
@@ -280,7 +280,7 @@ fn pidStep(ctx: *MissionContext) void {
         body_force[1] = @max(body_force[1], 0.0);
     }
 
-    const input: Auv.Vector6f = .{
+    const input: math.Vector6f = .{
         body_force[0],
         body_force[1],
         wrench[2],
@@ -338,13 +338,15 @@ fn pidStep(ctx: *MissionContext) void {
     ctx.pid_prev_pose_err = pose_err;
 }
 
-fn yieldUntilObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls, start: usize) *const Auv.Object {
+fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const Auv.ObjectCls, start: usize) *const Auv.Object {
     var seen = start;
 
     while (true) {
         for (ctx.seen_objects[seen..ctx.seen_objects_len]) |*reacted_object| {
-            if (reacted_object.cls == cls) {
-                return reacted_object;
+            for (clss) |cls| {
+                if (reacted_object.cls == cls) {
+                    return reacted_object;
+                }
             }
             seen += 1;
         }
@@ -353,18 +355,28 @@ fn yieldUntilObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls, start: usiz
     }
 }
 
-/// yield until getting first object with `cls`
-pub fn yieldUntilFirstObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
-    return yieldUntilObjectWithCls(ctx, cls, 0);
+/// yield until getting first object with any of the `cls` in `clss`
+pub fn yieldUntilFirstObjectWithAnyCls(ctx: *MissionContext, clss: []const Auv.ObjectCls) *const Auv.Object {
+    return yieldUntilObjectWithCls(ctx, clss, 0);
 }
 
-/// yield until getting next object with `cls` (ignoring any seen before)
-pub fn yieldUntilNextObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
-    return yieldUntilObjectWithCls(ctx, cls, ctx.seen_objects_len);
+/// yield until getting first object wit `cls`
+pub fn yieldUntilFirstObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
+    return yieldUntilFirstObjectWithAnyCls(ctx, &.{cls});
+}
+
+/// yield until getting next object with any of the `cls` in `clss` (ignoring any seen before)
+pub fn yieldUntilNewObjectWithAnyCls(ctx: *MissionContext, clss: []const Auv.ObjectCls) *const Auv.Object {
+    return yieldUntilObjectWithCls(ctx, clss, ctx.seen_objects_len);
+}
+
+/// yield until getting next object wit `cls` (ignoring any seen before)
+pub fn yieldUntilNewObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
+    return yieldUntilNewObjectWithAnyCls(ctx, &.{cls});
 }
 
 /// yield until at `ctx.frame.camera_pose.pos` is at `goal_threshold` distance from `goal_pos`
-pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: Auv.Vector3f) void {
+pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) void {
     ctx.goal[0] = goal_pos[0];
     ctx.goal[1] = goal_pos[1];
     ctx.goal[2] = goal_pos[2];

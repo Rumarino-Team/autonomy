@@ -1,39 +1,16 @@
 #ifndef AUV_H
 #define AUV_H
 
-#include <stdalign.h>
 #include <stdint.h>
+#include "math.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// for simd vector sizes
-#define AUV_VECTOR3F_ALIGN 16
-#define AUV_QUATERNIONF_ALIGN 16
-#define AUV_VECTOR6F_ALIGN 32
-
-typedef struct {
-  alignas(AUV_VECTOR3F_ALIGN) float buf[3];
-} AuvVector3f;
-
-typedef struct {
-  alignas(AUV_QUATERNIONF_ALIGN) float buf[4];
-} AuvQuaternionf;
-
-typedef struct {
-  alignas(AUV_VECTOR6F_ALIGN) float buf[6];
-} AuvVector6f;
-
-typedef struct {
-  AuvVector3f pos;
-  AuvQuaternionf quat;
-} AuvPose;
-
 typedef uint8_t AuvObjectCls;
 typedef struct {
-  AuvPose pose;
-  AuvVector3f bounding_box[8];
+  MathBoundingBox bbox;
   uint32_t id;
   AuvObjectCls cls;
 } AuvObject;
@@ -42,7 +19,7 @@ typedef struct {
 typedef struct {
   AuvObject objects[AUV_FRAME_MAX_OBJECTS];
   uint8_t objects_len;
-  AuvPose camera_pose;
+  MathPose camera_pose;
   uint64_t timestamp;
 } AuvFrame;
 
@@ -65,10 +42,10 @@ typedef typeof(auv_yield_until_next_frame) AuvYieldUntilNextFrameFunc;
 typedef typeof(auv_set_thrustor_values) AuvSetThrustorsInputFunc;
 typedef typeof(auv_deinit) AuvDeinitFunc;
 
-#endif
+#endif // __cplusplus
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif // AUV_H
