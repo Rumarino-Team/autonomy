@@ -9,7 +9,9 @@ const FileWatcher = @import("FileWatcher.zig");
 
 const MissionContext = @This();
 const print_stuff = true;
-const clear_print_stuff = false;
+const clear_print_stuff = true;
+
+io: Io,
 
 frame: Auv.Frame,
 
@@ -30,6 +32,7 @@ pid_prev_pose_err: Auv.Vector6f,
 pid_prev_timestamp_ns: ?u64,
 
 auv: Auv,
+auv_loop_future: Io.Future(void),
 auv_loader: AuvLoader,
 auv_watcher: FileWatcher,
 
@@ -37,29 +40,28 @@ config: ConfigLoader.Config,
 config_loader: ConfigLoader,
 config_watcher: FileWatcher,
 
-fn loopWrapper(auv: *const Auv) void { 
-    auv.loop();
+fn loopFuncWrapper(loop_func: *const Auv.LoopFunc) void {
+    loop_func();
 }
 
 pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
-    var config_loader: ConfigLoader = try .init(gpa, io, args.live_config_path);
-    const config = config_loader.load() catch |err| {
+    var config_loader: ConfigLoader = try .init(gpa, args.live_config_path);
+    const config = config_loader.load(io) catch |err| {
         std.log.err("failed to load config: {s}", .{config_loader.config_path});
         return err;
     };
     std.log.debug("succesfully loaded config: {s}", .{config_loader.config_path});
     std.log.debug("{any}", .{config});
 
-    var auv_loader: AuvLoader = try .init(io, args.auv_dynlib_path);
-    const auv = auv_loader.load() catch |err| {
+    var auv_loader: AuvLoader = try .init(gpa, args.auv_dynlib_path);
+    const auv = auv_loader.load(io) catch |err| {
         std.log.err("failed to load auv: {s}", .{auv_loader.auv_path});
         return err;
     };
     std.log.debug("succesfully loaded auv: {s}", .{auv_loader.auv_path});
     std.log.debug("{any}", .{auv});
     
-    // unreachable; // TODO: respawn loop
-    // _ = try init.io.concurrent(loopWrapper, .{&ctx.auv});
+    const auv_loop_future = try io.concurrent(loopFuncWrapper, .{auv.loop});
 
     return .{
         .frame = undefined,
@@ -72,7 +74,7 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
         .thrustor_saturate = 5,
 
         .log_counter = 0,
-        .log_freq_div = 5 * 60,
+        .log_freq_div = 120,
 
         .goal = @splat(0),
 
@@ -81,12 +83,15 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
         .pid_prev_timestamp_ns = null,
 
         .auv = auv,
+        .auv_loop_future = auv_loop_future,
         .auv_loader = auv_loader,
         .auv_watcher = try .init(gpa, args.auv_dynlib_path),
 
         .config = config,
         .config_loader = config_loader,
         .config_watcher = try .init(gpa, args.live_config_path),
+
+        .io = io,
     };
 }
 
@@ -121,7 +126,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
     }) {
-        if (ctx.config_loader.load()) |config| {
+        if (ctx.config_loader.load(ctx.io)) |config| {
             std.log.debug("succesfully reloaded config: {s}/{s}", .{ctx.auv_watcher.dir, ctx.auv_watcher.name});
             std.log.debug("{any}", .{config});
             ctx.config = config;
@@ -132,26 +137,28 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
         }
     }
 
-    if (ctx.auv_watcher.changed() catch unreachable) {
-    // if (ctx.auv_watcher.changed() catch |err| blk: {
-    //     std.log.err("{s}", .{@errorName(err)});
-    //     break :blk false;
-    // }) {
-        if (ctx.auv_loader.load()) |auv| {
+    if (ctx.auv_watcher.changed() catch |err| blk: {
+        std.log.err("{s}", .{@errorName(err)});
+        break :blk false;
+    }) {
+        ctx.auv.setStop();
+        ctx.auv_loop_future.await(ctx.io);
+        if (ctx.auv_loader.load(ctx.io)) |auv| {
             std.log.debug("succesfully reloaded auv: {s}/{s}", .{ctx.auv_watcher.dir, ctx.auv_watcher.name});
             std.log.debug("{any}", .{auv});
             ctx.auv = auv;
-            // TODO
+            std.log.debug("restarted auv loop", .{});
         } else |err| {
             std.log.err("failed to reload auv: {s}/{s}", .{ctx.auv_watcher.dir, ctx.auv_watcher.name});
             std.log.err("{s}", .{@errorName(err)});
             std.log.info("kept previous auv", .{});
         }
+        ctx.auv_loop_future = ctx.io.concurrent(loopFuncWrapper, .{ctx.auv.loop}) catch unreachable;
     }
 
     _ = linux.clock_gettime(.MONOTONIC, &end);
+    const ns = (end.sec - start.sec) * 1000000000 + (end.nsec - start.nsec);
     if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        const ns = (end.sec - start.sec) * 1000000000 + (end.nsec - start.nsec);
         std.log.debug("done in {} us\n", .{@divTrunc(ns, 1000)});
     }
     ctx.log_counter +%= 1;
@@ -201,7 +208,7 @@ fn pidStep(ctx: *MissionContext) void {
         0.0,
     };
 
-    const distance = math.length3f(dir);
+    const xy_distance = math.length3f(dir);
 
     // const yaw_error = if (distance > ctx.close_enough) blk: {
     //     const target_yaw = std.math.atan2(dir[1], dir[0]);
@@ -209,7 +216,7 @@ fn pidStep(ctx: *MissionContext) void {
     // } else blk: {
     //     break :blk math.wrapAngle(goal[5] - current_yaw);
     // };
-    const target_yaw = if (distance > ctx.close_enough)
+    const target_yaw = if (xy_distance > ctx.close_enough)
         std.math.atan2(dir[1], dir[0])
     else
         goal[5];
@@ -319,7 +326,7 @@ fn pidStep(ctx: *MissionContext) void {
         std.log.debug("dt = {d:6.2} ms", .{(dt orelse 0) * 1000});
         math.debug6f("pose", current_pose);
         math.debug6f("goal", goal);
-        std.log.debug("distance = {}", .{distance});
+        std.log.debug("xy_distance = {}", .{xy_distance});
         std.log.debug("thruster mapping:", .{});
         math.debug6f("\twrench  ", wrench);
         math.debug3f("\tforward ", forward);

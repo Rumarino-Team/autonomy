@@ -36,12 +36,14 @@ pub const Frame = extern struct {
 pub const LoopFunc = fn () callconv(.c) void;
 pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
+pub const SetStop = fn () callconv(.c) void;
 
 const Auv = @This();
 
 loop: *const LoopFunc,
 yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
 setThrustorValues: *const SetThrustorValuesFunc,
+setStop: *const SetStop,
 
 // below I'm double checking the ABI matches
 fn assertSameLayout(comptime Zig: type, comptime C: type) void {

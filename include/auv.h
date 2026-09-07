@@ -42,6 +42,7 @@ typedef struct {
 void auv_loop(void);
 void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
+void auv_set_stop(void);
 
 typedef typeof(auv_loop) AuvLoopFunc;
 typedef typeof(auv_yield_until_next_frame) AuvYieldUntilNextFrameFunc;
