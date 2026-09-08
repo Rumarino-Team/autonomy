@@ -7,6 +7,6 @@ zig build
 ```sh
 zig build run -- \
     ./zig-out/lib/libauv_sleep_sim.so \
-    first_cube_next_rect_then_back \
+    prequalify \
     ./auvs/sleep_sim/auv.json
 ```
