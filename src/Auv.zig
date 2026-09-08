@@ -8,6 +8,7 @@ const c = @cImport({
 pub const ObjectCls = enum(u8) {
     cube,
     rect,
+    gate,
 };
 pub const Object = extern struct {
     bbox: math.BoundingBox,

@@ -4,7 +4,7 @@ const Io = std.Io;
 const MissionArgs = @This();
 
 pub const MissionId = enum {
-    first_cube_next_rect_then_back,
+    prequalify,
 };
 
 goal_dist_threshold: f32,
