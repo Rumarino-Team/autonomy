@@ -1,6 +1,5 @@
 // zed 2i camera plugin. talks to the stereolabs sdk directly
-// coordinates are meters, world frame, z up, x forward. bounding boxes are
-// axis aligned in that frame, so their quaternion is always identity
+// coordinates are meters, world frame, x forward, y right, z down
 //
 // auv_init takes no arguments, so configuration comes from the environment:
 //
@@ -285,10 +284,12 @@ static bool copy_pose(const sl::Pose &source, MathPose &destination) {
     length_squared += static_cast<double>(value) * value;
   }
   if (length_squared < 1e-12) return false;
-  for (int i = 0; i < 3; i++) destination.pos.buf[i] = position[i];
+  // negating y and z is a 180 degree rotation about x, so still right handed
+  const float flip[] = {1, -1, -1, 1};
+  for (int i = 0; i < 3; i++) destination.pos.buf[i] = flip[i] * position[i];
   const double length = std::sqrt(length_squared);
   for (int i = 0; i < 4; i++)
-    destination.quat.buf[i] = static_cast<float>(quaternion[i] / length);
+    destination.quat.buf[i] = static_cast<float>(flip[i] * quaternion[i] / length);
   return true;
 }
 
@@ -313,12 +314,15 @@ static bool copy_object(const sl::ObjectData &source, int cls, AuvObject &destin
   AuvObject result{};
   result.id = static_cast<uint32_t>(source.id);
   result.cls = static_cast<AuvObjectCls>(cls);
-  // World aligned box.
+  // TODO: calculate AuvBoundingBox from 8 points
   result.bbox.pose.quat.buf[3] = 1;
+  // world axis aligned, so the flip moves the center but not the sizes
+  const float flip[] = {1, -1, -1};
   for (int axis = 0; axis < 3; axis++) {
     const double size = high[axis] - low[axis];
     if (size <= 0 || size > std::numeric_limits<float>::max()) return false;
-    result.bbox.pose.pos.buf[axis] = static_cast<float>((low[axis] + high[axis]) / 2);
+    result.bbox.pose.pos.buf[axis] =
+        static_cast<float>(flip[axis] * (low[axis] + high[axis]) / 2);
     result.bbox.size.buf[axis] = static_cast<float>(size);
   }
   destination = result;
