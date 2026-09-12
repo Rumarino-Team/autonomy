@@ -191,18 +191,42 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib_auv_proteus_sim);
 
-    const lib_auv_proteus_hwd = b.addLibrary(.{
-        .name = "auv_proteus_hwd",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-        .linkage = .dynamic,
-    });
-    lib_auv_proteus_hwd.root_module.link_libcpp = true;
-    lib_auv_proteus_hwd.root_module.addCSourceFile(.{
-        .file = b.path("auvs/proteus_hwd/auv.cpp"),
-        .flags = &.{"-fPIC", "-std=c++17"},
-    });
-    b.installArtifact(lib_auv_proteus_hwd);
+    // the zed sdk exposes c++ types, so this one has to be built with the
+    // system g++ to match its libstdc++ abi. off by default so that machines
+    // without the sdk and cuda can still build everything else.
+    const zed = b.option(bool, "zed", "Build the ZED camera plugin (requires ZED SDK and CUDA)") orelse false;
+    const cxx = b.option([]const u8, "cxx", "System C++ compiler") orelse "g++";
+    const zed_prefix = b.option([]const u8, "zed-prefix", "ZED SDK install prefix") orelse "/usr/local/zed";
+    const cuda_prefix = b.option([]const u8, "cuda-prefix", "CUDA install prefix") orelse "/usr/local/cuda";
+    if (zed) {
+        const lib_auv_proteus_hwd = b.addSystemCommand(&.{cxx});
+        lib_auv_proteus_hwd.addArgs(&.{"-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror"});
+        lib_auv_proteus_hwd.addArg(if (optimize == .Debug) "-O0" else "-O2");
+        if (optimize == .Debug)
+            lib_auv_proteus_hwd.addArg("-g");
+
+        lib_auv_proteus_hwd.addArg("-o");
+        const lib_auv_proteus_hwd_so = lib_auv_proteus_hwd.addOutputFileArg("libauv_proteus_hwd.so");
+        lib_auv_proteus_hwd.addFileArg(b.path("auvs/proteus_hwd/auv.cpp"));
+        lib_auv_proteus_hwd.addFileInput(b.path("include/auv.h"));
+        lib_auv_proteus_hwd.addFileInput(b.path("include/math.h"));
+        lib_auv_proteus_hwd.addArgs(&.{
+            "-isystem",
+            b.fmt("{s}/include", .{zed_prefix}),
+            "-isystem",
+            b.fmt("{s}/include", .{cuda_prefix}),
+            b.fmt("-L{s}/lib", .{zed_prefix}),
+            b.fmt("-L{s}/lib64", .{cuda_prefix}),
+            b.fmt("-Wl,-rpath,{s}/lib", .{zed_prefix}),
+            b.fmt("-Wl,-rpath,{s}/lib64", .{cuda_prefix}),
+            "-Wl,--no-undefined",
+            "-lsl_zed",
+            "-lcudart",
+            "-lcuda",
+            "-pthread",
+        });
+
+        const install_lib_auv_proteus_hwd = b.addInstallFileWithDir(lib_auv_proteus_hwd_so, .lib, "libauv_proteus_hwd.so");
+        b.getInstallStep().dependOn(&install_lib_auv_proteus_hwd.step);
+    }
 }
