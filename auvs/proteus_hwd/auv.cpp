@@ -9,6 +9,8 @@
 //AUV_ZED_SVO         recording to replay instead of the live camera
 //AUV_ZED_RESOLUTION  HD720 (default), HD1080, HD2K, VGA
 //AUV_ZED_FPS         30
+//AUV_ZED_STREAM_PORT even port to stream h264 to the laptop. unset = off
+//AUV_ZED_RECORD      svo2 path to record h264 onboard. unset = off
 //AUV_LOG_CLS         1 to print model labels and their mapped classes
 //AUV_ZED_METRICS     1 to print per frame timing rows on stderr
 
@@ -37,6 +39,8 @@ struct ClassMapping {
 struct Config {
   const char *onnx;
   const char *svo;
+  const char *record;
+  int stream_port;
   sl::RESOLUTION resolution;
   int fps;
   bool log_classes;
@@ -93,6 +97,18 @@ void auv_init(void) {
 
     check(zed.open(params), "open camera");
     zed_open = true;
+    if (config.stream_port) {
+      sl::StreamingParameters stream;
+      stream.codec = sl::STREAMING_CODEC::H264;
+      stream.port = static_cast<unsigned short>(config.stream_port);
+      check(zed.enableStreaming(stream), "enable streaming");
+    }
+    if (*config.record) {
+      sl::RecordingParameters record;
+      record.video_filename = sl::String(config.record);
+      record.compression_mode = sl::SVO_COMPRESSION_MODE::H264;
+      check(zed.enableRecording(record), "enable recording");
+    }
     sl::PositionalTrackingParameters tracking;
     tracking.enable_area_memory = true;
     check(zed.enablePositionalTracking(tracking), "enable positional tracking");
@@ -186,6 +202,8 @@ void auv_deinit(void) {
   if (zed_open) {
     zed_open = false;
     try {
+      zed.disableRecording();
+      zed.disableStreaming();
       zed.close();
     } catch (...) {
       std::fputs("[zed] camera close failed\n", stderr);
@@ -228,6 +246,8 @@ static Config load_config() {
   config.onnx = env_or("AUV_ZED_ONNX");
   config.svo = env_or("AUV_ZED_SVO");
   config.fps = parse_nonnegative(env_or("AUV_ZED_FPS", "30"));
+  config.stream_port = parse_nonnegative(env_or("AUV_ZED_STREAM_PORT", "0"));
+  config.record = env_or("AUV_ZED_RECORD");
   if (config.fps == 0) throw std::runtime_error("AUV_ZED_FPS must be positive");
   config.log_classes = env_flag("AUV_LOG_CLS");
   config.metrics = env_flag("AUV_ZED_METRICS");
