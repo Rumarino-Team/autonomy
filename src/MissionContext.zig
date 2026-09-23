@@ -6,6 +6,7 @@ const Auv = @import("Auv.zig");
 const AuvLoader = @import("AuvLoader.zig");
 const ConfigLoader = @import("ConfigLoader.zig");
 const FileWatcher = @import("FileWatcher.zig");
+const Telemetry = @import("Telemetry.zig");
 
 const MissionContext = @This();
 const print_stuff = true;
@@ -31,6 +32,9 @@ pid_sum_err: math.Vector6f,
 pid_prev_pose_err: math.Vector6f,
 pid_prev_timestamp_ns: ?u64,
 
+step: []const u8,
+telemetry: Telemetry,
+
 auv: Auv,
 auv_loader: AuvLoader,
 auv_watcher: FileWatcher,
@@ -39,7 +43,7 @@ config: ConfigLoader.Config,
 config_loader: ConfigLoader,
 config_watcher: FileWatcher,
 
-pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
+pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs, telemetry: Telemetry) !MissionContext {
     var config_loader: ConfigLoader = try .init(arena, args.live_config_path);
     const config = config_loader.load(io) catch |err| {
         std.log.err("failed to load config: {s}", .{config_loader.config_path});
@@ -77,6 +81,9 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         .pid_sum_err = @splat(0),
         .pid_prev_pose_err = @splat(0),
         .pid_prev_timestamp_ns = null,
+
+        .step = "",
+        .telemetry = telemetry,
 
         .auv = auv,
         .auv_loader = auv_loader,
@@ -334,6 +341,7 @@ fn pidStep(ctx: *MissionContext) void {
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
+    ctx.telemetry.emit(&ctx.frame, thruster_values, ctx.step);
 
     ctx.pid_prev_pose_err = pose_err;
 }

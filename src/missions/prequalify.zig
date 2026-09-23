@@ -5,10 +5,14 @@ const MissionArgs = @import("../MissionArgs.zig");
 const Auv = @import("../Auv.zig");
 
 pub fn mission(ctx: *MissionContext) void {
+    ctx.step = "find_gate";
     const gate_object = ctx.yieldUntilFirstObjectWithCls(.gate);
+    ctx.step = "go_through_gate";
     goThrough(ctx, gate_object);
 
+    ctx.step = "find_marker";
     const cube_or_rect_object = ctx.yieldUntilFirstObjectWithAnyCls(&.{.cube, .rect});
+    ctx.step = "go_around_marker";
     goAround(ctx, cube_or_rect_object);
 }
 
