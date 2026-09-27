@@ -9,11 +9,11 @@ pub fn main(init: std.process.Init) !void {
 
     var ctx: MissionContext = try .init(init.gpa, init.io, args);
 
-    ctx.yieldUntilNextFrameAndUpdate();
+    ctx.fetchFrameAndUpdate();
 
     switch (args.mission_id) {
         .prequalify => @import("missions/prequalify.zig").mission(&ctx),
     }
 
-    ctx.yieldUntilNextFrameAndUpdate();
+    ctx.fetchFrameAndUpdate();
 }

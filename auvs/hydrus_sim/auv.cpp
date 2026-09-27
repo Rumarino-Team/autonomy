@@ -484,6 +484,18 @@ void auv_yield_until_next_frame(AuvFrame* frame)
     *frame = g_simulation_context->sim->getAuvFrame();
 }
 
+void auv_yield_until_reactive_frame(AuvReactiveFrame* frame)
+{
+    AuvReactiveFrame next{};
+    next.quat.buf[3] = 1.0f;
+    next.object_len = 0;
+    next.image_width = 1280;
+    next.image_height = 720;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    next.timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+    *frame = next;
+}
+
 void auv_set_thrustor_values(const float* thrustor_values, uint8_t thrustor_values_len)
 {
     if(g_simulation_context == nullptr)

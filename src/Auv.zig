@@ -16,6 +16,30 @@ pub const Object = extern struct {
     cls: ObjectCls,
 };
 
+pub const Point2u = extern struct {
+    x: u32,
+    y: u32,
+};
+
+pub const Object2DYolo = extern struct {
+    top_left: Point2u,
+    bottom_right: Point2u,
+    id: u32,
+    cls: ObjectCls,
+};
+
+pub const ReactiveFrame = extern struct {
+    pub const max_objects = c.AUV_FRAME_MAX_OBJECTS;
+    accel: math.Vector3f,
+    gyro: math.Vector3f,
+    quat: math.Quaternionf,
+    objects2d: [max_objects]Object2DYolo,
+    object_len: u8,
+    timestamp: u64,
+    image_width: u32,
+    image_height: u32,
+};
+
 pub const Frame = extern struct {
     pub const max_objects = c.AUV_FRAME_MAX_OBJECTS;
 
@@ -23,10 +47,12 @@ pub const Frame = extern struct {
     objects_len: u8,
     camera_pose: math.Pose,
     timestamp: u64,
+    tracking_ok: bool
 };
 
 pub const InitFunc = fn () callconv(.c) void;
 pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
+pub const YieldUntilReactiveFrameFunc = fn (frame: *ReactiveFrame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
 pub const DeinitFunc = fn () callconv(.c) void;
 
@@ -34,6 +60,7 @@ const Auv = @This();
 
 init: *const InitFunc,
 yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
+yieldUntilReactiveFrame: *const YieldUntilReactiveFrameFunc,
 setThrustorValues: *const SetThrustorValuesFunc,
 deinit: *const DeinitFunc,
 
@@ -121,9 +148,13 @@ comptime {
     assertSameLayout(ObjectCls, c.AuvObjectCls);
     assertSameLayout(Object, c.AuvObject);
     assertSameLayout(Frame, c.AuvFrame);
+    assertSameLayout(Point2u, c.AuvPoint2u);
+    assertSameLayout(Object2DYolo, c.Object2DYolo);
+    assertSameLayout(ReactiveFrame, c.AuvReactiveFrame);
 
     assertSameFunctionLayout(InitFunc, c.AuvInitFunc);
     assertSameFunctionLayout(YieldUntilNextFrameFunc, c.AuvYieldUntilNextFrameFunc);
+    assertSameFunctionLayout(YieldUntilReactiveFrameFunc, c.AuvYieldUntilReactiveFrameFunc);
     assertSameFunctionLayout(SetThrustorValuesFunc, c.AuvSetThrustorsInputFunc);
     assertSameFunctionLayout(DeinitFunc, c.AuvDeinitFunc);
 }

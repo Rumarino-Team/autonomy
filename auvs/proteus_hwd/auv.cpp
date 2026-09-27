@@ -13,6 +13,8 @@
 //AUV_ZED_METRICS     1 to print per frame timing rows on stderr
 
 #include "../../include/auv.h"
+#include <cstddef>
+#include <ctime>
 #include <sl/Camera.hpp>
 #include <algorithm>
 #include <charconv>
@@ -52,11 +54,13 @@ static Config config;
 static bool zed_open = false;
 static bool detection_enabled = false;
 static uint64_t last_timestamp = 0;
+static uint64_t last_reactive_timestamp = 0;
 
 static Config load_config();
 static int map_class(const Config &config, int label);
 static bool copy_pose(const sl::Pose &source, MathPose &destination);
 static bool copy_object(const sl::ObjectData &source, int cls, AuvObject &destination);
+static bool copy_object2d(const sl::ObjectData &source, int cls, Object2DYolo &destination);
 
 [[noreturn]] static void fail(const char *message) {
   std::fprintf(stderr, "[zed] %s\n", message);
@@ -82,6 +86,9 @@ void auv_init(void) {
   try {
     auv_deinit();
     config = load_config();
+
+
+    //TODO: Make this config global parameters
     sl::InitParameters params;
     params.coordinate_units = sl::UNIT::METER;
     params.coordinate_system = sl::COORDINATE_SYSTEM::RIGHT_HANDED_Z_UP_X_FWD;
@@ -89,12 +96,14 @@ void auv_init(void) {
     params.camera_resolution = config.resolution;
     params.camera_fps = config.fps;
     params.sdk_gpu_id = 0;
+
     if (*config.svo) params.input.setFromSVOFile(config.svo);
 
     check(zed.open(params), "open camera");
     zed_open = true;
     sl::PositionalTrackingParameters tracking;
     tracking.enable_area_memory = true;
+    // TODO: Could we implement a goto cleanup for the error checking instead? and use the values that resurmts the zed operations?
     check(zed.enablePositionalTracking(tracking), "enable positional tracking");
 
     if (*config.onnx) {
@@ -126,6 +135,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     if (!frame || !zed_open) fail("capture requires an initialized camera and frame");
     const uint64_t started = now_ns();
     uint64_t retries = 0;
+    // TODO: M  AKE THIS CONFIG in a global member 
     sl::RuntimeParameters runtime;
     runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
     AuvFrame next{};
@@ -163,6 +173,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
           next.objects_len++;
       }
     }
+    next.tracking_ok = true;
     *frame = next;
     last_timestamp = next.timestamp;
     if (config.metrics)
@@ -175,6 +186,74 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     fail("unexpected capture exception");
   }
 }
+
+
+void auv_yield_until_reactive_frame(AuvReactiveFrame *frame) {
+  try {
+    if (!frame || !zed_open) fail("reactive capture requires an initialized camera and frame");
+    const uint64_t started = now_ns();
+    sl::RuntimeParameters runtime;
+    runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
+    AuvReactiveFrame next{};
+    next.quat.buf[3] = 1.0f;
+
+    for (;;) {
+      const auto error = zed.grab(runtime);
+      if (error == sl::ERROR_CODE::END_OF_SVOFILE_REACHED)
+        fail("recording finished; restart the checker for another run");
+      bool usable = false;
+      if (error == sl::ERROR_CODE::SUCCESS) {
+        next.timestamp = zed.getTimestamp(sl::TIME_REFERENCE::IMAGE).getNanoseconds();
+        usable = next.timestamp > last_reactive_timestamp;
+      }
+      if (usable) break;
+      if (now_ns() - started >= 5000000000ULL)
+        fail("no reactive frame for 5 seconds (grab or timestamp)");
+      const timespec delay{0, 10000000};
+      nanosleep(&delay, nullptr);
+    }
+
+    sl::SensorsData sensors_data;
+    if (zed.getSensorsData(sensors_data, sl::TIME_REFERENCE::IMAGE) == sl::ERROR_CODE::SUCCESS) {
+      next.accel.buf[0] = sensors_data.imu.linear_acceleration.x;
+      next.accel.buf[1] = sensors_data.imu.linear_acceleration.y;
+      next.accel.buf[2] = sensors_data.imu.linear_acceleration.z;
+      next.gyro.buf[0] = sensors_data.imu.angular_velocity.x;
+      next.gyro.buf[1] = sensors_data.imu.angular_velocity.y;
+      next.gyro.buf[2] = sensors_data.imu.angular_velocity.z;
+      const sl::Orientation q = sensors_data.imu.pose.getOrientation();
+      const float length = std::sqrt(q.ox * q.ox + q.oy * q.oy + q.oz * q.oz + q.ow * q.ow);
+      if (std::isfinite(length) && length >= 1e-6f) {
+        next.quat.buf[0] = q.ox / length;
+        next.quat.buf[1] = q.oy / length;
+        next.quat.buf[2] = q.oz / length;
+        next.quat.buf[3] = q.ow / length;
+      }
+    }
+
+    const sl::Resolution resolution = zed.getCameraInformation().camera_configuration.resolution;
+    next.image_width = static_cast<uint32_t>(resolution.width);
+    next.image_height = static_cast<uint32_t>(resolution.height);
+
+    if (detection_enabled) {
+      check(zed.retrieveCustomObjects(objects, object_params), "retrieve custom objects");
+      for (const auto &object : objects.object_list) {
+        if (next.object_len == AUV_FRAME_MAX_OBJECTS) break;
+        const int cls = map_class(config, object.raw_label);
+        if (copy_object2d(object, cls, next.objects2d[next.object_len]))
+          next.object_len++;
+      }
+    }
+
+    *frame = next;
+    last_reactive_timestamp = next.timestamp;
+  } catch (const std::exception &error) {
+    fail(error.what());
+  } catch (...) {
+    fail("unexpected reactive capture exception");
+  }
+}
+
 
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len) {
   // Motor output is not implemented
@@ -194,6 +273,7 @@ void auv_deinit(void) {
   }
   detection_enabled = false;
   last_timestamp = 0;
+  last_reactive_timestamp = 0;
   objects.object_list.clear();
 }
 
@@ -224,6 +304,10 @@ static void check_file(const char *path) {
 }
 
 static Config load_config() {
+
+
+
+  // TODO: Set all this configs a static global configurations 
   Config config{};
   config.onnx = env_or("AUV_ZED_ONNX");
   config.svo = env_or("AUV_ZED_SVO");
@@ -290,6 +374,22 @@ static bool copy_pose(const sl::Pose &source, MathPose &destination) {
   const double length = std::sqrt(length_squared);
   for (int i = 0; i < 4; i++)
     destination.quat.buf[i] = static_cast<float>(flip[i] * quaternion[i] / length);
+  return true;
+}
+
+static bool copy_object2d(const sl::ObjectData &source, int cls, Object2DYolo &destination) {
+  if (cls < 0 || source.id < 0 || source.bounding_box_2d.size() < 4) return false;
+  const auto &top_left = source.bounding_box_2d[0];
+  const auto &bottom_right = source.bounding_box_2d[2];
+
+  Object2DYolo result{};
+  result.top_left.x = top_left.x;
+  result.top_left.y = top_left.y;
+  result.bottom_right.x = bottom_right.x;
+  result.bottom_right.y = bottom_right.y;
+  result.id = static_cast<uint32_t>(source.id);
+  result.cls = static_cast<AuvObjectCls>(cls);
+  destination = result;
   return true;
 }
 

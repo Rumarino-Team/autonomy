@@ -48,6 +48,11 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
             "auv_yield_until_next_frame",
         ) orelse return error.MissingAuvYieldNextFrame,
 
+        .yieldUntilReactiveFrame = dynlib.lookup(
+            *const Auv.YieldUntilReactiveFrameFunc,
+            "auv_yield_until_reactive_frame",
+        ) orelse return error.MissingAuvYieldReactiveFrame,
+
         .setThrustorValues = dynlib.lookup(
             *const Auv.SetThrustorValuesFunc,
             "auv_set_thrustor_values",
