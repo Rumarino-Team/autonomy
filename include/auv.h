@@ -53,6 +53,8 @@ typedef struct {
   uint64_t timestamp;
   uint32_t image_width;
   uint32_t image_height;
+  float pressure_depth; /* meters below the surface from a pressure sensor, +down */
+  bool pressure_depth_ok;
 } AuvReactiveFrame;
 void auv_yield_until_reactive_frame(AuvReactiveFrame *frame);
 // Reactive Additions

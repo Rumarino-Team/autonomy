@@ -6,16 +6,19 @@ const controls = @import("../controls.zig");
 pub const ReactiveGains = struct {
     k_surge: f32 = 3.0,
     k_heave: f32 = 2.0,
-    k_yaw: f32 = 2.0,
+    k_yaw: f32 = 1.0,
     /// Constant yaw moment while searching for a box that is not in frame. +yaw turns right.
-    search_yaw: f32 = 0.5,
+    search_yaw: f32 = 0.1,
     center_deadband: f32 = 0.05,
+    /// Heave per meter of pressure-depth error while yaw-searching.
+    k_depth: f32 = 6.0,
 };
 
 /// IMU / 2D detection frame and tracked boxes.
 /// `tracked_id` selects the box the body command follows.
 /// `target_height` is a fraction of image height; null holds surge at zero while centering.
 /// `search_yaw` is a constant yaw moment used while no box is selected.
+/// `hold_depth` is latched from the first frame with a valid pressure depth once the search starts.
 pub const ReactiveState = struct {
     frame: Auv.ReactiveFrame = undefined,
     seen_objects2d: [Auv.ReactiveFrame.max_objects]Auv.Object2DYolo = undefined,
@@ -23,6 +26,7 @@ pub const ReactiveState = struct {
     tracked_id: ?u32 = null,
     target_height: ?f32 = null,
     search_yaw: ?f32 = null,
+    hold_depth: ?f32 = null,
 };
 
 pub const BoxMetrics = struct {
@@ -39,6 +43,7 @@ pub const Actuation = struct {
     gains: ReactiveGains,
     thrustor_saturate: f32,
     thrustor_output_scale: f32,
+    z_down: bool,
     log: bool = false,
 };
 
@@ -123,11 +128,18 @@ fn withinDeadband(err: f32, deadband: f32) f32 {
 }
 
 /// Body command [Fx, Fy, Fz, Mx, My, Mz]. Image error is already camera-relative.
-/// +Y is surge, +Z is up, +yaw turns right. A box below center (positive cy) dives.
-pub fn bodyCommand(state: *const ReactiveState, gains: ReactiveGains) math.Vector6f {
+/// +Y is surge, +yaw turns right. A box below center (positive cy) dives; `z_down`
+/// says whether body +Z is down (dive is +Fz) or up (dive is -Fz).
+pub fn bodyCommand(state: *const ReactiveState, gains: ReactiveGains, z_down: bool) math.Vector6f {
+    const dive_sign: f32 = if (z_down) 1 else -1;
     const id = state.tracked_id orelse {
         const yaw = state.search_yaw orelse return @splat(0);
-        return .{ 0, 0, 0, 0, 0, yaw };
+        // `pressure_depth` is +down, so a positive error means too shallow and the sub should dive.
+        const heave: f32 = if (state.hold_depth) |hold| blk: {
+            if (!state.frame.pressure_depth_ok) break :blk 0;
+            break :blk dive_sign * gains.k_depth * (hold - state.frame.pressure_depth);
+        } else 0;
+        return .{ 0, 0, heave, 0, 0, yaw };
     };
     const box = findFrameObject(state, id) orelse return @splat(0);
     if (state.frame.image_width == 0 or state.frame.image_height == 0) return @splat(0);
@@ -136,13 +148,16 @@ pub fn bodyCommand(state: *const ReactiveState, gains: ReactiveGains) math.Vecto
     const cx = withinDeadband(metrics.cx, gains.center_deadband);
     const cy = withinDeadband(metrics.cy, gains.center_deadband);
     const surge = if (state.target_height) |target| gains.k_surge * (target - metrics.height) else 0;
-    const heave = -gains.k_heave * cy;
+    const heave = dive_sign * gains.k_heave * cy;
     const yaw = gains.k_yaw * cx;
     return .{ 0, surge, heave, 0, 0, yaw };
 }
 
 pub fn step(state: *ReactiveState, act: Actuation) void {
-    const input = bodyCommand(state, act.gains);
+    if (state.search_yaw != null and state.hold_depth == null and state.frame.pressure_depth_ok) {
+        state.hold_depth = state.frame.pressure_depth;
+    }
+    const input = bodyCommand(state, act.gains, act.z_down);
     var thruster_buffer: [controls.max_thrusters]f32 = undefined;
     const thruster_values = controls.tamToThrusters(
         act.tam,
@@ -155,14 +170,30 @@ pub fn step(state: *ReactiveState, act: Actuation) void {
     if (act.log) {
         std.debug.print("\x1b[2J\x1b[H", .{});
         std.log.debug("reactive objects = {}", .{state.frame.object_len});
+        for (state.frame.objects2d[0..state.frame.object_len]) |object| {
+            std.log.debug(
+                "  id={} cls={s} box=({},{})-({},{})",
+                .{
+                    object.id,
+                    @tagName(object.cls),
+                    object.top_left.x,
+                    object.top_left.y,
+                    object.bottom_right.x,
+                    object.bottom_right.y,
+                },
+            );
+        }
         std.log.debug(
-            "image = {}x{} tracked_id = {?} target_height = {?} search_yaw = {?}",
+            "image = {}x{} tracked_id = {?} target_height = {?} search_yaw = {?} pressure_depth = {d:.2} (ok={}) hold_depth = {?d:.2}",
             .{
                 state.frame.image_width,
                 state.frame.image_height,
                 state.tracked_id,
                 state.target_height,
                 state.search_yaw,
+                state.frame.pressure_depth,
+                state.frame.pressure_depth_ok,
+                state.hold_depth,
             },
         );
         math.debug6f("\tinput   ", input);

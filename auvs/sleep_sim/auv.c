@@ -90,6 +90,8 @@ void auv_yield_until_reactive_frame(AuvReactiveFrame *frame) {
       .timestamp = timestamp,
       .image_width = 1280,
       .image_height = 720,
+      .pressure_depth = 0,
+      .pressure_depth_ok = true,
   };
 }
 

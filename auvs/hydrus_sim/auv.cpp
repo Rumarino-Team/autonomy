@@ -14,6 +14,7 @@
 #include "entities/Entity.h"
 #include "entities/MovingEntity.h"
 #include "entities/StaticEntity.h"
+#include "entities/forcefields/Ocean.h"
 #include "graphics/OpenGLDataStructs.h"
 #include "graphics/OpenGLPipeline.h"
 #include "sensors/Sensor.h"
@@ -143,7 +144,25 @@ uint32_t ClampPixel(sf::Scalar value, unsigned limit)
     return static_cast<uint32_t>(value);
 }
 
-// Stonefish cameras look along sensor +Z. Sensor +X is image right and sensor +Y is image down.
+const char* ObjectClsName(ObjectCls cls)
+{
+    switch(cls)
+    {
+        case ObjectCls::cube:
+            return "cube";
+        case ObjectCls::rect:
+            return "rect";
+        case ObjectCls::gate:
+            return "gate";
+    }
+    return "unknown";
+}
+
+// Same camera frame as detection_mocker: +X right, +Y down, +Z forward.
+// Stonefish looks along sensor +Z with +X to the right, but sensor +Y is up
+// when this camera is level (view up is -Y). Negate Y so image-down matches
+// the mocker. Corners behind the camera are dropped; the rest are clamped
+// into the image, which is how a partial gate still yields a box.
 bool ProjectAabb(
     const sf::Transform& camera_world,
     sf::Scalar fov_h_deg,
@@ -177,8 +196,10 @@ bool ProjectAabb(
         {
             for(sf::Scalar z : zs)
             {
-                const sf::Vector3 camera_point = world_to_camera * sf::Vector3(x, y, z);
-                if(camera_point.z() <= sf::Scalar(1e-4))
+                sf::Vector3 camera_point = world_to_camera * sf::Vector3(x, y, z);
+                camera_point.setY(-camera_point.y());
+                // detection_mocker range is 0.1 m to 50 m in front of the camera.
+                if(camera_point.z() <= sf::Scalar(0.1) || camera_point.z() >= sf::Scalar(50))
                     continue;
                 const sf::Scalar u = focal * camera_point.x() / camera_point.z() + sf::Scalar(res_x) * 0.5;
                 const sf::Scalar v = focal * camera_point.y() / camera_point.z() + sf::Scalar(res_y) * 0.5;
@@ -199,8 +220,6 @@ bool ProjectAabb(
         }
     }
     if(!any_in_front)
-        return false;
-    if(u_max < 0 || v_max < 0 || u_min >= sf::Scalar(res_x) || v_min >= sf::Scalar(res_y))
         return false;
 
     top_left.x = ClampPixel(u_min, res_x);
@@ -298,6 +317,7 @@ public:
         odometry = nullptr;
         have_odometry = false;
         imu = nullptr;
+        pressure = nullptr;
         camera = nullptr;
         for(unsigned int i = 0; sf::Sensor* sensor = getSensor(i); ++i)
         {
@@ -313,6 +333,10 @@ public:
                     && scalar->getNumOfChannels() >= 9)
             {
                 imu = scalar;
+            }
+            else if(scalar->getScalarSensorType() == sf::ScalarSensorType::PRESSURE && pressure == nullptr)
+            {
+                pressure = scalar;
             }
         }
         for(unsigned int i = 0; sf::Sensor* sensor = getSensor(i); ++i)
@@ -333,6 +357,11 @@ public:
             if(it == objectClasses.end())
                 continue;
             tracked_objects.push_back({entity, i, it->second});
+            std::println(
+                stdout,
+                "[hydrus_sim] tracking '{}' as {}",
+                entity->getName(),
+                ObjectClsName(it->second));
         }
 
         thrusters.clear();
@@ -361,7 +390,7 @@ public:
         AuvFrame frame{};
         frame.camera_pose = IdentityPose();
         frame.timestamp = static_cast<uint64_t>(getSimulationTime() * sf::Scalar(1e9));
-        frame.tracking_ok = true;
+        frame.tracking_ok = false;
 
         if(have_odometry)
         {
@@ -405,6 +434,16 @@ public:
         }
         frame.image_width = res_x;
         frame.image_height = res_y;
+        // Stonefish reports gauge pressure in Pa, so depth below the surface is P / (rho * g).
+        if(pressure != nullptr && getOcean() != nullptr)
+        {
+            const sf::Scalar rho_g = getOcean()->getLiquid().density * getGravity().getZ();
+            if(rho_g > 0)
+            {
+                frame.pressure_depth = static_cast<float>(pressure->getLastValue(0) / rho_g);
+                frame.pressure_depth_ok = true;
+            }
+        }
 
         for(const TrackedObject& tracked : tracked_objects)
         {
@@ -436,6 +475,7 @@ public:
     bool have_odometry = false;
     sf::ScalarSensor* odometry = nullptr;
     sf::ScalarSensor* imu = nullptr;
+    sf::ScalarSensor* pressure = nullptr;
     sf::Camera* camera = nullptr;
     std::vector<TrackedObject> tracked_objects;
     std::vector<sf::Thruster*> thrusters;

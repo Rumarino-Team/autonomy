@@ -87,6 +87,13 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     };
 }
 
+pub fn deinit(ctx: *MissionContext, gpa: std.mem.Allocator) void {
+    ctx.config_watcher.deinit(gpa);
+    ctx.config_loader.deinit(gpa);
+    ctx.auv_watcher.deinit(gpa);
+    ctx.auv_loader.deinit(gpa);
+}
+
 const linux = std.os.linux;
 pub fn fetchFrameAndUpdate(ctx: *MissionContext) void {
     var start: linux.timespec = undefined;
@@ -124,6 +131,7 @@ pub fn fetchReactiveFrameAndUpdate(ctx: *MissionContext) void {
         .gains = ctx.reactive_gains,
         .thrustor_saturate = ctx.thrustor_saturate,
         .thrustor_output_scale = ctx.thrustor_output_scale,
+        .z_down = ctx.config.z_down,
         .log = print_stuff and ctx.log_counter % ctx.log_freq_div == 0 and clear_print_stuff,
     });
     ctx.runHotReload();
@@ -234,7 +242,11 @@ fn reactiveYieldUntilYawFind(ctx: *MissionContext, cls: []const Auv.ObjectCls) *
     ctx.reactive.tracked_id = null;
     ctx.reactive.target_height = null;
     ctx.reactive.search_yaw = ctx.reactive_gains.search_yaw;
-    defer ctx.reactive.search_yaw = null;
+    ctx.reactive.hold_depth = null;
+    defer {
+        ctx.reactive.search_yaw = null;
+        ctx.reactive.hold_depth = null;
+    }
     while (true) {
         ctx.fetchReactiveFrameAndUpdate();
         const frame_object = reactive_nav.findFrameObjectWithCls(&ctx.reactive, cls) orelse continue;

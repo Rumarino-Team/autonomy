@@ -24,6 +24,7 @@
 #include <exception>
 #include <inttypes.h>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <sys/stat.h>
@@ -55,6 +56,9 @@ static bool zed_open = false;
 static bool detection_enabled = false;
 static uint64_t last_timestamp = 0;
 static uint64_t last_reactive_timestamp = 0;
+static std::optional<float> surface_pressure_hpa;
+static constexpr float kWaterDensity = 997.0f;
+static constexpr float kGravity = 9.80665f;
 
 static Config load_config();
 static int map_class(const Config &config, int label);
@@ -229,6 +233,14 @@ void auv_yield_until_reactive_frame(AuvReactiveFrame *frame) {
         next.quat.buf[2] = q.oz / length;
         next.quat.buf[3] = q.ow / length;
       }
+
+      // Barometer is absolute pressure in hPa. The first reading is taken as the surface.
+      const float pressure_hpa = sensors_data.barometer.pressure;
+      if (sensors_data.barometer.is_available && std::isfinite(pressure_hpa) && pressure_hpa > 0.0f) {
+        if (!surface_pressure_hpa) surface_pressure_hpa = pressure_hpa;
+        next.pressure_depth = (pressure_hpa - *surface_pressure_hpa) * 100.0f / (kWaterDensity * kGravity);
+        next.pressure_depth_ok = true;
+      }
     }
 
     const sl::Resolution resolution = zed.getCameraInformation().camera_configuration.resolution;
@@ -274,6 +286,7 @@ void auv_deinit(void) {
   detection_enabled = false;
   last_timestamp = 0;
   last_reactive_timestamp = 0;
+  surface_pressure_hpa.reset();
   objects.object_list.clear();
 }
 

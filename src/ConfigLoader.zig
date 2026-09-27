@@ -18,6 +18,8 @@ pub const Config = struct {
     ki: math.Vector6f,
     kd: math.Vector6f,
     tam: []math.Vector6f,
+    /// World and body +Z point down (Stonefish NED). False for Z-up (ZED RIGHT_HANDED_Z_UP_X_FWD).
+    z_down: bool = false,
 };
 
 pub fn init(gpa: std.mem.Allocator, config_path: []const u8) !MissionLoader {
@@ -28,6 +30,11 @@ pub fn init(gpa: std.mem.Allocator, config_path: []const u8) !MissionLoader {
         .pong = .init(try gpa.alloc(u8, 4098)),
         .reader_buf = undefined,
     };
+}
+
+pub fn deinit(loader: *MissionLoader, gpa: std.mem.Allocator) void {
+    gpa.free(loader.ping.buffer);
+    gpa.free(loader.pong.buffer);
 }
 
 pub fn load(loader: *MissionLoader, io: Io) !Config {

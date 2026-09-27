@@ -19,6 +19,10 @@ pub fn init(gpa: std.mem.Allocator, auv_path: []const u8) !AuvLoader {
     };
 }
 
+pub fn deinit(loader: *AuvLoader, gpa: std.mem.Allocator) void {
+    gpa.free(loader.auv_tmp_path.ptr[0..loader.auv_tmp_path.len :0]);
+}
+
 pub fn load(loader: *AuvLoader, io: Io) !Auv {
     const path = if (loader.use_tmp) loader.auv_tmp_path else loader.auv_path;
 

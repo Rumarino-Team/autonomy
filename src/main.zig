@@ -8,6 +8,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("args = {f}", .{args});
 
     var ctx: MissionContext = try .init(init.gpa, init.io, args);
+    defer ctx.deinit(init.gpa);
 
     ctx.fetchFrameAndUpdate();
 

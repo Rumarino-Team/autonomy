@@ -38,6 +38,9 @@ pub const ReactiveFrame = extern struct {
     timestamp: u64,
     image_width: u32,
     image_height: u32,
+    /// Meters below the surface from a pressure sensor, +down.
+    pressure_depth: f32,
+    pressure_depth_ok: bool,
 };
 
 pub const Frame = extern struct {
