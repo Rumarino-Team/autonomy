@@ -51,7 +51,7 @@ fn goThrough(ctx: *MissionContext, object: *const Auv.Object) void {
 }
 
 fn reactiveFallback(ctx: *MissionContext, cls: Auv.ObjectCls) void {
-    const box = ctx.reactiveYieldUntilFirstObjectWithCls(cls);
+    const box = ctx.reactiveYieldUntilYawFindCls(cls);
     ctx.reactiveYieldUntilCentered(box.id);
     ctx.reactiveYieldUntilHeight(box.id, REACTIVE_TARGET_HEIGHT);
 }
@@ -74,8 +74,8 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
     const HUGE_NUMBER: f32 = 10000000.0;
 
     var corner_pluss: [4]math.Vector3f = undefined;
-    var starting_corner: math.Vector2f = .{HUGE_NUMBER, HUGE_NUMBER};
-    var starting_i: usize = std.math.maxInt(usize);
+    var nearest_dist: f32 = HUGE_NUMBER;
+    var starting_i: usize = 0;
     const initial_sub_pos = ctx.global.frame.camera_pose.pos;
     for (square_corners, 0..) |square_corner, i| {
         const sub_pose = ctx.global.frame.camera_pose;
@@ -90,9 +90,10 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
             pos2d + rotated_corner_2d + math.normalize2f(rotated_corner_2d) * @as(math.Vector2f, @splat(DISTANCE_TO_CORNER));
         corner_pluss[i] = .{corner_plus[0], corner_plus[1], sub_pose.pos[2]};
 
-        if (math.length2f(corner_plus - sub2d) < math.length2f(starting_corner)) {
+        const dist = math.length2f(corner_plus - sub2d);
+        if (dist < nearest_dist) {
             starting_i = i;
-            starting_corner = corner_plus;
+            nearest_dist = dist;
         }
     }
 

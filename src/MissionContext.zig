@@ -70,7 +70,7 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
         .goal_dist_threshold = args.goal_dist_threshold,
         .close_enough = 1,
         .thrustor_saturate = 5,
-        .thrustor_output_scale = 5,
+        .thrustor_output_scale = 1,
 
         .log_counter = 0,
         .log_freq_div = 120,
@@ -207,6 +207,7 @@ pub fn globalYieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) 
 fn reactiveYieldUntilObject(ctx: *MissionContext, cls: []const Auv.ObjectCls, start: usize) *const Auv.Object2DYolo {
     ctx.reactive.tracked_id = null;
     ctx.reactive.target_height = null;
+    ctx.reactive.search_yaw = null;
     while (true) {
         if (reactive_nav.findObject(&ctx.reactive, cls, start)) |object| return object;
         ctx.fetchReactiveFrameAndUpdate();
@@ -227,6 +228,28 @@ pub fn reactiveYieldUntilNewObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectC
 
 pub fn reactiveYieldUntilNewObjectWithAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
     return ctx.reactiveYieldUntilObject(cls, ctx.reactive.seen_objects2d_len);
+}
+
+fn reactiveYieldUntilYawFind(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
+    ctx.reactive.tracked_id = null;
+    ctx.reactive.target_height = null;
+    ctx.reactive.search_yaw = ctx.reactive_gains.search_yaw;
+    defer ctx.reactive.search_yaw = null;
+    while (true) {
+        ctx.fetchReactiveFrameAndUpdate();
+        const frame_object = reactive_nav.findFrameObjectWithCls(&ctx.reactive, cls) orelse continue;
+        return reactive_nav.findSeenById(&ctx.reactive, frame_object.id) orelse continue;
+    }
+}
+
+/// Yaw in place until a box of `cls` is in the current camera frame.
+pub fn reactiveYieldUntilYawFindCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object2DYolo {
+    return ctx.reactiveYieldUntilYawFind(&.{cls});
+}
+
+/// Yaw in place until a box of any class in `cls` is in the current camera frame.
+pub fn reactiveYieldUntilYawFindAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
+    return ctx.reactiveYieldUntilYawFind(cls);
 }
 
 pub fn reactiveYieldUntilCentered(ctx: *MissionContext, id: u32) void {

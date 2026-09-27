@@ -77,7 +77,8 @@ pub fn pidStep(state: *GlobalState, act: Actuation) void {
 
     const rot = math.normalize4f(pose.quat);
     const forward = math.quaternionRotate(rot, .{ 0.0, 1.0, 0.0 });
-    _, _, const current_yaw = math.quaternionToEuler(rot);
+    // Nose is body +Y. Euler yaw is the heading of body +X, 90° off this axis.
+    const current_yaw = std.math.atan2(forward[1], forward[0]);
 
     const dir = math.Vector3f{ pose_err[0], pose_err[1], 0.0 };
     const xy_distance = math.length3f(dir);

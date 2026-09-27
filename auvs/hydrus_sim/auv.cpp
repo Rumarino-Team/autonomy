@@ -18,8 +18,11 @@
 #include "graphics/OpenGLPipeline.h"
 #include "sensors/Sensor.h"
 #include "sensors/ScalarSensor.h"
+#include "sensors/VisionSensor.h"
+#include "sensors/vision/Camera.h"
 
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -36,7 +39,7 @@ static std::filesystem::path dataPath = "auvs/hydrus_sim/data/";
 static std::string scenario_file = "scenarios/hydrus_env.scn";
 static constexpr sf::Scalar kStepsPerSecond = 360.0;
 static constexpr sf::Scalar kPhysicsDt = sf::Scalar(1) / kStepsPerSecond;
-static constexpr sf::Scalar kRealtimeFactorCap = 8.0;
+static constexpr sf::Scalar kRealtimeFactorCap = 1.0;
 static constexpr auto kMinRenderInterval = std::chrono::milliseconds(16);
 static constexpr bool kConsoleApp = false;
 
@@ -101,6 +104,110 @@ sf::Transform EntityWorldTransform(sf::Entity* entity)
         default:
             return sf::I4();
     }
+}
+
+constexpr sf::Scalar kPi = 3.14159265358979323846;
+
+void FillImu(sf::ScalarSensor* imu, AuvReactiveFrame& frame)
+{
+    frame.quat.buf[3] = 1.f;
+    if(imu == nullptr || imu->getNumOfChannels() < 9)
+        return;
+
+    const sf::Scalar roll = imu->getLastValue(0);
+    const sf::Scalar pitch = imu->getLastValue(1);
+    const sf::Scalar yaw = imu->getLastValue(2);
+    sf::Matrix3 basis;
+    basis.setEulerYPR(yaw, pitch, roll);
+    sf::Quaternion quat;
+    basis.getRotation(quat);
+    frame.quat.buf[0] = static_cast<float>(quat.x());
+    frame.quat.buf[1] = static_cast<float>(quat.y());
+    frame.quat.buf[2] = static_cast<float>(quat.z());
+    frame.quat.buf[3] = static_cast<float>(quat.w());
+
+    frame.gyro.buf[0] = static_cast<float>(imu->getLastValue(3));
+    frame.gyro.buf[1] = static_cast<float>(imu->getLastValue(4));
+    frame.gyro.buf[2] = static_cast<float>(imu->getLastValue(5));
+    frame.accel.buf[0] = static_cast<float>(imu->getLastValue(6));
+    frame.accel.buf[1] = static_cast<float>(imu->getLastValue(7));
+    frame.accel.buf[2] = static_cast<float>(imu->getLastValue(8));
+}
+
+uint32_t ClampPixel(sf::Scalar value, unsigned limit)
+{
+    if(value <= 0)
+        return 0;
+    if(value >= sf::Scalar(limit - 1))
+        return limit - 1;
+    return static_cast<uint32_t>(value);
+}
+
+// Stonefish cameras look along sensor +Z. Sensor +X is image right and sensor +Y is image down.
+bool ProjectAabb(
+    const sf::Transform& camera_world,
+    sf::Scalar fov_h_deg,
+    unsigned res_x,
+    unsigned res_y,
+    const sf::Vector3& aabb_min,
+    const sf::Vector3& aabb_max,
+    AuvPoint2u& top_left,
+    AuvPoint2u& bottom_right)
+{
+    if(res_x < 2 || res_y < 2 || fov_h_deg <= 0)
+        return false;
+
+    const sf::Scalar tan_half_h = std::tan(fov_h_deg * kPi / sf::Scalar(360));
+    if(tan_half_h <= 0)
+        return false;
+    const sf::Scalar focal = (sf::Scalar(res_x) * 0.5) / tan_half_h;
+    const sf::Transform world_to_camera = camera_world.inverse();
+    const sf::Scalar xs[2] = {aabb_min.x(), aabb_max.x()};
+    const sf::Scalar ys[2] = {aabb_min.y(), aabb_max.y()};
+    const sf::Scalar zs[2] = {aabb_min.z(), aabb_max.z()};
+
+    bool any_in_front = false;
+    sf::Scalar u_min = 0;
+    sf::Scalar u_max = 0;
+    sf::Scalar v_min = 0;
+    sf::Scalar v_max = 0;
+    for(sf::Scalar x : xs)
+    {
+        for(sf::Scalar y : ys)
+        {
+            for(sf::Scalar z : zs)
+            {
+                const sf::Vector3 camera_point = world_to_camera * sf::Vector3(x, y, z);
+                if(camera_point.z() <= sf::Scalar(1e-4))
+                    continue;
+                const sf::Scalar u = focal * camera_point.x() / camera_point.z() + sf::Scalar(res_x) * 0.5;
+                const sf::Scalar v = focal * camera_point.y() / camera_point.z() + sf::Scalar(res_y) * 0.5;
+                if(!any_in_front)
+                {
+                    u_min = u_max = u;
+                    v_min = v_max = v;
+                    any_in_front = true;
+                }
+                else
+                {
+                    u_min = std::min(u_min, u);
+                    u_max = std::max(u_max, u);
+                    v_min = std::min(v_min, v);
+                    v_max = std::max(v_max, v);
+                }
+            }
+        }
+    }
+    if(!any_in_front)
+        return false;
+    if(u_max < 0 || v_max < 0 || u_min >= sf::Scalar(res_x) || v_min >= sf::Scalar(res_y))
+        return false;
+
+    top_left.x = ClampPixel(u_min, res_x);
+    top_left.y = ClampPixel(v_min, res_y);
+    bottom_right.x = ClampPixel(u_max, res_x);
+    bottom_right.y = ClampPixel(v_max, res_y);
+    return bottom_right.x > top_left.x && bottom_right.y > top_left.y;
 }
 
 bool FillObjectBBox(sf::Entity* entity, MathBoundingBox& bbox)
@@ -190,17 +297,31 @@ public:
 
         odometry = nullptr;
         have_odometry = false;
+        imu = nullptr;
+        camera = nullptr;
         for(unsigned int i = 0; sf::Sensor* sensor = getSensor(i); ++i)
         {
             if(sensor->getType() != sf::SensorType::LINK)
                 continue;
             auto* scalar = static_cast<sf::ScalarSensor*>(sensor);
-            if(scalar->getScalarSensorType() == sf::ScalarSensorType::ODOM)
+            if(scalar->getScalarSensorType() == sf::ScalarSensorType::ODOM && odometry == nullptr)
             {
                 odometry = scalar;
                 have_odometry = odometry->getNumOfChannels() >= 10;
-                break;
             }
+            else if(scalar->getScalarSensorType() == sf::ScalarSensorType::IMU && imu == nullptr
+                    && scalar->getNumOfChannels() >= 9)
+            {
+                imu = scalar;
+            }
+        }
+        for(unsigned int i = 0; sf::Sensor* sensor = getSensor(i); ++i)
+        {
+            if(sensor->getType() != sf::SensorType::VISION || camera != nullptr)
+                continue;
+            auto* vision = static_cast<sf::VisionSensor*>(sensor);
+            if(vision->getVisionSensorType() == sf::VisionSensorType::COLOR_CAMERA)
+                camera = static_cast<sf::Camera*>(vision);
         }
 
         tracked_objects.clear();
@@ -240,6 +361,7 @@ public:
         AuvFrame frame{};
         frame.camera_pose = IdentityPose();
         frame.timestamp = static_cast<uint64_t>(getSimulationTime() * sf::Scalar(1e9));
+        frame.tracking_ok = true;
 
         if(have_odometry)
         {
@@ -265,6 +387,43 @@ public:
         return frame;
     }
 
+    AuvReactiveFrame getAuvReactiveFrame()
+    {
+        AuvReactiveFrame frame{};
+        frame.timestamp = static_cast<uint64_t>(getSimulationTime() * sf::Scalar(1e9));
+        FillImu(imu, frame);
+
+        unsigned res_x = 0;
+        unsigned res_y = 0;
+        sf::Scalar fov_h_deg = 0;
+        sf::Transform camera_world = sf::I4();
+        if(camera != nullptr)
+        {
+            camera->getResolution(res_x, res_y);
+            fov_h_deg = camera->getHorizontalFOV();
+            camera_world = camera->getSensorFrame();
+        }
+        frame.image_width = res_x;
+        frame.image_height = res_y;
+
+        for(const TrackedObject& tracked : tracked_objects)
+        {
+            if(frame.object_len == AUV_FRAME_MAX_OBJECTS || camera == nullptr)
+                break;
+            sf::Vector3 aabb_min;
+            sf::Vector3 aabb_max;
+            tracked.entity->getAABB(aabb_min, aabb_max);
+            Object2DYolo box{};
+            if(!ProjectAabb(camera_world, fov_h_deg, res_x, res_y, aabb_min, aabb_max, box.top_left, box.bottom_right))
+                continue;
+            box.id = tracked.id;
+            box.cls = static_cast<AuvObjectCls>(tracked.cls);
+            frame.objects2d[frame.object_len++] = box;
+        }
+
+        return frame;
+    }
+
 
     struct TrackedObject
     {
@@ -276,6 +435,8 @@ public:
     std::filesystem::path scenarioPath;
     bool have_odometry = false;
     sf::ScalarSensor* odometry = nullptr;
+    sf::ScalarSensor* imu = nullptr;
+    sf::Camera* camera = nullptr;
     std::vector<TrackedObject> tracked_objects;
     std::vector<sf::Thruster*> thrusters;
 };
@@ -460,10 +621,10 @@ void auv_init(void)
     }
 }
 
-void auv_yield_until_next_frame(AuvFrame* frame)
+static bool advance_simulation()
 {
     if(g_simulation_context == nullptr)
-        return;
+        return false;
 
     g_simulation_context->sim->StepSimulation(kPhysicsDt);
     if(g_simulation_context->graphical != nullptr)
@@ -479,21 +640,23 @@ void auv_yield_until_next_frame(AuvFrame* frame)
     {
         std::println(stderr, "[hydrus_sim] simulation finished; restart for another run");
         auv_deinit();
-        return;
+        return false;
     }
+    return true;
+}
+
+void auv_yield_until_next_frame(AuvFrame* frame)
+{
+    if(!advance_simulation())
+        return;
     *frame = g_simulation_context->sim->getAuvFrame();
 }
 
 void auv_yield_until_reactive_frame(AuvReactiveFrame* frame)
 {
-    AuvReactiveFrame next{};
-    next.quat.buf[3] = 1.0f;
-    next.object_len = 0;
-    next.image_width = 1280;
-    next.image_height = 720;
-    const auto now = std::chrono::steady_clock::now().time_since_epoch();
-    next.timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
-    *frame = next;
+    if(!advance_simulation())
+        return;
+    *frame = g_simulation_context->sim->getAuvReactiveFrame();
 }
 
 void auv_set_thrustor_values(const float* thrustor_values, uint8_t thrustor_values_len)
