@@ -5,38 +5,63 @@ const MissionArgs = @import("../MissionArgs.zig");
 const Auv = @import("../Auv.zig");
 
 pub fn mission(ctx: *MissionContext) void {
-    const gate_object = ctx.yieldUntilFirstObjectWithCls(.gate);
+    const gate_object = ctx.globalYieldUntilFirstObjectWithCls(.gate);
     goThrough(ctx, gate_object);
 
-    const cube_or_rect_object = ctx.yieldUntilFirstObjectWithAnyCls(&.{.cube, .rect});
+    const cube_or_rect_object = ctx.globalYieldUntilFirstObjectWithAnyCls(&.{ .cube, .rect });
     goAround(ctx, cube_or_rect_object);
 }
 
-const FAR_ENOUGH: f64 = 2.0;
-const OVERSHOOT: f64 = 2.0;
+const FAR_ENOUGH: f32 = 2.0;
+const OVERSHOOT: f32 = 2.0;
+
+fn reachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) !void {
+    return ctx.globalYieldUntilReachGoal(goal_pos);
+}
+
+fn approachDirection(ctx: *MissionContext, object: *const Auv.Object) math.Vector2f {
+    const object_xy = math.xy(object.bbox.pose.pos);
+    const sub_xy = math.xy(ctx.global.frame.camera_pose.pos);
+    return math.normalize2f(object_xy - sub_xy);
+}
+
+/// `FAR_ENOUGH` meters before the object, at the object's depth.
+fn pointInFront(ctx: *MissionContext, object: *const Auv.Object) math.Vector3f {
+    const object_pos = object.bbox.pose.pos;
+    const before_xy = math.xy(object_pos) - approachDirection(ctx, object) * @as(math.Vector2f, @splat(FAR_ENOUGH));
+    return .{ before_xy[0], before_xy[1], object_pos[2] };
+}
+
+/// `OVERSHOOT` meters past the object, at the object's depth.
+fn overshoot(ctx: *MissionContext, object: *const Auv.Object) math.Vector3f {
+    const object_pos = object.bbox.pose.pos;
+    const past_xy = math.xy(object_pos) + approachDirection(ctx, object) * @as(math.Vector2f, @splat(OVERSHOOT));
+    return .{ past_xy[0], past_xy[1], object_pos[2] };
+}
 
 fn goThrough(ctx: *MissionContext, object: *const Auv.Object) void {
-    const sub_pose = ctx.global.frame.camera_pose;
+    reachGoal(ctx, pointInFront(ctx, object)) catch {
+        reactiveFallback(ctx, .gate);
+        return;
+    };
+    reachGoal(ctx, overshoot(ctx, object)) catch {
+        reactiveFallback(ctx, .gate);
+    };
+}
 
-    const object_pos = object.bbox.pose.pos;
-    const object_pos_2d = math.xy(object_pos);
-    const sub_pos_2d = math.xy(sub_pose.pos);
+fn reactiveFallback(ctx: *MissionContext, cls: Auv.ObjectCls) void {
+    const box = findObject2d(ctx, cls) orelse {
+        std.log.err("tracking lost and no 2D {s} is in the reactive frame", .{@tagName(cls)});
+        return;
+    };
+    std.log.warn("tracking lost; holding on 2D {s} id {}", .{ @tagName(cls), box.id });
+}
 
-    const direction_2d = math.normalize2f(object_pos_2d - sub_pos_2d);
-
-    const before_2d = object_pos_2d - direction_2d * @as(math.Vector2f, @splat(FAR_ENOUGH));
-    const before: math.Vector3f = .{before_2d[0], before_2d[1], object_pos[2]};
-
-    std.log.info("before object_pos {any}", .{object_pos_2d});
-    std.log.info("before sub_pos {any}", .{sub_pos_2d});
-    std.log.info("before {any}", .{before});
-
-    ctx.yieldUntilReachGoal(before);
-
-    const overshoot_2d = object_pos_2d + direction_2d * @as(math.Vector2f, @splat(OVERSHOOT));
-    const overshoot: math.Vector3f = .{overshoot_2d[0], overshoot_2d[1], object_pos[2]};
-
-    ctx.yieldUntilReachGoal(overshoot);
+fn findObject2d(ctx: *MissionContext, cls: Auv.ObjectCls) ?*const Auv.Object2DYolo {
+    for (ctx.reactive.frame.objects2d[0..ctx.reactive.frame.object_len]) |*obj| {
+        if (obj.cls == cls) return obj;
+    }
+    return null;
 }
 
 fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
@@ -80,7 +105,7 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
     }
 
     for (0..corner_pluss.len) |i| {
-        ctx.yieldUntilReachGoal(corner_pluss[(starting_i + i) % corner_pluss.len]);
+        reachGoal(ctx, corner_pluss[(starting_i + i) % corner_pluss.len]) catch return;
     }
-    ctx.yieldUntilReachGoal(initial_sub_pos);
+    reachGoal(ctx, initial_sub_pos) catch return;
 }

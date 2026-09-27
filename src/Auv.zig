@@ -42,6 +42,7 @@ pub const Frame = extern struct {
     objects_len: u8,
     camera_pose: math.Pose,
     timestamp: u64,
+    tracking_ok: bool
 };
 
 pub const InitFunc = fn () callconv(.c) void;

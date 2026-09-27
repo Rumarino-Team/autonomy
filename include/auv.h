@@ -1,6 +1,7 @@
 #ifndef AUV_H
 #define AUV_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "math.h"
 
@@ -21,6 +22,7 @@ typedef struct {
   uint8_t objects_len;
   MathPose camera_pose;
   uint64_t timestamp;
+  bool tracking_ok;
 } AuvFrame;
 
 

@@ -54,6 +54,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
       .quat = {0, 0, 0, 1},
   };
   frame->timestamp = timestamp;
+  frame->tracking_ok = true;
 }
 
 void auv_set_thrustor_values(

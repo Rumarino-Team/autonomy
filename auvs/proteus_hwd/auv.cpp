@@ -101,11 +101,6 @@ void auv_init(void) {
     params.camera_resolution = config.resolution;
     params.camera_fps = config.fps;
     params.sdk_gpu_id = 0;
-    // 
-    //
-
-
-    object_params.object_detection_properties.
 
     if (*config.svo) params.input.setFromSVOFile(config.svo);
 
@@ -183,6 +178,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
           next.objects_len++;
       }
     }
+    next.tracking_ok = true;
     *frame = next;
     last_timestamp = next.timestamp;
     if (config.metrics)
