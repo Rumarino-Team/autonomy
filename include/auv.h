@@ -51,6 +51,8 @@ typedef struct {
   Object2DYolo objects2d[AUV_FRAME_MAX_OBJECTS];
   uint8_t object_len;
   uint64_t timestamp;
+  uint32_t image_width;
+  uint32_t image_height;
 } AuvReactiveFrame;
 void auv_yield_until_reactive_frame(AuvReactiveFrame *frame);
 // Reactive Additions
@@ -70,6 +72,7 @@ void auv_deinit(void);
 
 using AuvInitFunc = decltype(auv_init);
 using AuvYieldUntilNextFrameFunc = decltype(auv_yield_until_next_frame);
+using AuvYieldUntilReactiveFrameFunc = decltype(auv_yield_until_reactive_frame);
 using AuvSetThrustorsInputFunc = decltype(auv_set_thrustor_values);
 using AuvDeinitFunc = decltype(auv_deinit);
 
@@ -77,6 +80,7 @@ using AuvDeinitFunc = decltype(auv_deinit);
 
 typedef typeof(auv_init) AuvInitFunc;
 typedef typeof(auv_yield_until_next_frame) AuvYieldUntilNextFrameFunc;
+typedef typeof(auv_yield_until_reactive_frame) AuvYieldUntilReactiveFrameFunc;
 typedef typeof(auv_set_thrustor_values) AuvSetThrustorsInputFunc;
 typedef typeof(auv_deinit) AuvDeinitFunc;
 

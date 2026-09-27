@@ -60,8 +60,7 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
 
     var global_state: global_nav.GlobalState = .{};
     global_nav.initController(&global_state, config);
-    var reactive_state: reactive_nav.ReactiveState = .{};
-    reactive_nav.initController(&reactive_state, config);
+    const reactive_state: reactive_nav.ReactiveState = .{};
 
     return .{
         .global = global_state,
@@ -113,6 +112,30 @@ pub fn fetchFrameAndUpdate(ctx: *MissionContext) void {
     ctx.log_counter +%= 1;
 }
 
+pub fn fetchReactiveFrameAndUpdate(ctx: *MissionContext) void {
+    var start: linux.timespec = undefined;
+    var end: linux.timespec = undefined;
+    ctx.auv.yieldUntilReactiveFrame(&ctx.reactive.frame);
+    _ = linux.clock_gettime(.MONOTONIC, &start);
+    reactive_nav.updateSeenObjects(&ctx.reactive);
+    reactive_nav.step(&ctx.reactive, .{
+        .auv = &ctx.auv,
+        .tam = ctx.config.tam,
+        .gains = ctx.reactive_gains,
+        .thrustor_saturate = ctx.thrustor_saturate,
+        .thrustor_output_scale = ctx.thrustor_output_scale,
+        .log = print_stuff and ctx.log_counter % ctx.log_freq_div == 0 and clear_print_stuff,
+    });
+    ctx.runHotReload();
+
+    _ = linux.clock_gettime(.MONOTONIC, &end);
+    const ns = (end.sec - start.sec) * 1000000000 + (end.nsec - start.nsec);
+    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+        std.log.debug("reactive done in {} us\n", .{@divTrunc(ns, 1000)});
+    }
+    ctx.log_counter +%= 1;
+}
+
 fn runHotReload(ctx: *MissionContext) void {
     if (ctx.config_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
@@ -123,7 +146,6 @@ fn runHotReload(ctx: *MissionContext) void {
             std.log.debug("{any}", .{config});
             ctx.config = config;
             global_nav.syncControllerGains(&ctx.global, config);
-            reactive_nav.syncControllerGains(&ctx.reactive, config);
         } else |err| {
             std.log.err("failed to reload config: {s}/{s}", .{ ctx.config_watcher.dir, ctx.config_watcher.name });
             std.log.err("{s}", .{@errorName(err)});
@@ -179,5 +201,52 @@ pub fn globalYieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) 
         ctx.fetchFrameAndUpdate();
         if (!ctx.global.frame.tracking_ok) return error.TrackingLost;
         if (global_nav.cameraWithin(&ctx.global, goal_pos, ctx.goal_dist_threshold)) return;
+    }
+}
+
+fn reactiveYieldUntilObject(ctx: *MissionContext, cls: []const Auv.ObjectCls, start: usize) *const Auv.Object2DYolo {
+    ctx.reactive.tracked_id = null;
+    ctx.reactive.target_height = null;
+    while (true) {
+        if (reactive_nav.findObject(&ctx.reactive, cls, start)) |object| return object;
+        ctx.fetchReactiveFrameAndUpdate();
+    }
+}
+
+pub fn reactiveYieldUntilFirstObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object2DYolo {
+    return ctx.reactiveYieldUntilObject(&.{cls}, 0);
+}
+
+pub fn reactiveYieldUntilFirstObjectWithAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
+    return ctx.reactiveYieldUntilObject(cls, 0);
+}
+
+pub fn reactiveYieldUntilNewObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object2DYolo {
+    return ctx.reactiveYieldUntilObject(&.{cls}, ctx.reactive.seen_objects2d_len);
+}
+
+pub fn reactiveYieldUntilNewObjectWithAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
+    return ctx.reactiveYieldUntilObject(cls, ctx.reactive.seen_objects2d_len);
+}
+
+pub fn reactiveYieldUntilCentered(ctx: *MissionContext, id: u32) void {
+    ctx.reactive.tracked_id = id;
+    ctx.reactive.target_height = null;
+    while (true) {
+        ctx.fetchReactiveFrameAndUpdate();
+        if (reactive_nav.findFrameObject(&ctx.reactive, id)) |box| {
+            if (reactive_nav.isCentered(&ctx.reactive, box, ctx.reactive_gains.center_deadband)) return;
+        }
+    }
+}
+
+pub fn reactiveYieldUntilHeight(ctx: *MissionContext, id: u32, target_height: f32) void {
+    ctx.reactive.tracked_id = id;
+    ctx.reactive.target_height = target_height;
+    while (true) {
+        ctx.fetchReactiveFrameAndUpdate();
+        if (reactive_nav.findFrameObject(&ctx.reactive, id)) |box| {
+            if (reactive_nav.heightReached(&ctx.reactive, box, target_height)) return;
+        }
     }
 }

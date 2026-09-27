@@ -54,18 +54,13 @@ static Config config;
 static bool zed_open = false;
 static bool detection_enabled = false;
 static uint64_t last_timestamp = 0;
-
-
-
-// Reactive Configuration
-struct timespec reactive_sleeping_time = {0, 100000};
-
-
+static uint64_t last_reactive_timestamp = 0;
 
 static Config load_config();
 static int map_class(const Config &config, int label);
 static bool copy_pose(const sl::Pose &source, MathPose &destination);
 static bool copy_object(const sl::ObjectData &source, int cls, AuvObject &destination);
+static bool copy_object2d(const sl::ObjectData &source, int cls, Object2DYolo &destination);
 
 [[noreturn]] static void fail(const char *message) {
   std::fprintf(stderr, "[zed] %s\n", message);
@@ -193,78 +188,70 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
 }
 
 
-void  auv_yield_until_reactive_frame(AuvReactiveFrame *frame){
+void auv_yield_until_reactive_frame(AuvReactiveFrame *frame) {
+  try {
+    if (!frame || !zed_open) fail("reactive capture requires an initialized camera and frame");
+    const uint64_t started = now_ns();
+    sl::RuntimeParameters runtime;
+    runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
+    AuvReactiveFrame next{};
+    next.quat.buf[3] = 1.0f;
 
-  if(!zed_open) {
-     std::fprintf(stderr, "Camera not opened when running reactive frames");
-     return;
-  }
-  if (detection_enabled){
-    std::fprintf(stderr, "Detection is not enabled");
-    return;
-  }
-
-  sl::SensorsData sensors_data;
-  sl::ERROR_CODE r = zed.getSensorsData(sensors_data, sl::TIME_REFERENCE::CURRENT);
-  if (r <= sl::ERROR_CODE::SUCCESS) {
-    frame->accel.buf[0] = sensors_data.imu.linear_acceleration.x;    
-    frame->accel.buf[1] = sensors_data.imu.linear_acceleration.y;    
-    frame->accel.buf[2] = sensors_data.imu.linear_acceleration.z; 
-
-
-    frame->gyro.buf[0] = sensors_data.imu.angular_velocity.x;
-    frame->gyro.buf[1] = sensors_data.imu.angular_velocity.y;
-    frame->gyro.buf[2] = sensors_data.imu.angular_velocity.z;
-
-    // Dont know if there a difference between the linear acceleration and covariance diagonal;
-    // frame->accel.buf[0] = sensors_data.imu.linear_acceleration_covariance.r00;    
-    // frame->accel.buf[1] = sensors_data.imu.linear_acceleration_covariance.r11;    
-    // frame->accel.buf[2] = sensors_data.imu.linear_acceleration_covariance.r22;  
-
-    
-    zed.retrieveCustomObjects(objects, object_params);
-    for(size_t i = 0; i < objects.object_list.size(); i++){
-
-      if (frame->object_len >= AUV_FRAME_MAX_OBJECTS){
-        break;
+    for (;;) {
+      const auto error = zed.grab(runtime);
+      if (error == sl::ERROR_CODE::END_OF_SVOFILE_REACHED)
+        fail("recording finished; restart the checker for another run");
+      bool usable = false;
+      if (error == sl::ERROR_CODE::SUCCESS) {
+        next.timestamp = zed.getTimestamp(sl::TIME_REFERENCE::IMAGE).getNanoseconds();
+        usable = next.timestamp > last_reactive_timestamp;
       }
-
-      const auto bbox =  objects.object_list[i].bounding_box_2d;
-
-      Object2DYolo &out = frame->objects2d[frame->object_len];
-      out.top_left.x = bbox[0].x;
-      out.top_left.y = bbox[0].y;
-      out.bottom_right.x = bbox[2].x;
-      out.bottom_right.y = bbox[2].y;
-      out.id = static_cast<uint32_t>(objects.object_list[i].id);
-      out.cls = static_cast<AuvObjectCls>(objects.object_list[i].raw_label);
-      frame->object_len++;
-
+      if (usable) break;
+      if (now_ns() - started >= 5000000000ULL)
+        fail("no reactive frame for 5 seconds (grab or timestamp)");
+      const timespec delay{0, 10000000};
+      nanosleep(&delay, nullptr);
     }
 
-
-
-    const sl::Orientation q = sensors_data.imu.pose.getOrientation();    
-    const float length = std::sqrt(q.ox * q.ox + q.oy * q.oy + q.oz * q.oz + q.ow * q.ow);
-    if (length < 1e-6f || !std::isfinite(length)) {
-      frame->quat.buf[0] = 0.0f;
-      frame->quat.buf[1] = 0.0f;
-      frame->quat.buf[2] = 0.0f;
-      frame->quat.buf[3] = 1.0f;
-    } else {
-      frame->quat.buf[0] = q.ox / length;
-      frame->quat.buf[1] = q.oy / length;
-      frame->quat.buf[2] = q.oz / length;
-      frame->quat.buf[3] = q.ow / length;
+    sl::SensorsData sensors_data;
+    if (zed.getSensorsData(sensors_data, sl::TIME_REFERENCE::IMAGE) == sl::ERROR_CODE::SUCCESS) {
+      next.accel.buf[0] = sensors_data.imu.linear_acceleration.x;
+      next.accel.buf[1] = sensors_data.imu.linear_acceleration.y;
+      next.accel.buf[2] = sensors_data.imu.linear_acceleration.z;
+      next.gyro.buf[0] = sensors_data.imu.angular_velocity.x;
+      next.gyro.buf[1] = sensors_data.imu.angular_velocity.y;
+      next.gyro.buf[2] = sensors_data.imu.angular_velocity.z;
+      const sl::Orientation q = sensors_data.imu.pose.getOrientation();
+      const float length = std::sqrt(q.ox * q.ox + q.oy * q.oy + q.oz * q.oz + q.ow * q.ow);
+      if (std::isfinite(length) && length >= 1e-6f) {
+        next.quat.buf[0] = q.ox / length;
+        next.quat.buf[1] = q.oy / length;
+        next.quat.buf[2] = q.oz / length;
+        next.quat.buf[3] = q.ow / length;
+      }
     }
+
+    const sl::Resolution resolution = zed.getCameraInformation().camera_configuration.resolution;
+    next.image_width = static_cast<uint32_t>(resolution.width);
+    next.image_height = static_cast<uint32_t>(resolution.height);
+
+    if (detection_enabled) {
+      check(zed.retrieveCustomObjects(objects, object_params), "retrieve custom objects");
+      for (const auto &object : objects.object_list) {
+        if (next.object_len == AUV_FRAME_MAX_OBJECTS) break;
+        const int cls = map_class(config, object.raw_label);
+        if (copy_object2d(object, cls, next.objects2d[next.object_len]))
+          next.object_len++;
+      }
     }
 
-
-  else{
-      std::cout << "{getSensorsData} Error : " << (int)r << std::endl;
+    *frame = next;
+    last_reactive_timestamp = next.timestamp;
+  } catch (const std::exception &error) {
+    fail(error.what());
+  } catch (...) {
+    fail("unexpected reactive capture exception");
   }
-  nanosleep(&reactive_sleeping_time, NULL);
-
 }
 
 
@@ -286,6 +273,7 @@ void auv_deinit(void) {
   }
   detection_enabled = false;
   last_timestamp = 0;
+  last_reactive_timestamp = 0;
   objects.object_list.clear();
 }
 
@@ -386,6 +374,22 @@ static bool copy_pose(const sl::Pose &source, MathPose &destination) {
   const double length = std::sqrt(length_squared);
   for (int i = 0; i < 4; i++)
     destination.quat.buf[i] = static_cast<float>(flip[i] * quaternion[i] / length);
+  return true;
+}
+
+static bool copy_object2d(const sl::ObjectData &source, int cls, Object2DYolo &destination) {
+  if (cls < 0 || source.id < 0 || source.bounding_box_2d.size() < 4) return false;
+  const auto &top_left = source.bounding_box_2d[0];
+  const auto &bottom_right = source.bounding_box_2d[2];
+
+  Object2DYolo result{};
+  result.top_left.x = top_left.x;
+  result.top_left.y = top_left.y;
+  result.bottom_right.x = bottom_right.x;
+  result.bottom_right.y = bottom_right.y;
+  result.id = static_cast<uint32_t>(source.id);
+  result.cls = static_cast<AuvObjectCls>(cls);
+  destination = result;
   return true;
 }
 

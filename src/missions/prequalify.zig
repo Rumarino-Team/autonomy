@@ -14,6 +14,7 @@ pub fn mission(ctx: *MissionContext) void {
 
 const FAR_ENOUGH: f32 = 2.0;
 const OVERSHOOT: f32 = 2.0;
+const REACTIVE_TARGET_HEIGHT: f32 = 0.4;
 
 fn reachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) !void {
     return ctx.globalYieldUntilReachGoal(goal_pos);
@@ -50,18 +51,9 @@ fn goThrough(ctx: *MissionContext, object: *const Auv.Object) void {
 }
 
 fn reactiveFallback(ctx: *MissionContext, cls: Auv.ObjectCls) void {
-    const box = findObject2d(ctx, cls) orelse {
-        std.log.err("tracking lost and no 2D {s} is in the reactive frame", .{@tagName(cls)});
-        return;
-    };
-    std.log.warn("tracking lost; holding on 2D {s} id {}", .{ @tagName(cls), box.id });
-}
-
-fn findObject2d(ctx: *MissionContext, cls: Auv.ObjectCls) ?*const Auv.Object2DYolo {
-    for (ctx.reactive.frame.objects2d[0..ctx.reactive.frame.object_len]) |*obj| {
-        if (obj.cls == cls) return obj;
-    }
-    return null;
+    const box = ctx.reactiveYieldUntilFirstObjectWithCls(cls);
+    ctx.reactiveYieldUntilCentered(box.id);
+    ctx.reactiveYieldUntilHeight(box.id, REACTIVE_TARGET_HEIGHT);
 }
 
 fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
