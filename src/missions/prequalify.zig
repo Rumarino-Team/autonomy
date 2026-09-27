@@ -16,7 +16,7 @@ const FAR_ENOUGH: f64 = 2.0;
 const OVERSHOOT: f64 = 2.0;
 
 fn goThrough(ctx: *MissionContext, object: *const Auv.Object) void {
-    const sub_pose = ctx.frame.camera_pose;
+    const sub_pose = ctx.global.frame.camera_pose;
 
     const object_pos = object.bbox.pose.pos;
     const object_pos_2d = math.xy(object_pos);
@@ -59,9 +59,9 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
     var corner_pluss: [4]math.Vector3f = undefined;
     var starting_corner: math.Vector2f = .{HUGE_NUMBER, HUGE_NUMBER};
     var starting_i: usize = std.math.maxInt(usize);
-    const initial_sub_pos = ctx.frame.camera_pose.pos;
+    const initial_sub_pos = ctx.global.frame.camera_pose.pos;
     for (square_corners, 0..) |square_corner, i| {
-        const sub_pose = ctx.frame.camera_pose;
+        const sub_pose = ctx.global.frame.camera_pose;
         const rot_unit = math.normalize4f(object_rot);
         const actual_corner_2d = square_corner * math.xy(object.bbox.size);
         const actual_corner: math.Vector3f = .{actual_corner_2d[0], actual_corner_2d[1], 0};

@@ -13,6 +13,8 @@
 //AUV_ZED_METRICS     1 to print per frame timing rows on stderr
 
 #include "../../include/auv.h"
+#include <cstddef>
+#include <ctime>
 #include <sl/Camera.hpp>
 #include <algorithm>
 #include <charconv>
@@ -53,6 +55,13 @@ static bool zed_open = false;
 static bool detection_enabled = false;
 static uint64_t last_timestamp = 0;
 
+
+
+// Reactive Configuration
+struct timespec reactive_sleeping_time = {0, 100000};
+
+
+
 static Config load_config();
 static int map_class(const Config &config, int label);
 static bool copy_pose(const sl::Pose &source, MathPose &destination);
@@ -82,6 +91,9 @@ void auv_init(void) {
   try {
     auv_deinit();
     config = load_config();
+
+
+    //TODO: Make this config global parameters
     sl::InitParameters params;
     params.coordinate_units = sl::UNIT::METER;
     params.coordinate_system = sl::COORDINATE_SYSTEM::RIGHT_HANDED_Z_UP_X_FWD;
@@ -89,12 +101,19 @@ void auv_init(void) {
     params.camera_resolution = config.resolution;
     params.camera_fps = config.fps;
     params.sdk_gpu_id = 0;
+    // 
+    //
+
+
+    object_params.object_detection_properties.
+
     if (*config.svo) params.input.setFromSVOFile(config.svo);
 
     check(zed.open(params), "open camera");
     zed_open = true;
     sl::PositionalTrackingParameters tracking;
     tracking.enable_area_memory = true;
+    // TODO: Could we implement a goto cleanup for the error checking instead? and use the values that resurmts the zed operations?
     check(zed.enablePositionalTracking(tracking), "enable positional tracking");
 
     if (*config.onnx) {
@@ -126,6 +145,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     if (!frame || !zed_open) fail("capture requires an initialized camera and frame");
     const uint64_t started = now_ns();
     uint64_t retries = 0;
+    // TODO: M  AKE THIS CONFIG in a global member 
     sl::RuntimeParameters runtime;
     runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
     AuvFrame next{};
@@ -176,6 +196,82 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
   }
 }
 
+
+void  auv_yield_until_reactive_frame(AuvReactiveFrame *frame){
+
+  if(!zed_open) {
+     std::fprintf(stderr, "Camera not opened when running reactive frames");
+     return;
+  }
+  if (detection_enabled){
+    std::fprintf(stderr, "Detection is not enabled");
+    return;
+  }
+
+  sl::SensorsData sensors_data;
+  sl::ERROR_CODE r = zed.getSensorsData(sensors_data, sl::TIME_REFERENCE::CURRENT);
+  if (r <= sl::ERROR_CODE::SUCCESS) {
+    frame->accel.buf[0] = sensors_data.imu.linear_acceleration.x;    
+    frame->accel.buf[1] = sensors_data.imu.linear_acceleration.y;    
+    frame->accel.buf[2] = sensors_data.imu.linear_acceleration.z; 
+
+
+    frame->gyro.buf[0] = sensors_data.imu.angular_velocity.x;
+    frame->gyro.buf[1] = sensors_data.imu.angular_velocity.y;
+    frame->gyro.buf[2] = sensors_data.imu.angular_velocity.z;
+
+    // Dont know if there a difference between the linear acceleration and covariance diagonal;
+    // frame->accel.buf[0] = sensors_data.imu.linear_acceleration_covariance.r00;    
+    // frame->accel.buf[1] = sensors_data.imu.linear_acceleration_covariance.r11;    
+    // frame->accel.buf[2] = sensors_data.imu.linear_acceleration_covariance.r22;  
+
+    
+    zed.retrieveCustomObjects(objects, object_params);
+    for(size_t i = 0; i < objects.object_list.size(); i++){
+
+      if (frame->object_len >= AUV_FRAME_MAX_OBJECTS){
+        break;
+      }
+
+      const auto bbox =  objects.object_list[i].bounding_box_2d;
+
+      Object2DYolo &out = frame->objects2d[frame->object_len];
+      out.top_left.x = bbox[0].x;
+      out.top_left.y = bbox[0].y;
+      out.bottom_right.x = bbox[2].x;
+      out.bottom_right.y = bbox[2].y;
+      out.id = static_cast<uint32_t>(objects.object_list[i].id);
+      out.cls = static_cast<AuvObjectCls>(objects.object_list[i].raw_label);
+      frame->object_len++;
+
+    }
+
+
+
+    const sl::Orientation q = sensors_data.imu.pose.getOrientation();    
+    const float length = std::sqrt(q.ox * q.ox + q.oy * q.oy + q.oz * q.oz + q.ow * q.ow);
+    if (length < 1e-6f || !std::isfinite(length)) {
+      frame->quat.buf[0] = 0.0f;
+      frame->quat.buf[1] = 0.0f;
+      frame->quat.buf[2] = 0.0f;
+      frame->quat.buf[3] = 1.0f;
+    } else {
+      frame->quat.buf[0] = q.ox / length;
+      frame->quat.buf[1] = q.oy / length;
+      frame->quat.buf[2] = q.oz / length;
+      frame->quat.buf[3] = q.ow / length;
+    }
+    }
+
+
+  else{
+      std::cout << "{getSensorsData} Error : " << (int)r << std::endl;
+  }
+  nanosleep(&reactive_sleeping_time, NULL);
+
+}
+
+
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len) {
   // Motor output is not implemented
   (void)thrustor_values;
@@ -224,6 +320,10 @@ static void check_file(const char *path) {
 }
 
 static Config load_config() {
+
+
+
+  // TODO: Set all this configs a static global configurations 
   Config config{};
   config.onnx = env_or("AUV_ZED_ONNX");
   config.svo = env_or("AUV_ZED_SVO");

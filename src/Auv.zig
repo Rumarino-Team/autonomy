@@ -16,6 +16,25 @@ pub const Object = extern struct {
     cls: ObjectCls,
 };
 
+pub const Object2DYolo: type = extern struct {
+    cx: f32,
+    cy: f32,
+    w: f32,
+    h: f32,
+    id: u32,
+    cls: ObjectCls,
+};
+
+pub const ReactiveFrame = extern struct {
+    pub const max_objects = c.AUV_FRAME_MAX_OBJECTS;
+    accel: math.Vector3f,
+    gyro: math.Vector3f,
+    quat: math.Quaternionf,
+    objects2d: [max_objects]Object2DYolo,
+    object_len: u8,
+    timestamp: u64,
+};
+
 pub const Frame = extern struct {
     pub const max_objects = c.AUV_FRAME_MAX_OBJECTS;
 

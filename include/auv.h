@@ -23,6 +23,42 @@ typedef struct {
   uint64_t timestamp;
 } AuvFrame;
 
+
+
+//Reactives Additions
+// 
+//  We use only two points for the bounding box
+//  becasue we assumed the output is always an aligned box
+
+typedef struct {
+  uint32_t x, y;
+} AuvPoint2u;
+
+
+typedef struct {
+  AuvPoint2u top_left;      /* ZED bounding_box_2d[0] */
+  AuvPoint2u bottom_right;  
+  uint32_t id;
+  AuvObjectCls cls;
+} Object2DYolo;
+
+typedef struct {
+  MathVector3f accel;
+  MathVector3f gyro;
+  MathQuaternionf quat;
+  Object2DYolo objects2d[AUV_FRAME_MAX_OBJECTS];
+  uint8_t object_len;
+  uint64_t timestamp;
+} AuvReactiveFrame;
+void auv_yield_until_reactive_frame(AuvReactiveFrame *frame);
+// Reactive Additions
+// 
+
+
+
+
+
+
 void auv_init(void);
 void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
