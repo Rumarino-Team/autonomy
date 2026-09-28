@@ -277,4 +277,123 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&install_lib_auv_hydrus_sim.step);
         b.step("hydrus", "Build the Stonefish hydrus_sim plugin").dependOn(&install_lib_auv_hydrus_sim.step);
     }
+
+    if (b.option(bool, "mujoco", "Build the MuJoCo hydrus plugin") == true) {
+        const mujoco_prefix = b.option([]const u8, "mujoco-prefix", "MuJoCo install prefix") orelse
+            @panic("-Dmujoco requires -Dmujoco-prefix");
+        const include_dir = b.fmt("{s}/include", .{mujoco_prefix});
+        const installed_lib = b.fmt("{s}/lib", .{mujoco_prefix});
+        const tree_lib = b.fmt("{s}/build/lib", .{mujoco_prefix});
+        const lib_dir = if (fileExists(b, b.fmt("{s}/libmujoco.so", .{installed_lib})))
+            installed_lib
+        else if (fileExists(b, b.fmt("{s}/libmujoco.so", .{tree_lib})))
+            tree_lib
+        else
+            @panic("libmujoco.so not found under mujoco-prefix/lib or mujoco-prefix/build/lib");
+
+        const glfw_include = blk: {
+            if (fileExists(b, b.fmt("{s}/GLFW/glfw3.h", .{include_dir})))
+                break :blk include_dir;
+            const deps = b.fmt("{s}/build/_deps/glfw3-src/include", .{mujoco_prefix});
+            if (fileExists(b, b.fmt("{s}/GLFW/glfw3.h", .{deps})))
+                break :blk deps;
+            break :blk "/usr/include";
+        };
+
+        const lib_auv_hydrus_mujoco = b.addSystemCommand(&.{cxx});
+        lib_auv_hydrus_mujoco.addArgs(&.{
+            "-shared",
+            "-fPIC",
+            "-std=c++17",
+            "-Wall",
+            "-Wextra",
+        });
+        lib_auv_hydrus_mujoco.addArg(if (optimize == .Debug) "-O0" else "-O2");
+        if (optimize == .Debug)
+            lib_auv_hydrus_mujoco.addArg("-g");
+
+        lib_auv_hydrus_mujoco.addArg("-o");
+        const lib_auv_hydrus_mujoco_so = lib_auv_hydrus_mujoco.addOutputFileArg("libauv_hydrus_mujoco.so");
+        lib_auv_hydrus_mujoco.addFileArg(b.path("auvs/hydrus_mujoco/auv.cpp"));
+        lib_auv_hydrus_mujoco.addFileArg(b.path("auvs/hydrus_mujoco/hydrus_core.cpp"));
+        lib_auv_hydrus_mujoco.addFileInput(b.path("auvs/hydrus_mujoco/hydrus_core.h"));
+        lib_auv_hydrus_mujoco.addFileInput(b.path("include/auv.h"));
+        lib_auv_hydrus_mujoco.addFileInput(b.path("include/math.h"));
+        lib_auv_hydrus_mujoco.addFileInput(b.path("auvs/hydrus_mujoco/hydrus.xml"));
+        lib_auv_hydrus_mujoco.addArgs(&.{
+            "-I",
+            b.pathFromRoot("include"),
+            "-isystem",
+            include_dir,
+            "-isystem",
+            glfw_include,
+            b.fmt("-L{s}", .{lib_dir}),
+            b.fmt("-Wl,-rpath,{s}", .{lib_dir}),
+            "-Wl,--no-undefined",
+            "-lmujoco",
+        });
+
+        const glfw_archive = b.fmt("{s}/libglfw3.a", .{lib_dir});
+        if (fileExists(b, b.fmt("{s}/libglfw.so", .{lib_dir})) or
+            fileExists(b, "/usr/lib/x86_64-linux-gnu/libglfw.so") or
+            fileExists(b, "/usr/lib/libglfw.so"))
+        {
+            lib_auv_hydrus_mujoco.addArg("-lglfw");
+        } else if (fileExists(b, glfw_archive)) {
+            lib_auv_hydrus_mujoco.addArg(glfw_archive);
+            lib_auv_hydrus_mujoco.addArgs(&.{
+                "-lX11",
+                "-lXrandr",
+                "-lXi",
+                "-lXinerama",
+                "-lXcursor",
+                "-lGL",
+                "-ldl",
+                "-lm",
+            });
+        } else {
+            lib_auv_hydrus_mujoco.addArg("-lglfw");
+        }
+        lib_auv_hydrus_mujoco.addArg("-pthread");
+
+        const install_lib_auv_hydrus_mujoco = b.addInstallFileWithDir(
+            lib_auv_hydrus_mujoco_so,
+            .lib,
+            "libauv_hydrus_mujoco.so",
+        );
+        b.getInstallStep().dependOn(&install_lib_auv_hydrus_mujoco.step);
+        const mujoco_step = b.step("mujoco", "Build the MuJoCo hydrus plugin and the batched RL library");
+        mujoco_step.dependOn(&install_lib_auv_hydrus_mujoco.step);
+
+        const lib_hydrus_rl = b.addSystemCommand(&.{cxx});
+        lib_hydrus_rl.addArgs(&.{ "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra" });
+        lib_hydrus_rl.addArg(if (optimize == .Debug) "-O0" else "-O2");
+        if (optimize == .Debug)
+            lib_hydrus_rl.addArg("-g");
+        lib_hydrus_rl.addArg("-o");
+        const lib_hydrus_rl_so = lib_hydrus_rl.addOutputFileArg("libhydrus_mujoco_rl.so");
+        lib_hydrus_rl.addFileArg(b.path("auvs/hydrus_mujoco/hydrus_batch.cpp"));
+        lib_hydrus_rl.addFileArg(b.path("auvs/hydrus_mujoco/hydrus_camera.cpp"));
+        lib_hydrus_rl.addFileArg(b.path("auvs/hydrus_mujoco/hydrus_core.cpp"));
+        lib_hydrus_rl.addFileInput(b.path("auvs/hydrus_mujoco/hydrus_batch.h"));
+        lib_hydrus_rl.addFileInput(b.path("auvs/hydrus_mujoco/hydrus_camera.h"));
+        lib_hydrus_rl.addFileInput(b.path("auvs/hydrus_mujoco/hydrus_core.h"));
+        lib_hydrus_rl.addArgs(&.{
+            "-isystem",
+            include_dir,
+            b.fmt("-L{s}", .{lib_dir}),
+            b.fmt("-Wl,-rpath,{s}", .{lib_dir}),
+            "-Wl,--no-undefined",
+            "-lmujoco",
+            "-pthread",
+        });
+        const install_lib_hydrus_rl = b.addInstallFileWithDir(lib_hydrus_rl_so, .lib, "libhydrus_mujoco_rl.so");
+        b.getInstallStep().dependOn(&install_lib_hydrus_rl.step);
+        mujoco_step.dependOn(&install_lib_hydrus_rl.step);
+    }
+}
+
+fn fileExists(b: *std.Build, path: []const u8) bool {
+    std.Io.Dir.accessAbsolute(b.graph.io, path, .{}) catch return false;
+    return true;
 }

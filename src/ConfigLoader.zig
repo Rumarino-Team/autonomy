@@ -20,6 +20,8 @@ pub const Config = struct {
     tam: []math.Vector6f,
     /// World and body +Z point down (Stonefish NED). False for Z-up (ZED RIGHT_HANDED_Z_UP_X_FWD).
     z_down: bool = false,
+    /// Policy file from rl/export_policy.py. When set, it replaces the global-navigation PID.
+    policy: ?[]const u8 = null,
 };
 
 pub fn init(gpa: std.mem.Allocator, config_path: []const u8) !MissionLoader {

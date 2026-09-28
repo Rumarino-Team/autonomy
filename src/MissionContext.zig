@@ -9,12 +9,16 @@ const FileWatcher = @import("FileWatcher.zig");
 const math = @import("math.zig");
 const global_nav = @import("navigation/global.zig");
 const reactive_nav = @import("navigation/reactive.zig");
+const Policy = @import("policy.zig").Policy;
 
 const MissionContext = @This();
 const print_stuff = true;
 const clear_print_stuff = true;
 
+gpa: std.mem.Allocator,
 io: Io,
+/// Loaded from config.policy; replaces the global PID while set.
+policy: ?Policy,
 
 /// SLAM / 3D object navigation. Missions use this for global yields.
 global: global_nav.GlobalState,
@@ -37,8 +41,6 @@ auv_watcher: FileWatcher,
 config: ConfigLoader.Config,
 config_loader: ConfigLoader,
 config_watcher: FileWatcher,
-
-
 
 pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     var config_loader: ConfigLoader = try .init(gpa, args.live_config_path);
@@ -83,11 +85,24 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
         .config_loader = config_loader,
         .config_watcher = try .init(gpa, args.live_config_path),
 
+        .gpa = gpa,
         .io = io,
+        .policy = try loadPolicy(gpa, io, config),
     };
 }
 
+fn loadPolicy(gpa: std.mem.Allocator, io: Io, config: ConfigLoader.Config) !?Policy {
+    const path = config.policy orelse return null;
+    const policy = Policy.load(gpa, io, path) catch |err| {
+        std.log.err("failed to load policy {s}: {s}", .{ path, @errorName(err) });
+        return err;
+    };
+    std.log.info("global navigation uses policy {s} at {d} Hz", .{ path, policy.policy_hz });
+    return policy;
+}
+
 pub fn deinit(ctx: *MissionContext, gpa: std.mem.Allocator) void {
+    if (ctx.policy) |*policy| policy.deinit(gpa);
     ctx.config_watcher.deinit(gpa);
     ctx.config_loader.deinit(gpa);
     ctx.auv_watcher.deinit(gpa);
@@ -107,6 +122,7 @@ pub fn fetchFrameAndUpdate(ctx: *MissionContext) void {
         .close_enough = ctx.close_enough,
         .thrustor_saturate = ctx.thrustor_saturate,
         .thrustor_output_scale = ctx.thrustor_output_scale,
+        .policy = if (ctx.policy) |*policy| policy else null,
         .log = print_stuff and ctx.log_counter % ctx.log_freq_div == 0 and clear_print_stuff,
     });
     ctx.runHotReload();
@@ -154,6 +170,13 @@ fn runHotReload(ctx: *MissionContext) void {
             std.log.debug("{any}", .{config});
             ctx.config = config;
             global_nav.syncControllerGains(&ctx.global, config);
+            if (loadPolicy(ctx.gpa, ctx.io, config)) |policy| {
+                if (ctx.policy) |*old| old.deinit(ctx.gpa);
+                ctx.policy = policy;
+                ctx.global.policy_runner = .{};
+            } else |_| {
+                std.log.info("kept previous policy", .{});
+            }
         } else |err| {
             std.log.err("failed to reload config: {s}/{s}", .{ ctx.config_watcher.dir, ctx.config_watcher.name });
             std.log.err("{s}", .{@errorName(err)});
@@ -170,6 +193,7 @@ fn runHotReload(ctx: *MissionContext) void {
             std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
             std.log.debug("{any}", .{auv});
             ctx.auv = auv;
+            ctx.global.policy_runner = .{};
             std.log.debug("restarted auv loop", .{});
         } else |err| {
             std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });

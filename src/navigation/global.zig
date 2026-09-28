@@ -3,6 +3,7 @@ const Auv = @import("../Auv.zig");
 const math = @import("../math.zig");
 const controls = @import("../controls.zig");
 const ConfigLoader = @import("../ConfigLoader.zig");
+const policy_mod = @import("../policy.zig");
 
 pub const yaw_gate_default: f32 = std.math.pi / 8.0;
 
@@ -14,6 +15,7 @@ pub const GlobalState = struct {
     goal: math.Vector6f = @splat(0),
     prev_timestamp_ns: ?u64 = null,
     controller: controls.ControllerState = undefined,
+    policy_runner: policy_mod.Runner = .{},
 };
 
 pub fn initController(state: *GlobalState, config: ConfigLoader.Config) void {
@@ -36,6 +38,8 @@ pub const Actuation = struct {
     close_enough: f32,
     thrustor_saturate: f32,
     thrustor_output_scale: f32,
+    /// Replaces the PID when set.
+    policy: ?*policy_mod.Policy = null,
     log: bool = false,
 };
 
@@ -57,6 +61,11 @@ pub fn updateSeenObjects(state: *GlobalState) void {
 pub fn pidStep(state: *GlobalState, act: Actuation) void {
     const pose = state.frame.camera_pose;
     const timestamp_ns = state.frame.timestamp;
+
+    if (act.policy) |policy| {
+        policyStep(state, act, policy);
+        return;
+    }
 
     const dt: ?f32 = if (state.prev_timestamp_ns) |previous| blk: {
         if (timestamp_ns > previous) {
@@ -122,6 +131,28 @@ pub fn pidStep(state: *GlobalState, act: Actuation) void {
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }
     act.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
+}
+
+fn policyStep(state: *GlobalState, act: Actuation, policy: *policy_mod.Policy) void {
+    const runner = &state.policy_runner;
+    if (policy.step(runner, state.frame.camera_pose, state.frame.timestamp, state.goal)) |action| {
+        const values = controls.tamToThrusters(
+            act.tam,
+            action,
+            act.thrustor_saturate,
+            act.thrustor_output_scale,
+            &runner.thrusters,
+        );
+        runner.thrusters_len = values.len;
+    }
+    if (act.log) {
+        std.debug.print("\x1b[2J\x1b[H", .{});
+        math.debug6f("pose", math.poseTo6f(state.frame.camera_pose));
+        math.debug6f("goal", state.goal);
+        math.debug6f("\tpolicy action", runner.prev_action);
+        std.log.debug("\tthruster_values = {any}", .{runner.thrusters[0..runner.thrusters_len]});
+    }
+    act.auv.setThrustorValues(&runner.thrusters, @intCast(runner.thrusters_len));
 }
 
 /// First object at or after `start` whose class is in `clss`.

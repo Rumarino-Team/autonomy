@@ -64,12 +64,12 @@ pub inline fn quaternionConjugate(q: Quaternionf) Quaternionf {
 }
 
 pub inline fn quaternionMul(a: Quaternionf, b: Quaternionf) Quaternionf {
-    const av: Vector3f = a[0..3].*;
-    const bv: Vector3f = b[0..3].*;
+    const av: Vector3f = .{ a[0], a[1], a[2] };
+    const bv: Vector3f = .{ b[0], b[1], b[2] };
 
     const xyz =
-        a[3] * bv +
-        b[3] * av +
+        @as(Vector3f, @splat(a[3])) * bv +
+        @as(Vector3f, @splat(b[3])) * av +
         cross3f(av, bv);
 
     const w = a[3] * b[3] - dot3f(av, bv);

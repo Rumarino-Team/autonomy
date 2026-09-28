@@ -390,7 +390,7 @@ public:
         AuvFrame frame{};
         frame.camera_pose = IdentityPose();
         frame.timestamp = static_cast<uint64_t>(getSimulationTime() * sf::Scalar(1e9));
-        frame.tracking_ok = false;
+        frame.tracking_ok = true;
 
         if(have_odometry)
         {
