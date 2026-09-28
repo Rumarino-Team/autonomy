@@ -1,9 +1,9 @@
 const std = @import("std");
 const Auv = @import("../Auv.zig");
 const math = @import("../math.zig");
-const controls = @import("../controls.zig");
+const nav_helpers = @import("nav_helpers.zig");
 
-pub const ReactiveGains = struct {
+pub const ReactiveControllerState = struct {
     k_surge: f32 = 3.0,
     k_heave: f32 = 2.0,
     k_yaw: f32 = 1.0,
@@ -23,6 +23,7 @@ pub const ReactiveState = struct {
     frame: Auv.ReactiveFrame = undefined,
     seen_objects2d: [Auv.ReactiveFrame.max_objects]Auv.Object2DYolo = undefined,
     seen_objects2d_len: u8 = 0,
+    controller: ReactiveControllerState = .{},
     tracked_id: ?u32 = null,
     target_height: ?f32 = null,
     search_yaw: ?f32 = null,
@@ -40,7 +41,6 @@ pub const BoxMetrics = struct {
 pub const Actuation = struct {
     auv: *Auv,
     tam: []const math.Vector6f,
-    gains: ReactiveGains,
     thrustor_saturate: f32,
     thrustor_output_scale: f32,
     z_down: bool,
@@ -130,7 +130,8 @@ fn withinDeadband(err: f32, deadband: f32) f32 {
 /// Body command [Fx, Fy, Fz, Mx, My, Mz]. Image error is already camera-relative.
 /// +Y is surge, +yaw turns right. A box below center (positive cy) dives; `z_down`
 /// says whether body +Z is down (dive is +Fz) or up (dive is -Fz).
-pub fn bodyCommand(state: *const ReactiveState, gains: ReactiveGains, z_down: bool) math.Vector6f {
+pub fn bodyCommand(state: *const ReactiveState, z_down: bool) math.Vector6f {
+    const gains = state.controller;
     const dive_sign: f32 = if (z_down) 1 else -1;
     const id = state.tracked_id orelse {
         const yaw = state.search_yaw orelse return @splat(0);
@@ -153,13 +154,13 @@ pub fn bodyCommand(state: *const ReactiveState, gains: ReactiveGains, z_down: bo
     return .{ 0, surge, heave, 0, 0, yaw };
 }
 
-pub fn step(state: *ReactiveState, act: Actuation) void {
+pub fn reactiveControllerUpdate(state: *ReactiveState, act: Actuation) void {
     if (state.search_yaw != null and state.hold_depth == null and state.frame.pressure_depth_ok) {
         state.hold_depth = state.frame.pressure_depth;
     }
-    const input = bodyCommand(state, act.gains, act.z_down);
-    var thruster_buffer: [controls.max_thrusters]f32 = undefined;
-    const thruster_values = controls.tamToThrusters(
+    const input = bodyCommand(state, act.z_down);
+    var thruster_buffer: [nav_helpers.max_thrusters]f32 = undefined;
+    const thruster_values = nav_helpers.tamToThrusters(
         act.tam,
         input,
         act.thrustor_saturate,

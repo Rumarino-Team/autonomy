@@ -6,7 +6,6 @@ const Auv = @import("Auv.zig");
 const AuvLoader = @import("AuvLoader.zig");
 const ConfigLoader = @import("ConfigLoader.zig");
 const FileWatcher = @import("FileWatcher.zig");
-const math = @import("math.zig");
 const global_nav = @import("navigation/global.zig");
 const reactive_nav = @import("navigation/reactive.zig");
 const Policy = @import("policy.zig").Policy;
@@ -24,7 +23,6 @@ policy: ?Policy,
 global: global_nav.GlobalState,
 /// IMU + 2D detection navigation. Missions use this for reactive yields.
 reactive: reactive_nav.ReactiveState,
-reactive_gains: reactive_nav.ReactiveGains,
 
 goal_dist_threshold: f32,
 close_enough: f32,
@@ -67,7 +65,6 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     return .{
         .global = global_state,
         .reactive = reactive_state,
-        .reactive_gains = .{},
 
         .goal_dist_threshold = args.goal_dist_threshold,
         .close_enough = 1,
@@ -109,14 +106,15 @@ pub fn deinit(ctx: *MissionContext, gpa: std.mem.Allocator) void {
     ctx.auv_loader.deinit(gpa);
 }
 
-const linux = std.os.linux;
-pub fn fetchFrameAndUpdate(ctx: *MissionContext) void {
-    var start: linux.timespec = undefined;
-    var end: linux.timespec = undefined;
-    ctx.auv.yieldUntilNextFrame(&ctx.global.frame);
-    _ = linux.clock_gettime(.MONOTONIC, &start);
-    global_nav.updateSeenObjects(&ctx.global);
-    global_nav.pidStep(&ctx.global, .{
+
+
+
+
+pub const Mode = enum { global, reactive };
+const Clock = std.Io.Clock;
+
+fn globalActuation(ctx: *MissionContext) global_nav.Actuation {
+    return .{
         .auv = &ctx.auv,
         .tam = ctx.config.tam,
         .close_enough = ctx.close_enough,
@@ -124,40 +122,59 @@ pub fn fetchFrameAndUpdate(ctx: *MissionContext) void {
         .thrustor_output_scale = ctx.thrustor_output_scale,
         .policy = if (ctx.policy) |*policy| policy else null,
         .log = print_stuff and ctx.log_counter % ctx.log_freq_div == 0 and clear_print_stuff,
-    });
-    ctx.runHotReload();
-
-    _ = linux.clock_gettime(.MONOTONIC, &end);
-    const ns = (end.sec - start.sec) * 1000000000 + (end.nsec - start.nsec);
-    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        std.log.debug("done in {} us\n", .{@divTrunc(ns, 1000)});
-    }
-    ctx.log_counter +%= 1;
+    };
 }
 
-pub fn fetchReactiveFrameAndUpdate(ctx: *MissionContext) void {
-    var start: linux.timespec = undefined;
-    var end: linux.timespec = undefined;
-    ctx.auv.yieldUntilReactiveFrame(&ctx.reactive.frame);
-    _ = linux.clock_gettime(.MONOTONIC, &start);
-    reactive_nav.updateSeenObjects(&ctx.reactive);
-    reactive_nav.step(&ctx.reactive, .{
+fn reactiveActuation(ctx: *MissionContext) reactive_nav.Actuation {
+    return .{
         .auv = &ctx.auv,
         .tam = ctx.config.tam,
-        .gains = ctx.reactive_gains,
         .thrustor_saturate = ctx.thrustor_saturate,
         .thrustor_output_scale = ctx.thrustor_output_scale,
         .z_down = ctx.config.z_down,
         .log = print_stuff and ctx.log_counter % ctx.log_freq_div == 0 and clear_print_stuff,
-    });
+    };
+}
+
+pub fn fetchFrameAndUpdate(ctx: *MissionContext, mode: Mode) void {
+    const start = Clock.now(.awake, ctx.io);
+    switch (mode) {
+        .global => ctx.auv.yieldUntilNextFrame(&ctx.global.frame),
+        .reactive => ctx.auv.yieldUntilReactiveFrame(&ctx.reactive.frame),
+    }
+
+    switch (mode) {
+        .global =>{
+            global_nav.updateSeenObjects(&ctx.global);
+            global_nav.globalControllerUpdate(&ctx.global, globalActuation(ctx));
+        },
+        .reactive => {
+            reactive_nav.updateSeenObjects(&ctx.reactive);
+            reactive_nav.reactiveControllerUpdate(&ctx.reactive, reactiveActuation(ctx));
+        }
+    }
+
     ctx.runHotReload();
 
-    _ = linux.clock_gettime(.MONOTONIC, &end);
-    const ns = (end.sec - start.sec) * 1000000000 + (end.nsec - start.nsec);
+
+    const end = Clock.now(.awake, ctx.io);
     if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        std.log.debug("reactive done in {} us\n", .{@divTrunc(ns, 1000)});
+        const us = start.durationTo(end).toMicroseconds();
+        std.log.debug("done in {} us\n", .{us});
     }
     ctx.log_counter +%= 1;
+}
+
+
+pub fn loopUntil(ctx: *MissionContext, mode: Mode, comptime fetch_first: bool, pred: anytype) !void {
+    if (fetch_first) ctx.fetchFrameAndUpdate(mode);
+    while (true) {
+        const finished = pred.done(ctx) catch |err| return err;
+        if (finished) break;
+        ctx.fetchFrameAndUpdate(mode);
+    }
+
+
 }
 
 fn runHotReload(ctx: *MissionContext) void {
@@ -201,111 +218,5 @@ fn runHotReload(ctx: *MissionContext) void {
             std.log.info("kept previous auv", .{});
         }
         ctx.auv.init();
-    }
-}
-
-fn globalYieldUntilObject(ctx: *MissionContext, cls: []const Auv.ObjectCls, start: usize) *const Auv.Object {
-    while (true) {
-        if (global_nav.findObject(&ctx.global, cls, start)) |object| return object;
-        ctx.fetchFrameAndUpdate();
-    }
-}
-
-pub fn globalYieldUntilFirstObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
-    return ctx.globalYieldUntilObject(&.{cls}, 0);
-}
-
-pub fn globalYieldUntilFirstObjectWithAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object {
-    return ctx.globalYieldUntilObject(cls, 0);
-}
-
-pub fn globalYieldUntilNewObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
-    return ctx.globalYieldUntilObject(&.{cls}, ctx.global.seen_objects_len);
-}
-
-pub fn globalYieldUntilNewObjectWithAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object {
-    return ctx.globalYieldUntilObject(cls, ctx.global.seen_objects_len);
-}
-
-pub fn globalYieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) global_nav.MissionError!void {
-    global_nav.setGoalPosition(&ctx.global, goal_pos);
-    while (true) {
-        ctx.fetchFrameAndUpdate();
-        if (!ctx.global.frame.tracking_ok) return error.TrackingLost;
-        if (global_nav.cameraWithin(&ctx.global, goal_pos, ctx.goal_dist_threshold)) return;
-    }
-}
-
-fn reactiveYieldUntilObject(ctx: *MissionContext, cls: []const Auv.ObjectCls, start: usize) *const Auv.Object2DYolo {
-    ctx.reactive.tracked_id = null;
-    ctx.reactive.target_height = null;
-    ctx.reactive.search_yaw = null;
-    while (true) {
-        if (reactive_nav.findObject(&ctx.reactive, cls, start)) |object| return object;
-        ctx.fetchReactiveFrameAndUpdate();
-    }
-}
-
-pub fn reactiveYieldUntilFirstObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object2DYolo {
-    return ctx.reactiveYieldUntilObject(&.{cls}, 0);
-}
-
-pub fn reactiveYieldUntilFirstObjectWithAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
-    return ctx.reactiveYieldUntilObject(cls, 0);
-}
-
-pub fn reactiveYieldUntilNewObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object2DYolo {
-    return ctx.reactiveYieldUntilObject(&.{cls}, ctx.reactive.seen_objects2d_len);
-}
-
-pub fn reactiveYieldUntilNewObjectWithAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
-    return ctx.reactiveYieldUntilObject(cls, ctx.reactive.seen_objects2d_len);
-}
-
-fn reactiveYieldUntilYawFind(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
-    ctx.reactive.tracked_id = null;
-    ctx.reactive.target_height = null;
-    ctx.reactive.search_yaw = ctx.reactive_gains.search_yaw;
-    ctx.reactive.hold_depth = null;
-    defer {
-        ctx.reactive.search_yaw = null;
-        ctx.reactive.hold_depth = null;
-    }
-    while (true) {
-        ctx.fetchReactiveFrameAndUpdate();
-        const frame_object = reactive_nav.findFrameObjectWithCls(&ctx.reactive, cls) orelse continue;
-        return reactive_nav.findSeenById(&ctx.reactive, frame_object.id) orelse continue;
-    }
-}
-
-/// Yaw in place until a box of `cls` is in the current camera frame.
-pub fn reactiveYieldUntilYawFindCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object2DYolo {
-    return ctx.reactiveYieldUntilYawFind(&.{cls});
-}
-
-/// Yaw in place until a box of any class in `cls` is in the current camera frame.
-pub fn reactiveYieldUntilYawFindAnyCls(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object2DYolo {
-    return ctx.reactiveYieldUntilYawFind(cls);
-}
-
-pub fn reactiveYieldUntilCentered(ctx: *MissionContext, id: u32) void {
-    ctx.reactive.tracked_id = id;
-    ctx.reactive.target_height = null;
-    while (true) {
-        ctx.fetchReactiveFrameAndUpdate();
-        if (reactive_nav.findFrameObject(&ctx.reactive, id)) |box| {
-            if (reactive_nav.isCentered(&ctx.reactive, box, ctx.reactive_gains.center_deadband)) return;
-        }
-    }
-}
-
-pub fn reactiveYieldUntilHeight(ctx: *MissionContext, id: u32, target_height: f32) void {
-    ctx.reactive.tracked_id = id;
-    ctx.reactive.target_height = target_height;
-    while (true) {
-        ctx.fetchReactiveFrameAndUpdate();
-        if (reactive_nav.findFrameObject(&ctx.reactive, id)) |box| {
-            if (reactive_nav.heightReached(&ctx.reactive, box, target_height)) return;
-        }
     }
 }

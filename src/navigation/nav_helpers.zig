@@ -1,27 +1,5 @@
 const std = @import("std");
-const math = @import("math.zig");
-const Controller = @This();
-
-pub const ControllerState = struct {
-    ErrorConstant: math.Vector6f,
-    DerivativeConstant: math.Vector6f,
-    IntegralConstant: math.Vector6f,
-    sumError: math.Vector6f = @splat(0),
-    prevError: math.Vector6f = @splat(0),
-};
-
-pub fn pidStep(ctx: *ControllerState, err: math.Vector6f, dt: ?f32) math.Vector6f {
-    const vel_err: math.Vector6f = if (dt) |dt_val| blk: {
-        ctx.sumError += err * @as(math.Vector6f, @splat(dt_val));
-        break :blk (err - ctx.prevError) / @as(math.Vector6f, @splat(dt_val));
-    } else @as(math.Vector6f, @splat(0));
-
-    const wrench = ctx.ErrorConstant * err + ctx.IntegralConstant * ctx.sumError + ctx.DerivativeConstant * vel_err;
-
-    ctx.prevError = err;
-
-    return wrench;
-}
+const math = @import("../math.zig");
 
 /// Maps a 6-DOF PID wrench into the 6-DOF command vector expected by `math.tamMul`.
 ///
