@@ -1,14 +1,14 @@
-const std = @import("std");
 const math = @import("../math.zig");
 const MissionContext = @import("../MissionContext.zig");
-const MissionArgs = @import("../MissionArgs.zig");
 const Auv = @import("../Auv.zig");
+const global_nav = @import("../navigation/global.zig");
+const reactive_nav = @import("../navigation/reactive.zig");
 
 pub fn mission(ctx: *MissionContext) void {
-    const gate_object = ctx.globalYieldUntilFirstObjectWithCls(.gate);
+    const gate_object = firstObject(ctx, &.{.gate});
     goThrough(ctx, gate_object);
 
-    const cube_or_rect_object = ctx.globalYieldUntilFirstObjectWithAnyCls(&.{ .cube, .rect });
+    const cube_or_rect_object = firstObject(ctx, &.{ .cube, .rect });
     goAround(ctx, cube_or_rect_object);
 }
 
@@ -17,7 +17,11 @@ const OVERSHOOT: f32 = 2.0;
 const REACTIVE_TARGET_HEIGHT: f32 = 0.4;
 
 fn reachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) !void {
-    return ctx.globalYieldUntilReachGoal(goal_pos);
+    global_nav.setGoalPosition(&ctx.global, goal_pos);
+    return ctx.loopUntil(.global, true, AtGoal{
+        .goal = goal_pos,
+        .threshold = ctx.goal_dist_threshold,
+    });
 }
 
 fn approachDirection(ctx: *MissionContext, object: *const Auv.Object) math.Vector2f {
@@ -51,10 +55,76 @@ fn goThrough(ctx: *MissionContext, object: *const Auv.Object) void {
 }
 
 fn reactiveFallback(ctx: *MissionContext, cls: Auv.ObjectCls) void {
-    const box = ctx.reactiveYieldUntilYawFindCls(cls);
-    ctx.reactiveYieldUntilCentered(box.id);
-    ctx.reactiveYieldUntilHeight(box.id, REACTIVE_TARGET_HEIGHT);
+    ctx.reactive.tracked_id = null;
+    ctx.reactive.target_height = null;
+    ctx.reactive.search_yaw = ctx.reactive.controller.search_yaw;
+    ctx.reactive.hold_depth = null;
+    defer {
+        ctx.reactive.search_yaw = null;
+        ctx.reactive.hold_depth = null;
+    }
+
+    ctx.loopUntil(.reactive, true, YawFind{ .cls = &.{cls} }) catch |err| switch (err) {};
+    const frame_object = reactive_nav.findFrameObjectWithCls(&ctx.reactive, &.{cls}).?;
+    const box = reactive_nav.findSeenById(&ctx.reactive, frame_object.id).?;
+
+    ctx.reactive.tracked_id = box.id;
+    ctx.reactive.target_height = null;
+    ctx.loopUntil(.reactive, true, Centered{ .id = box.id }) catch |err| switch (err) {};
+
+    ctx.reactive.target_height = REACTIVE_TARGET_HEIGHT;
+    ctx.loopUntil(.reactive, true, HeightReached{
+        .id = box.id,
+        .target_height = REACTIVE_TARGET_HEIGHT,
+    }) catch |err| switch (err) {};
 }
+
+fn firstObject(ctx: *MissionContext, cls: []const Auv.ObjectCls) *const Auv.Object {
+    ctx.loopUntil(.global, false, HasCls{ .cls = cls, .start = 0 }) catch |err| switch (err) {};
+    return global_nav.findObject(&ctx.global, cls, 0).?;
+}
+
+const HasCls = struct {
+    cls: []const Auv.ObjectCls,
+    start: usize,
+    pub fn done(self: @This(), ctx: *MissionContext) !bool {
+        return global_nav.findObject(&ctx.global, self.cls, self.start) != null;
+    }
+};
+
+const AtGoal = struct {
+    goal: math.Vector3f,
+    threshold: f32,
+    pub fn done(self: @This(), ctx: *MissionContext) global_nav.MissionError!bool {
+        if (!ctx.global.frame.tracking_ok) return error.TrackingLost;
+        return global_nav.cameraWithin(&ctx.global, self.goal, self.threshold);
+    }
+};
+
+const YawFind = struct {
+    cls: []const Auv.ObjectCls,
+    pub fn done(self: @This(), ctx: *MissionContext) !bool {
+        const frame_object = reactive_nav.findFrameObjectWithCls(&ctx.reactive, self.cls) orelse return false;
+        return reactive_nav.findSeenById(&ctx.reactive, frame_object.id) != null;
+    }
+};
+
+const Centered = struct {
+    id: u32,
+    pub fn done(self: @This(), ctx: *MissionContext) !bool {
+        const box = reactive_nav.findFrameObject(&ctx.reactive, self.id) orelse return false;
+        return reactive_nav.isCentered(&ctx.reactive, box, ctx.reactive.controller.center_deadband);
+    }
+};
+
+const HeightReached = struct {
+    id: u32,
+    target_height: f32,
+    pub fn done(self: @This(), ctx: *MissionContext) !bool {
+        const box = reactive_nav.findFrameObject(&ctx.reactive, self.id) orelse return false;
+        return reactive_nav.heightReached(&ctx.reactive, box, self.target_height);
+    }
+};
 
 fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
     const object_pos = object.bbox.pose.pos;

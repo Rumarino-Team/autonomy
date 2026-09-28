@@ -1,10 +1,31 @@
 const std = @import("std");
 const Auv = @import("../Auv.zig");
 const math = @import("../math.zig");
-const controls = @import("../controls.zig");
+const nav_helpers = @import("nav_helpers.zig");
 const ConfigLoader = @import("../ConfigLoader.zig");
 
 pub const yaw_gate_default: f32 = std.math.pi / 8.0;
+
+pub const GlobalControllerState = struct {
+    ErrorConstant: math.Vector6f,
+    DerivativeConstant: math.Vector6f,
+    IntegralConstant: math.Vector6f,
+    sumError: math.Vector6f = @splat(0),
+    prevError: math.Vector6f = @splat(0),
+};
+
+fn pidWrench(controller: *GlobalControllerState, err: math.Vector6f, dt: ?f32) math.Vector6f {
+    const vel_err: math.Vector6f = if (dt) |dt_val| blk: {
+        controller.sumError += err * @as(math.Vector6f, @splat(dt_val));
+        break :blk (err - controller.prevError) / @as(math.Vector6f, @splat(dt_val));
+    } else @as(math.Vector6f, @splat(0));
+
+    const wrench = controller.ErrorConstant * err + controller.IntegralConstant * controller.sumError + controller.DerivativeConstant * vel_err;
+
+    controller.prevError = err;
+
+    return wrench;
+}
 
 /// SLAM frame, tracked 3D objects, goal, and global PID memory.
 pub const GlobalState = struct {
@@ -13,7 +34,7 @@ pub const GlobalState = struct {
     seen_objects_len: u8 = 0,
     goal: math.Vector6f = @splat(0),
     prev_timestamp_ns: ?u64 = null,
-    controller: controls.ControllerState = undefined,
+    controller: GlobalControllerState = undefined,
 };
 
 pub fn initController(state: *GlobalState, config: ConfigLoader.Config) void {
@@ -54,7 +75,7 @@ pub fn updateSeenObjects(state: *GlobalState) void {
     }
 }
 
-pub fn pidStep(state: *GlobalState, act: Actuation) void {
+pub fn globalControllerUpdate(state: *GlobalState, act: Actuation) void {
     const pose = state.frame.camera_pose;
     const timestamp_ns = state.frame.timestamp;
 
@@ -89,11 +110,11 @@ pub fn pidStep(state: *GlobalState, act: Actuation) void {
     const yaw_error = math.wrapAngle(target_yaw - current_yaw);
     pose_err[5] = yaw_error;
 
-    const wrench = controls.pidStep(&state.controller, pose_err, dt);
-    const input = controls.wrenchToThrusterInput(wrench, pose.quat, yaw_error, yaw_gate_default);
+    const wrench = pidWrench(&state.controller, pose_err, dt);
+    const input = nav_helpers.wrenchToThrusterInput(wrench, pose.quat, yaw_error, yaw_gate_default);
 
-    var thruster_buffer: [controls.max_thrusters]f32 = undefined;
-    const thruster_values = controls.tamToThrusters(
+    var thruster_buffer: [nav_helpers.max_thrusters]f32 = undefined;
+    const thruster_values = nav_helpers.tamToThrusters(
         act.tam,
         input,
         act.thrustor_saturate,
