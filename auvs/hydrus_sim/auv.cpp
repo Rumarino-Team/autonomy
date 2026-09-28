@@ -13,10 +13,13 @@
 #include "core/SimulationManager.h"
 #include "entities/Entity.h"
 #include "entities/MovingEntity.h"
+#include "entities/SolidEntity.h"
 #include "entities/StaticEntity.h"
 #include "entities/forcefields/Ocean.h"
+#include "entities/forcefields/Atmosphere.h"
 #include "graphics/OpenGLDataStructs.h"
 #include "graphics/OpenGLPipeline.h"
+#include "graphics/OpenGLTrackball.h"
 #include "sensors/Sensor.h"
 #include "sensors/ScalarSensor.h"
 #include "sensors/VisionSensor.h"
@@ -37,15 +40,46 @@
 
 
 static std::filesystem::path dataPath = "auvs/hydrus_sim/data/";
-static std::string scenario_file = "scenarios/hydrus_env.scn";
+static std::filesystem::path scenarioPath = "scenarios/hydrus_env.scn";
 static constexpr sf::Scalar kStepsPerSecond = 360.0;
 static constexpr sf::Scalar kPhysicsDt = sf::Scalar(1) / kStepsPerSecond;
 static constexpr sf::Scalar kRealtimeFactorCap = 1.0;
 static constexpr auto kMinRenderInterval = std::chrono::milliseconds(16);
 static constexpr bool kConsoleApp = false;
 
+static constexpr sf::Scalar kJerlovWater = sf::Scalar(0.28);
+static constexpr sf::Scalar kSunAzimuthDeg = sf::Scalar(-63.69);
+static constexpr sf::Scalar kSunElevationDeg = sf::Scalar(14.62);
+static constexpr GLfloat kViewExposureEv = 0.f;
+static constexpr const char* kTrackballRobotName = "HydrusAUV";
+
 namespace
 {
+void ApplyViewDefaults(sf::SimulationManager* sim)
+{
+    sim->setSolidDisplayMode(sf::DisplayMode::GRAPHICAL);
+    if(sf::Ocean* ocean = sim->getOcean())
+    {
+        ocean->setWaterType(kJerlovWater);
+        ocean->setParticles(false);
+        ocean->setRenderable(true);
+    }
+    if(sf::Atmosphere* atmosphere = sim->getAtmosphere())
+        atmosphere->SetSunPosition(kSunAzimuthDeg, kSunElevationDeg);
+    if(sf::OpenGLTrackball* trackball = sim->getTrackball())
+    {
+        trackball->setExposureCompensation(kViewExposureEv);
+        for(size_t i = 0; sf::Robot* robot = sim->getRobot(static_cast<unsigned int>(i)); ++i)
+        {
+            if(robot->getName() != kTrackballRobotName)
+                continue;
+            if(sf::SolidEntity* base = robot->getBaseLink())
+                trackball->GlueToMoving(base);
+            break;
+        }
+    }
+}
+
 enum class ObjectCls : AuvObjectCls
 {
     cube = 0,
@@ -278,6 +312,12 @@ protected:
             return false;
         }
 
+        std::string cls_name{cls};
+        for(char& c : cls_name)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if(cls_name == "scenery")
+            return ScenarioParser::ParseStatic(element);
+
         const auto mapped = ParseObjectClass(cls);
         if(!mapped)
         {
@@ -369,19 +409,24 @@ public:
         if(robot == nullptr)
         {
             std::println(stdout, "[hydrus_sim] no robot in scenario; thrusters will not run");
-            return;
         }
-        for(size_t i = 0; sf::Actuator* actuator = robot->getActuator(i); ++i)
+        else
         {
-            if(actuator->getType() != sf::ActuatorType::THRUSTER)
-                continue;
-            thrusters.push_back(static_cast<sf::Thruster*>(actuator));
+            for(size_t i = 0; sf::Actuator* actuator = robot->getActuator(i); ++i)
+            {
+                if(actuator->getType() != sf::ActuatorType::THRUSTER)
+                    continue;
+                thrusters.push_back(static_cast<sf::Thruster*>(actuator));
+            }
         }
+
+        ApplyViewDefaults(this);
     }
 
     void setThrustorValues(const float* thrustor_values, uint8_t thrustor_values_len)
     {
-        for(uint8_t i = 0; i < thrustor_values_len; ++i)
+        const uint8_t count = std::min(thrustor_values_len, static_cast<uint8_t>(thrusters.size()));
+        for(uint8_t i = 0; i < count; ++i)
             thrusters[i]->setSetpoint(thrustor_values[i]);
     }
 
@@ -390,7 +435,7 @@ public:
         AuvFrame frame{};
         frame.camera_pose = IdentityPose();
         frame.timestamp = static_cast<uint64_t>(getSimulationTime() * sf::Scalar(1e9));
-        frame.tracking_ok = false;
+        frame.tracking_ok = true;
 
         if(have_odometry)
         {
@@ -645,7 +690,7 @@ void auv_init(void)
     auv_deinit();
 
     g_simulation_context = new SimulationContext();
-    g_simulation_context->sim = new SimManager(kStepsPerSecond, dataPath / scenario_file);
+    g_simulation_context->sim = new SimManager(kStepsPerSecond, dataPath / scenarioPath);
     if(kConsoleApp)
     {
         std::println(stdout, "[hydrus_sim] app=console");

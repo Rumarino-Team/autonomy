@@ -18,3 +18,5 @@ Requires a Stonefish install. From the repo root:
 zig build -Dhydrus -Dstonefish-prefix=/usr/local
 ./zig-out/bin/src_3 ./zig-out/lib/libauv_hydrus_sim.so prequalify auvs/hydrus_sim/auv.json
 ```
+
+Scenarios: `auvs/hydrus_sim/data/scenarios/pool.scn` (indoor pool), `test_env.scn` (flat floor), or `hydrus_env.scn`. Set `scenarioPath` in `auvs/hydrus_sim/auv.cpp` and rebuild.
