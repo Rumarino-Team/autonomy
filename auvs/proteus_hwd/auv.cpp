@@ -21,10 +21,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <exception>
 #include <inttypes.h>
 #include <limits>
-#include <stdexcept>
 #include <string_view>
 #include <sys/stat.h>
 #include <time.h>
@@ -76,120 +74,109 @@ static uint64_t now_ns() {
 }
 
 static void check(sl::ERROR_CODE error, const char *operation) {
-  if (error != sl::ERROR_CODE::SUCCESS) {
+  // negative codes are only warnings
+  if (error > sl::ERROR_CODE::SUCCESS) {
     std::fprintf(stderr, "[zed] %s: %s\n", operation, sl::toString(error).c_str());
     fail("SDK operation failed");
   }
 }
 
 void auv_init(void) {
-  try {
-    auv_deinit();
-    config = load_config();
-    sl::InitParameters params;
-    params.coordinate_units = sl::UNIT::METER;
-    params.coordinate_system = sl::COORDINATE_SYSTEM::RIGHT_HANDED_Z_UP_X_FWD;
-    params.depth_mode = sl::DEPTH_MODE::NEURAL;
-    params.camera_resolution = config.resolution;
-    params.camera_fps = config.fps;
-    params.sdk_gpu_id = 0;
-    if (*config.svo) params.input.setFromSVOFile(config.svo);
+  auv_deinit();
+  config = load_config();
+  sl::InitParameters params;
+  params.coordinate_units = sl::UNIT::METER;
+  params.coordinate_system = sl::COORDINATE_SYSTEM::RIGHT_HANDED_Z_UP_X_FWD;
+  params.depth_mode = sl::DEPTH_MODE::NEURAL;
+  params.camera_resolution = config.resolution;
+  params.camera_fps = config.fps;
+  params.sdk_gpu_id = 0;
+  if (*config.svo) params.input.setFromSVOFile(config.svo);
 
-    check(zed.open(params), "open camera");
-    zed_open = true;
-    if (config.stream_port) {
-      sl::StreamingParameters stream;
-      stream.codec = sl::STREAMING_CODEC::H264;
-      stream.port = static_cast<unsigned short>(config.stream_port);
-      check(zed.enableStreaming(stream), "enable streaming");
-    }
-    if (*config.record) {
-      sl::RecordingParameters record;
-      record.video_filename = sl::String(config.record);
-      record.compression_mode = sl::SVO_COMPRESSION_MODE::H264;
-      check(zed.enableRecording(record), "enable recording");
-    }
-    sl::PositionalTrackingParameters tracking;
-    tracking.enable_area_memory = true;
-    check(zed.enablePositionalTracking(tracking), "enable positional tracking");
-
-    if (*config.onnx) {
-      sl::ObjectDetectionParameters detection;
-      detection.detection_model = sl::OBJECT_DETECTION_MODEL::CUSTOM_YOLOLIKE_BOX_OBJECTS;
-      detection.custom_onnx_file = sl::String(config.onnx);
-      detection.custom_onnx_dynamic_input_shape = sl::Resolution(640, 640);
-      detection.enable_tracking = true;
-      detection.enable_segmentation = false;
-      detection.allow_reduced_precision_inference = true;
-      detection.max_range = 10.0f;
-      std::fputs("[zed] loading detector; first load may build a TensorRT engine\n", stderr);
-      check(zed.enableObjectDetection(detection), "enable custom detection");
-      detection_enabled = true;
-    } else {
-      std::fputs("[zed] pose-only mode: AUV_ZED_ONNX is not configured\n", stderr);
-    }
-    if (config.metrics)
-      std::fputs("zed_frame,timestamp_ns,sdk_ns,conversion_ns,retries,objects\n", stderr);
-  } catch (const std::exception &error) {
-    fail(error.what());
-  } catch (...) {
-    fail("unexpected initialization exception");
+  check(zed.open(params), "open camera");
+  zed_open = true;
+  if (config.stream_port) {
+    sl::StreamingParameters stream;
+    stream.codec = sl::STREAMING_CODEC::H264;
+    stream.port = static_cast<unsigned short>(config.stream_port);
+    check(zed.enableStreaming(stream), "enable streaming");
   }
+  if (*config.record) {
+    sl::RecordingParameters record;
+    record.video_filename = sl::String(config.record);
+    record.compression_mode = sl::SVO_COMPRESSION_MODE::H264;
+    check(zed.enableRecording(record), "enable recording");
+  }
+  sl::PositionalTrackingParameters tracking;
+  tracking.enable_area_memory = true;
+  check(zed.enablePositionalTracking(tracking), "enable positional tracking");
+
+  if (*config.onnx) {
+    sl::ObjectDetectionParameters detection;
+    detection.detection_model = sl::OBJECT_DETECTION_MODEL::CUSTOM_YOLOLIKE_BOX_OBJECTS;
+    detection.custom_onnx_file = sl::String(config.onnx);
+    detection.custom_onnx_dynamic_input_shape = sl::Resolution(640, 640);
+    detection.enable_tracking = true;
+    detection.enable_segmentation = false;
+    detection.allow_reduced_precision_inference = true;
+    detection.max_range = 10.0f;
+    std::fputs("[zed] loading detector; first load may build a TensorRT engine\n", stderr);
+    check(zed.enableObjectDetection(detection), "enable custom detection");
+    detection_enabled = true;
+  } else {
+    std::fputs("[zed] pose-only mode: AUV_ZED_ONNX is not configured\n", stderr);
+  }
+  if (config.metrics)
+    std::fputs("zed_frame,timestamp_ns,sdk_ns,conversion_ns,retries,objects\n", stderr);
 }
 
 void auv_yield_until_next_frame(AuvFrame *frame) {
-  try {
-    if (!frame || !zed_open) fail("capture requires an initialized camera and frame");
-    const uint64_t started = now_ns();
-    uint64_t retries = 0;
-    sl::RuntimeParameters runtime;
-    runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
-    AuvFrame next{};
+  if (!frame || !zed_open) fail("capture requires an initialized camera and frame");
+  const uint64_t started = now_ns();
+  uint64_t retries = 0;
+  sl::RuntimeParameters runtime;
+  runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
+  AuvFrame next{};
 
-    for (;;) {
-      const auto error = zed.grab(runtime);
-      if (error == sl::ERROR_CODE::END_OF_SVOFILE_REACHED)
-        fail("recording finished; restart the checker for another run");
-      bool usable = false;
-      if (error == sl::ERROR_CODE::SUCCESS) {
-        const auto tracking = zed.getPosition(pose, sl::REFERENCE_FRAME::WORLD);
-        next.timestamp = zed.getTimestamp(sl::TIME_REFERENCE::IMAGE).getNanoseconds();
-        usable = tracking == sl::POSITIONAL_TRACKING_STATE::OK &&
-                  next.timestamp > last_timestamp && copy_pose(pose, next.camera_pose);
-      }
-      if (usable) break;
-      if (now_ns() - started >= 5000000000ULL)
-        fail("no usable frame for 5 seconds (grab, tracking, pose, or timestamp)");
-      retries++;
-      const timespec delay{0, 10000000};
-      nanosleep(&delay, nullptr);
+  for (;;) {
+    const auto error = zed.grab(runtime);
+    if (error == sl::ERROR_CODE::END_OF_SVOFILE_REACHED)
+      fail("recording finished; restart the checker for another run");
+    bool usable = false;
+    if (error <= sl::ERROR_CODE::SUCCESS) {
+      const auto tracking = zed.getPosition(pose, sl::REFERENCE_FRAME::WORLD);
+      next.timestamp = zed.getTimestamp(sl::TIME_REFERENCE::IMAGE).getNanoseconds();
+      usable = tracking == sl::POSITIONAL_TRACKING_STATE::OK &&
+                next.timestamp > last_timestamp && copy_pose(pose, next.camera_pose);
     }
-
-    if (detection_enabled)
-      check(zed.retrieveCustomObjects(objects, object_params), "retrieve custom objects");
-    const uint64_t sdk_done = config.metrics ? now_ns() : 0;
-    if (detection_enabled) {
-      for (const auto &object : objects.object_list) {
-        if (next.objects_len == AUV_FRAME_MAX_OBJECTS) break;
-        const int cls = map_class(config, object.raw_label);
-        if (config.log_classes)
-          std::fprintf(stderr, "[zed] label=%d mission_class=%d confidence=%.1f\n",
-                        object.raw_label, cls, object.confidence);
-        if (copy_object(object, cls, next.objects[next.objects_len]))
-          next.objects_len++;
-      }
-    }
-    *frame = next;
-    last_timestamp = next.timestamp;
-    if (config.metrics)
-      std::fprintf(stderr, "zed_frame,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%u\n",
-                    next.timestamp, sdk_done - started, now_ns() - sdk_done,
-                    retries, static_cast<unsigned>(next.objects_len));
-  } catch (const std::exception &error) {
-    fail(error.what());
-  } catch (...) {
-    fail("unexpected capture exception");
+    if (usable) break;
+    if (now_ns() - started >= 5000000000ULL)
+      fail("no usable frame for 5 seconds (grab, tracking, pose, or timestamp)");
+    retries++;
+    const timespec delay{0, 10000000};
+    nanosleep(&delay, nullptr);
   }
+
+  if (detection_enabled)
+    check(zed.retrieveCustomObjects(objects, object_params), "retrieve custom objects");
+  const uint64_t sdk_done = config.metrics ? now_ns() : 0;
+  if (detection_enabled) {
+    for (const auto &object : objects.object_list) {
+      if (next.objects_len == AUV_FRAME_MAX_OBJECTS) break;
+      const int cls = map_class(config, object.raw_label);
+      if (config.log_classes)
+        std::fprintf(stderr, "[zed] label=%d mission_class=%d confidence=%.1f\n",
+                      object.raw_label, cls, object.confidence);
+      if (copy_object(object, cls, next.objects[next.objects_len]))
+        next.objects_len++;
+    }
+  }
+  *frame = next;
+  last_timestamp = next.timestamp;
+  if (config.metrics)
+    std::fprintf(stderr, "zed_frame,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%u\n",
+                  next.timestamp, sdk_done - started, now_ns() - sdk_done,
+                  retries, static_cast<unsigned>(next.objects_len));
 }
 
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len) {
@@ -201,14 +188,9 @@ void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_valu
 void auv_deinit(void) {
   if (zed_open) {
     zed_open = false;
-    try {
-      zed.disableRecording();
-      zed.disableStreaming();
-      zed.close();
-    } catch (...) {
-      std::fputs("[zed] camera close failed\n", stderr);
-      std::exit(EXIT_FAILURE);
-    }
+    zed.disableRecording();
+    zed.disableStreaming();
+    zed.close();
   }
   detection_enabled = false;
   last_timestamp = 0;
@@ -224,21 +206,21 @@ static int parse_nonnegative(std::string_view text) {
   int value = 0;
   const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
   if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || value < 0)
-    throw std::runtime_error("expected a nonnegative integer");
+    fail("expected a nonnegative integer");
   return value;
 }
 
 static bool env_flag(const char *name) {
   const std::string_view value = env_or(name, "0");
   if (value != "0" && value != "1")
-    throw std::runtime_error("boolean environment settings must be 0 or 1");
+    fail("boolean environment settings must be 0 or 1");
   return value == "1";
 }
 
 static void check_file(const char *path) {
   struct stat info{};
   if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) || access(path, R_OK) != 0)
-    throw std::runtime_error("model or recording must be a readable regular file");
+    fail("model or recording must be a readable regular file");
 }
 
 static Config load_config() {
@@ -248,7 +230,7 @@ static Config load_config() {
   config.fps = parse_nonnegative(env_or("AUV_ZED_FPS", "30"));
   config.stream_port = parse_nonnegative(env_or("AUV_ZED_STREAM_PORT", "0"));
   config.record = env_or("AUV_ZED_RECORD");
-  if (config.fps == 0) throw std::runtime_error("AUV_ZED_FPS must be positive");
+  if (config.fps == 0) fail("AUV_ZED_FPS must be positive");
   config.log_classes = env_flag("AUV_LOG_CLS");
   config.metrics = env_flag("AUV_ZED_METRICS");
 
@@ -257,30 +239,30 @@ static Config load_config() {
   else if (resolution == "HD1080") config.resolution = sl::RESOLUTION::HD1080;
   else if (resolution == "HD2K") config.resolution = sl::RESOLUTION::HD2K;
   else if (resolution == "VGA") config.resolution = sl::RESOLUTION::VGA;
-  else throw std::runtime_error("unknown AUV_ZED_RESOLUTION");
+  else fail("unknown AUV_ZED_RESOLUTION");
 
   if (*config.onnx) check_file(config.onnx);
   if (*config.svo) check_file(config.svo);
 
   std::string_view map = env_or("AUV_CLS_MAP");
   if (*config.onnx && map.empty())
-    throw std::runtime_error("AUV_CLS_MAP is required with AUV_ZED_ONNX");
+    fail("AUV_CLS_MAP is required with AUV_ZED_ONNX");
   while (!map.empty()) {
     const auto comma = map.find(',');
     const auto entry = map.substr(0, comma);
     const auto colon = entry.find(':');
     if (colon == std::string_view::npos)
-      throw std::runtime_error("AUV_CLS_MAP entries must be label:class");
+      fail("AUV_CLS_MAP entries must be label:class");
     const int label = parse_nonnegative(entry.substr(0, colon));
     const int cls = parse_nonnegative(entry.substr(colon + 1));
     // src/Auv.zig: cube = 0, rect = 1, gate = 2
-    if (cls > 2) throw std::runtime_error("unknown mission class in AUV_CLS_MAP");
+    if (cls > 2) fail("unknown mission class in AUV_CLS_MAP");
     for (const auto &item : config.classes)
-      if (item.label == label) throw std::runtime_error("duplicate label in AUV_CLS_MAP");
+      if (item.label == label) fail("duplicate label in AUV_CLS_MAP");
     config.classes.push_back({label, static_cast<AuvObjectCls>(cls)});
     if (comma == std::string_view::npos) break;
     map.remove_prefix(comma + 1);
-    if (map.empty()) throw std::runtime_error("trailing comma in AUV_CLS_MAP");
+    if (map.empty()) fail("trailing comma in AUV_CLS_MAP");
   }
   return config;
 }
