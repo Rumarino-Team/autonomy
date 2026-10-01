@@ -238,10 +238,13 @@ pub fn build(b: *std.Build) !void {
     });
     try cmake_configure.step.addWatchInput(b.path("CMakeLists.txt"));
 
+    const cpu_count = std.Thread.getCpuCount() catch 1;
     const cmake_build = b.addSystemCommand(&.{
         "cmake",
         "--build",
         "build",
+        "--parallel",
+        b.fmt("{d}", .{cpu_count}),
         "--target",
     });
     cmake_build.step.dependOn(&cmake_configure.step);
