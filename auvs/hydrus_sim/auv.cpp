@@ -39,7 +39,7 @@ static std::string scenario_file = "scenarios/hydrus_env.scn";
 static constexpr sf::Scalar kStepsPerSecond = 360.0;
 static constexpr sf::Scalar kPhysicsDt = sf::Scalar(1) / kStepsPerSecond;
 static constexpr sf::Scalar kRealtimeFactorCap = 8.0;
-static constexpr sf::Scalar kTrackingOkSeconds = 100.0;
+static constexpr sf::Scalar kTrackingOkSeconds = 1.0;
 static constexpr auto kMinRenderInterval = std::chrono::milliseconds(16);
 static constexpr bool kConsoleApp = false;
 
