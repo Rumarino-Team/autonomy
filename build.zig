@@ -161,21 +161,6 @@ pub fn build(b: *std.Build) !void {
     // and reading its source code will allow you to master it.
 
 
-    const lib_auv_sleep_sim = b.addLibrary(.{
-        .name = "auv_sleep_sim",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-        .linkage = .dynamic,
-    });
-    lib_auv_sleep_sim.root_module.link_libc = true;
-    lib_auv_sleep_sim.root_module.addCSourceFile(.{
-        .file = b.path("auvs/sleep_sim/auv.c"),
-        .flags = &.{"-fPIC"},
-    });
-    b.installArtifact(lib_auv_sleep_sim);
-
     const lib_auv_proteus_sim = b.addLibrary(.{
         .name = "auv_proteus_sim",
         .root_module = b.createModule(.{
