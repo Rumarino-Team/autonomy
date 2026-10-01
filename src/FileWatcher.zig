@@ -25,15 +25,8 @@ const Event = struct {
     name: []const u8,
 };
 
-pub fn init(allocator: std.mem.Allocator, path: []const u8) !FileWatcher {
+pub fn init(arena: std.mem.Allocator, path: []const u8) !FileWatcher {
     const dir = std.fs.path.dirname(path) orelse ".";
-    const name = std.fs.path.basename(path);
-
-    const dir_copy = try allocator.dupe(u8, dir);
-    errdefer allocator.free(dir_copy);
-
-    const name_copy = try allocator.dupe(u8, name);
-    errdefer allocator.free(name_copy);
 
     const fd_result = linux.inotify_init1(
         linux.IN.NONBLOCK | linux.IN.CLOEXEC,
@@ -46,38 +39,21 @@ pub fn init(allocator: std.mem.Allocator, path: []const u8) !FileWatcher {
     const fd: std.posix.fd_t = @intCast(fd_result);
     errdefer _ = linux.close(fd);
 
-    const wd = try addWatch(fd, dir_copy);
-
-    const buf = try allocator.alloc(u8, 4096);
-    errdefer allocator.free(buf);
-
     return .{
         .fd = fd,
-        .wd = wd,
-        .dir = dir_copy,
-        .name = name_copy,
-        .buf = buf,
+        .wd = try addWatch(fd, dir),
+        .dir = dir,
+        .name = std.fs.path.basename(path),
+        .buf = try arena.alloc(u8, 4096),
         .len = 0,
         .off = 0,
     };
 }
 
-pub fn deinit(self: *FileWatcher, allocator: std.mem.Allocator) void {
-    _ = linux.close(self.fd);
-
-    allocator.free(self.buf);
-    allocator.free(self.dir);
-    allocator.free(self.name);
-}
-
 pub fn changed(self: *FileWatcher) !bool {
     while (true) {
         if (self.off >= self.len) {
-            const result = linux.read(
-                self.fd,
-                self.buf.ptr,
-                self.buf.len,
-            );
+            const result = linux.read(self.fd, self.buf.ptr, self.buf.len);
 
             if (linux.errno(result) != .SUCCESS) {
                 return switch (linux.errno(result)) {
