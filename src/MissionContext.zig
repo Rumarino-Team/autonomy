@@ -26,10 +26,25 @@ log_counter: u32,
 log_freq_div: u16,
 
 goal: math.Vector6f,
-
 pid_sum_err: math.Vector6f,
 pid_prev_pose_err: math.Vector6f,
 pid_prev_timestamp_ns: ?u64,
+
+
+//ReactiveState 
+seen_objects2d: [Auv.Frame.max_objects]Auv.Object2d = undefined,
+seen_objects2d_len: u8 = 0,
+reactive_pid_sum_err: math.Vector6f,
+reactive_pid_prev_pose_err: math.Vector6f,
+reactive_pid_prev_timestamp_ns : ?u64,
+reactive_prev_tracked_id: i32 = -1,
+
+tracked_id: i32 = -1,
+search_yaw: f32 = 0,
+hold_depth: f32 = 2,
+// 
+
+
 
 auv: Auv,
 auv_loader: AuvLoader,
@@ -76,6 +91,10 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
         .pid_prev_pose_err = @splat(0),
         .pid_prev_timestamp_ns = null,
 
+        .reactive_pid_sum_err = @splat(0),
+        .reactive_pid_prev_pose_err = @splat(0),
+        .reactive_pid_prev_timestamp_ns = null,
+
         .auv = auv,
         .auv_loader = auv_loader,
         .auv_watcher = try .init(gpa, args.auv_dynlib_path),
@@ -88,13 +107,9 @@ pub fn init(gpa: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     };
 }
 
-const linux = std.os.linux;
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
-    var start: linux.timespec = undefined;
-    var end: linux.timespec = undefined;
-
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
-    _ = linux.clock_gettime(.MONOTONIC, &start);
+    const start = Io.Clock.Timestamp.now(ctx.io, .awake);
 
     // std.log.debug("updating seen_objects...", .{});
     for (ctx.frame.objects[0..ctx.frame.objects_len]) |frame_object| {
@@ -112,8 +127,31 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
         }
     }
 
+    for (ctx.frame.objects2d[0..ctx.frame.objects2d_len]) |frame_object| {
+        const maybe_seen_object = for (ctx.seen_objects2d[0..ctx.seen_objects2d_len]) |*seen_object| {
+            if (frame_object.id == seen_object.id) {
+                break seen_object;
+            }
+        } else null;
+
+        if (maybe_seen_object) |seen_object| {
+            seen_object.* = frame_object;
+        } else {
+            ctx.seen_objects2d[ctx.seen_objects2d_len] = frame_object;
+            ctx.seen_objects2d_len += 1;
+        }
+    }
+
+
     // std.log.debug("setting thruster_values with pid controller...", .{});
-    ctx.pidStep();
+
+
+
+    if (ctx.frame.tracking_ok) {
+        ctx.globalControllerStep();
+    } else {
+        ctx.reactiveControllerStep();
+    }
 
     if (ctx.config_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
@@ -148,36 +186,45 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
         ctx.auv.init();
     }
 
-    _ = linux.clock_gettime(.MONOTONIC, &end);
-    const ns = (end.sec - start.sec) * 1000000000 + (end.nsec - start.nsec);
+    const elapsed = start.untilNow(ctx.io);
     if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        std.log.debug("done in {} us\n", .{@divTrunc(ns, 1000)});
+        std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
     }
     ctx.log_counter +%= 1;
 }
 
 const math = @import("math.zig");
 
-fn pidStep(ctx: *MissionContext) void {
+fn globalControllerStep(ctx: *MissionContext) void {
+    ControllerStep(ctx);
+}
+
+fn setThrustersFromTamInput(ctx: *MissionContext, input: math.Vector6f) void {
+    var thruster_buffer: [math.max_thrusters]f32 = undefined;
+    const thruster_values = math.tamToThrusters(
+        ctx.config.tam,
+        input,
+        ctx.thrustor_saturate,
+        5.0,
+        &thruster_buffer,
+    );
+    ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
+}
+
+fn ControllerStep(ctx: *MissionContext) void {
     const pose = ctx.frame.camera_pose;
-
     const timestamp_ns = ctx.frame.timestamp;
-
     const dt: ?f32 = if (ctx.pid_prev_timestamp_ns) |previous| blk: {
         const elapsed_ns = timestamp_ns - previous;
-
         if (elapsed_ns > 0) {
             break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
         }
-
         std.log.warn(
             "odometry stamp not increasing (prev={} ns, now={} ns); skipping I/D",
             .{ previous, timestamp_ns },
         );
-
         break :blk null;
     } else null;
-
     ctx.pid_prev_timestamp_ns = timestamp_ns;
 
     const goal = ctx.goal;
@@ -200,12 +247,7 @@ fn pidStep(ctx: *MissionContext) void {
 
     const xy_distance = math.length3f(dir);
 
-    // const yaw_error = if (distance > ctx.close_enough) blk: {
-    //     const target_yaw = std.math.atan2(dir[1], dir[0]);
-    //     break :blk math.wrapAngle(target_yaw - current_yaw);
-    // } else blk: {
-    //     break :blk math.wrapAngle(goal[5] - current_yaw);
-    // };
+
     const target_yaw = if (xy_distance > ctx.close_enough)
         std.math.atan2(dir[1], dir[0])
     else
@@ -214,21 +256,6 @@ fn pidStep(ctx: *MissionContext) void {
     const yaw_error = math.wrapAngle(target_yaw - current_yaw);
 
     pose_err[5] = yaw_error;
-
-    // const dir: math.Vector3f = .{ pose_err[0], pose_err[1], 0.0 };
-    //
-    // const yaw_error = if (math.length3f(dir) > ctx.close_enough) blk: {
-    //     const dir_normalized = math.normalize3f(dir);
-    //
-    //     // Rotation from current forward -> target direction.
-    //     const yaw_quat = math.rotationBetween(forward, dir_normalized);
-    //
-    //     _, _, const yaw_quat_yaw = math.quaternionToEuler(yaw_quat);
-    //
-    //     break :blk yaw_quat_yaw;
-    // } else math.wrapAngle(goal[5] - current_yaw);
-    //
-    // pose_err[5] = yaw_error;
 
     const vel_err: math.Vector6f = if (dt) |delta_t| blk: {
         ctx.pid_sum_err += pose_err * @as(math.Vector6f, @splat(delta_t));
@@ -245,49 +272,7 @@ fn pidStep(ctx: *MissionContext) void {
         ki * ctx.pid_sum_err +
         kd * vel_err;
 
-    // // Rotate world-frame XYZ wrench into body frame.
-    // const rotated = math.quaternionRotate(
-    //     math.quaternionConjugate(rot),
-    //     .{ wrench[0], wrench[1], wrench[2] },
-    // );
-    //
-    // var body_force = rotated;
-    //
-    // // Only positive X/Y.
-    // body_force[0] = @max(body_force[0], 0.0);
-    // body_force[1] = @max(body_force[1], 0.0);
-    //
-    // // Only move in XY when approximately facing the goal.
-    // if (@abs(yaw_error) > std.math.pi / 8.0) {
-    //     body_force[0] = 0.0;
-    //     body_force[1] = 0.0;
-    // }
-
-    const rotated = math.quaternionRotate(
-        math.quaternionConjugate(rot),
-        .{ wrench[0], wrench[1], wrench[2] },
-    );
-
-    var body_force = rotated;
-
-    if (@abs(yaw_error) > std.math.pi / 8.0) {
-        body_force[0] = 0.0;
-        body_force[1] = 0.0;
-    } else {
-        // Hydrus TAM has no body-X (sway) column; only +Y is surge.
-        body_force[0] = 0.0;
-        body_force[1] = @max(body_force[1], 0.0);
-    }
-
-    const input: math.Vector6f = .{
-        body_force[0],
-        body_force[1],
-        wrench[2],
-        -wrench[3],
-        wrench[4],
-        wrench[5],
-    };
-
+    const input = math.wrenchToThrusterInput(wrench, pose.quat, yaw_error, std.math.pi / 8.0);
     const max_thrusters = 8;
     var thruster_buffer: [max_thrusters]f32 = undefined;
     const thruster_values = math.tamMul(ctx.config.tam, input, &thruster_buffer);
@@ -326,14 +311,139 @@ fn pidStep(ctx: *MissionContext) void {
             "\tcurrent_yaw={d:3.2} target_yaw={d:3.2} yaw_error={d:3.2}",
             .{ current_yaw, target_yaw, yaw_error },
         );
-        math.debug3f("\trotated ", rotated);
-        math.debug3f("\tbody_force ", body_force);
+        // math.debug3f("\trotated ", rotated);
+        // math.debug3f("\tbody_force ", body_force);
         math.debug6f("\tinput   ", input);
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
-
+    
     ctx.pid_prev_pose_err = pose_err;
+}
+
+/// Body command [Fx, Fy, Fz, Mx, My, Mz]. Image error is already camera-relative.
+/// +Y is surge, +yaw turns right. A box below center (positive cy) dives.
+/// Body +Z is down, so dive is +Fz. Surge/heave/yaw use reactive `kp`/`ki`/`kd`
+/// indices 1, 2, and 5. Roll and pitch (indices 3 and 4) level toward `goal`
+/// using the camera pose, with the same roll sign as `wrenchToThrusterInput`.
+fn reactiveControllerStep(ctx: *MissionContext) void {
+    ctx.trackFirstSeenObject2d();
+    const timestamp_ns = ctx.frame.timestamp;
+    const dt: ?f32 = if (ctx.reactive_pid_prev_timestamp_ns) |previous| blk: {
+        const elapsed_ns = timestamp_ns - previous;
+        if (elapsed_ns > 0) {
+            break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
+        }
+        std.log.warn(
+            "reactive stamp not increasing (prev={} ns, now={} ns); skipping I/D",
+            .{ previous, timestamp_ns },
+        );
+        break :blk null;
+    } else null;
+    ctx.reactive_pid_prev_timestamp_ns = timestamp_ns;
+    const reactive = ctx.config.reactive;
+    const dive_sign: f32 = 1;
+    const current_pose = math.poseTo6f(ctx.frame.camera_pose);
+    const roll_err = ctx.goal[3] - current_pose[3];
+    const pitch_err = ctx.goal[4] - current_pose[4];
+
+    const tracked_box: ?Auv.Object2d = if (ctx.tracked_id < 0)
+        null
+    else
+        for (ctx.seen_objects2d[0..ctx.seen_objects2d_len]) |object| {
+            if (object.id == @as(u32, @intCast(ctx.tracked_id))) break object;
+        } else null;
+
+    const input: math.Vector6f = if (ctx.tracked_id >= 0 and tracked_box == null) blk: {
+        ctx.reactive_pid_sum_err = @splat(0);
+        ctx.reactive_pid_prev_pose_err = @splat(0);
+        ctx.reactive_pid_prev_timestamp_ns = null;
+        break :blk @splat(0);
+    } else if (ctx.tracked_id < 0) blk: {
+        var err: math.Vector6f = @splat(0);
+        if (ctx.frame.pressure_depth_ok) {
+            // `pressure_depth` is +down; positive error means too shallow and the sub should dive.
+            err[2] = ctx.hold_depth - ctx.frame.pressure_depth;
+        }
+        err[3] = roll_err;
+        err[4] = pitch_err;
+        const wrench = math.pidWrench(
+            &ctx.reactive_pid_sum_err,
+            &ctx.reactive_pid_prev_pose_err,
+            reactive.kp,
+            reactive.ki,
+            reactive.kd,
+            err,
+            dt,
+        );
+        break :blk .{ 0, 0, dive_sign * wrench[2], -wrench[3], wrench[4], ctx.search_yaw };
+    } else blk: {
+        const tracked = tracked_box orelse break :blk @as(math.Vector6f, @splat(0));
+        const metrics = math.boxMetrics(
+            ctx.frame.image_width,
+            ctx.frame.image_height,
+            .{ tracked.top_left.x, tracked.top_left.y },
+            .{ tracked.bottom_right.x, tracked.bottom_right.y },
+        );
+        const cx = math.withinDeadband(metrics.cx, reactive.center_deadband);
+        const cy = math.withinDeadband(metrics.cy, reactive.center_deadband);
+
+        var err: math.Vector6f = @splat(0);
+        err[1] = reactive.target_height - metrics.height;
+        err[2] = cy;
+        err[3] = roll_err;
+        err[4] = pitch_err;
+        err[5] = cx;
+
+        const wrench = math.pidWrench(
+            &ctx.reactive_pid_sum_err,
+            &ctx.reactive_pid_prev_pose_err,
+            reactive.kp,
+            reactive.ki,
+            reactive.kd,
+            err,
+            dt,
+        );
+        break :blk .{ 0, wrench[1], dive_sign * wrench[2], -wrench[3], wrench[4], wrench[5] };
+    };
+
+    setThrustersFromTamInput(ctx, input);
+
+    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+        if (clear_print_stuff) {
+            std.debug.print("\x1b[2J\x1b[H", .{});
+        }
+        std.log.debug("reactive objects2d = {}", .{ctx.frame.objects2d_len});
+        for (ctx.frame.objects2d[0..ctx.frame.objects2d_len]) |object| {
+            std.log.debug(
+                "  id={} cls={s} box=({},{})-({},{})",
+                .{
+                    object.id,
+                    @tagName(object.cls),
+                    object.top_left.x,
+                    object.top_left.y,
+                    object.bottom_right.x,
+                    object.bottom_right.y,
+                },
+            );
+        }
+        math.debug6f("reactive tam input", input);
+    }
+}
+
+/// Stop search and follow the 2D object `id`. The next reactive step uses the tracking branch.
+pub fn trackObject2d(ctx: *MissionContext, id: u32) void {
+    const tracked_id: i32 = @intCast(id);
+    if (ctx.tracked_id == tracked_id) return;
+    ctx.tracked_id = tracked_id;
+    ctx.reactive_pid_sum_err = @splat(0);
+    ctx.reactive_pid_prev_pose_err = @splat(0);
+    ctx.reactive_pid_prev_timestamp_ns = null;
+}
+
+fn trackFirstSeenObject2d(ctx: *MissionContext) void {
+    if (ctx.tracked_id >= 0 or ctx.seen_objects2d_len == 0) return;
+    ctx.trackObject2d(ctx.seen_objects2d[0].id);
 }
 
 fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const Auv.ObjectCls, start: usize) *const Auv.Object {

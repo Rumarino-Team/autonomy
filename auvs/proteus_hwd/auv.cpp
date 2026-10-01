@@ -52,11 +52,13 @@ static Config config;
 static bool zed_open = false;
 static bool detection_enabled = false;
 static uint64_t last_timestamp = 0;
+static float surface_pressure_hpa = 0.f;
+static bool surface_pressure_set = false;
+static constexpr float kWaterDensity = 997.0f;
+static constexpr float kGravity = 9.80665f;
 
 static Config load_config();
 static int map_class(const Config &config, int label);
-static bool copy_pose(const sl::Pose &source, MathPose &destination);
-static bool copy_object(const sl::ObjectData &source, int cls, AuvObject &destination);
 
 [[noreturn]] static void fail(const char *message) {
   std::fprintf(stderr, "[zed] %s\n", message);
@@ -111,6 +113,7 @@ void auv_init(void) {
       detection_enabled = true;
     } else {
       std::fputs("[zed] pose-only mode: AUV_ZED_ONNX is not configured\n", stderr);
+      detection_enabled = false;
     }
     if (config.metrics)
       std::fputs("zed_frame,timestamp_ns,sdk_ns,conversion_ns,retries,objects\n", stderr);
@@ -122,57 +125,137 @@ void auv_init(void) {
 }
 
 void auv_yield_until_next_frame(AuvFrame *frame) {
-  try {
-    if (!frame || !zed_open) fail("capture requires an initialized camera and frame");
-    const uint64_t started = now_ns();
-    uint64_t retries = 0;
-    sl::RuntimeParameters runtime;
-    runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
-    AuvFrame next{};
+  if (!frame || !zed_open) {
+    std::fprintf(stderr, "Error Zed has not been initialized yet and we dont have our first grabbed frame\n");
+    return;
+  }
 
-    for (;;) {
-      const auto error = zed.grab(runtime);
-      if (error == sl::ERROR_CODE::END_OF_SVOFILE_REACHED)
-        fail("recording finished; restart the checker for another run");
-      bool usable = false;
-      if (error == sl::ERROR_CODE::SUCCESS) {
-        const auto tracking = zed.getPosition(pose, sl::REFERENCE_FRAME::WORLD);
-        next.timestamp = zed.getTimestamp(sl::TIME_REFERENCE::IMAGE).getNanoseconds();
-        usable = tracking == sl::POSITIONAL_TRACKING_STATE::OK &&
-                  next.timestamp > last_timestamp && copy_pose(pose, next.camera_pose);
+  sl::RuntimeParameters runtime;
+  runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
+  const sl::ERROR_CODE error = zed.grab(runtime);
+  sl::POSITIONAL_TRACKING_STATE tracking = sl::POSITIONAL_TRACKING_STATE::SEARCHING;
+  sl::ERROR_CODE customObjectError = sl::ERROR_CODE::FAILURE;
+  sl::CameraInformation camera_info{};
+  sl::Translation translation{};
+  sl::Orientation orientation{};
+  sl::Orientation imu_orientation{};
+  sl::SensorsData sensors_data{};
+  double quat_length = 1.0;
+  double imu_quat_length = 1.0;
+  const float pose_flip[] = {1, -1, -1, 1};
+
+  switch (error) {
+  case sl::ERROR_CODE::END_OF_SVOFILE_REACHED:
+    std::fprintf(stderr, "Recording has ended\n");
+    break;
+
+  case sl::ERROR_CODE::SUCCESS:
+    tracking = zed.getPosition(pose, sl::REFERENCE_FRAME::WORLD);
+    frame->timestamp = zed.getTimestamp(sl::TIME_REFERENCE::IMAGE).getNanoseconds();
+    frame->tracking_ok = (tracking == sl::POSITIONAL_TRACKING_STATE::OK);
+    translation = pose.getTranslation();
+    orientation = pose.getOrientation();
+    frame->camera_pose.pos.buf[0] = pose_flip[0] * translation.tx;
+    frame->camera_pose.pos.buf[1] = pose_flip[1] * translation.ty;
+    frame->camera_pose.pos.buf[2] = pose_flip[2] * translation.tz;
+    quat_length = std::sqrt(orientation.ox * orientation.ox + orientation.oy * orientation.oy +
+                            orientation.oz * orientation.oz + orientation.ow * orientation.ow);
+    frame->camera_pose.quat.buf[0] =
+        static_cast<float>(pose_flip[0] * orientation.ox / quat_length);
+    frame->camera_pose.quat.buf[1] =
+        static_cast<float>(pose_flip[1] * orientation.oy / quat_length);
+    frame->camera_pose.quat.buf[2] =
+        static_cast<float>(pose_flip[2] * orientation.oz / quat_length);
+    frame->camera_pose.quat.buf[3] =
+        static_cast<float>(pose_flip[3] * orientation.ow / quat_length);
+
+    camera_info = zed.getCameraInformation();
+    frame->image_width = camera_info.camera_configuration.resolution.width;
+    frame->image_height = camera_info.camera_configuration.resolution.height;
+
+    if (zed.getSensorsData(sensors_data, sl::TIME_REFERENCE::IMAGE) == sl::ERROR_CODE::SUCCESS) {
+      frame->accel.buf[0] = sensors_data.imu.linear_acceleration.x;
+      frame->accel.buf[1] = sensors_data.imu.linear_acceleration.y;
+      frame->accel.buf[2] = sensors_data.imu.linear_acceleration.z;
+      frame->gyro.buf[0] = sensors_data.imu.angular_velocity.x;
+      frame->gyro.buf[1] = sensors_data.imu.angular_velocity.y;
+      frame->gyro.buf[2] = sensors_data.imu.angular_velocity.z;
+
+      imu_orientation = sensors_data.imu.pose.getOrientation();
+      imu_quat_length = std::sqrt(imu_orientation.ox * imu_orientation.ox +
+                                  imu_orientation.oy * imu_orientation.oy +
+                                  imu_orientation.oz * imu_orientation.oz +
+                                  imu_orientation.ow * imu_orientation.ow);
+      frame->imu_quat.buf[0] = static_cast<float>(imu_orientation.ox / imu_quat_length);
+      frame->imu_quat.buf[1] = static_cast<float>(imu_orientation.oy / imu_quat_length);
+      frame->imu_quat.buf[2] = static_cast<float>(imu_orientation.oz / imu_quat_length);
+      frame->imu_quat.buf[3] = static_cast<float>(imu_orientation.ow / imu_quat_length);
+
+      frame->pressure_depth_ok = false;
+      if (sensors_data.barometer.is_available) {
+        const float hpa = sensors_data.barometer.pressure;
+        if (!surface_pressure_set) {
+          surface_pressure_hpa = hpa;
+          surface_pressure_set = true;
+        }
+        const float delta_pa = (hpa - surface_pressure_hpa) * 100.0f;
+        if (delta_pa > 0.0f) {
+          frame->pressure_depth = delta_pa / (kWaterDensity * kGravity);
+          frame->pressure_depth_ok = true;
+        }
       }
-      if (usable) break;
-      if (now_ns() - started >= 5000000000ULL)
-        fail("no usable frame for 5 seconds (grab, tracking, pose, or timestamp)");
-      retries++;
-      const timespec delay{0, 10000000};
-      nanosleep(&delay, nullptr);
     }
 
+    frame->objects_len = 0;
+    frame->objects2d_len = 0;
     if (detection_enabled)
-      check(zed.retrieveCustomObjects(objects, object_params), "retrieve custom objects");
-    const uint64_t sdk_done = config.metrics ? now_ns() : 0;
-    if (detection_enabled) {
+      customObjectError = zed.retrieveCustomObjects(objects, object_params);
+    if (detection_enabled && customObjectError == sl::ERROR_CODE::SUCCESS) {
       for (const auto &object : objects.object_list) {
-        if (next.objects_len == AUV_FRAME_MAX_OBJECTS) break;
-        const int cls = map_class(config, object.raw_label);
-        if (config.log_classes)
-          std::fprintf(stderr, "[zed] label=%d mission_class=%d confidence=%.1f\n",
-                        object.raw_label, cls, object.confidence);
-        if (copy_object(object, cls, next.objects[next.objects_len]))
-          next.objects_len++;
+        if (frame->objects_len < AUV_FRAME_MAX_OBJECTS) {
+          double low[3] = {INFINITY, INFINITY, INFINITY};
+          double high[3] = {-INFINITY, -INFINITY, -INFINITY};
+          for (const auto &corner : object.bounding_box) {
+            const float values[] = {corner.x, corner.y, corner.z};
+            for (int axis = 0; axis < 3; axis++) {
+              low[axis] = std::min(low[axis], static_cast<double>(values[axis]));
+              high[axis] = std::max(high[axis], static_cast<double>(values[axis]));
+            }
+          }
+
+          const uint8_t i = frame->objects_len;
+          frame->objects[i].id = static_cast<uint32_t>(object.id);
+          frame->objects[i].cls = static_cast<AuvObjectCls>(object.raw_label);
+          frame->objects[i].bbox = {};
+          frame->objects[i].bbox.pose.quat.buf[3] = 1;
+          const float flip[] = {1, -1, -1};
+          for (int axis = 0; axis < 3; axis++) {
+            const double size = high[axis] - low[axis];
+            frame->objects[i].bbox.pose.pos.buf[axis] =
+                static_cast<float>(flip[axis] * (low[axis] + high[axis]) / 2);
+            frame->objects[i].bbox.size.buf[axis] = static_cast<float>(size);
+          }
+          frame->objects_len++;
+        }
+
+        if (frame->objects2d_len < AUV_FRAME_MAX_OBJECTS &&
+            object.bounding_box_2d.size() >= 3) {
+          const auto &bbox = object.bounding_box_2d;
+          const uint8_t j = frame->objects2d_len;
+          frame->objects2d[j].top_left.x = bbox[0].x;
+          frame->objects2d[j].top_left.y = bbox[0].y;
+          frame->objects2d[j].bottom_right.x = bbox[2].x;
+          frame->objects2d[j].bottom_right.y = bbox[2].y;
+          frame->objects2d[j].id = static_cast<uint32_t>(object.id);
+          frame->objects2d[j].cls = static_cast<AuvObjectCls>(object.raw_label);
+          frame->objects2d_len++;
+        }
       }
     }
-    *frame = next;
-    last_timestamp = next.timestamp;
-    if (config.metrics)
-      std::fprintf(stderr, "zed_frame,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%u\n",
-                    next.timestamp, sdk_done - started, now_ns() - sdk_done,
-                    retries, static_cast<unsigned>(next.objects_len));
-  } catch (const std::exception &error) {
-    fail(error.what());
-  } catch (...) {
-    fail("unexpected capture exception");
+    last_timestamp = frame->timestamp;
+    break;
+  default:
+    break;
   }
 }
 
@@ -194,6 +277,8 @@ void auv_deinit(void) {
   }
   detection_enabled = false;
   last_timestamp = 0;
+  surface_pressure_hpa = 0.f;
+  surface_pressure_set = false;
   objects.object_list.clear();
 }
 
@@ -269,62 +354,4 @@ static int map_class(const Config &config, int label) {
   for (const auto &item : config.classes)
     if (item.label == label) return item.cls;
   return -1;
-}
-
-static bool copy_pose(const sl::Pose &source, MathPose &destination) {
-  const auto t = source.getTranslation();
-  const auto q = source.getOrientation();
-  const float position[] = {t.tx, t.ty, t.tz};
-  const float quaternion[] = {q.ox, q.oy, q.oz, q.ow};
-  double length_squared = 0;
-  for (float value : position)
-    if (!std::isfinite(value)) return false;
-  for (float value : quaternion) {
-    if (!std::isfinite(value)) return false;
-    length_squared += static_cast<double>(value) * value;
-  }
-  if (length_squared < 1e-12) return false;
-  // negating y and z is a 180 degree rotation about x, so still right handed
-  const float flip[] = {1, -1, -1, 1};
-  for (int i = 0; i < 3; i++) destination.pos.buf[i] = flip[i] * position[i];
-  const double length = std::sqrt(length_squared);
-  for (int i = 0; i < 4; i++)
-    destination.quat.buf[i] = static_cast<float>(flip[i] * quaternion[i] / length);
-  return true;
-}
-
-static bool copy_object(const sl::ObjectData &source, int cls, AuvObject &destination) {
-  if (cls < 0 || source.id < 0 || source.tracking_state != sl::OBJECT_TRACKING_STATE::OK)
-    return false;
-  if (!std::isfinite(source.position.x) || !std::isfinite(source.position.y) ||
-      !std::isfinite(source.position.z) || source.bounding_box.size() != 8)
-    return false;
-
-  double low[3] = {INFINITY, INFINITY, INFINITY};
-  double high[3] = {-INFINITY, -INFINITY, -INFINITY};
-  for (const auto &corner : source.bounding_box) {
-    const float values[] = {corner.x, corner.y, corner.z};
-    for (int axis = 0; axis < 3; axis++) {
-      if (!std::isfinite(values[axis])) return false;
-      low[axis] = std::min(low[axis], static_cast<double>(values[axis]));
-      high[axis] = std::max(high[axis], static_cast<double>(values[axis]));
-    }
-  }
-
-  AuvObject result{};
-  result.id = static_cast<uint32_t>(source.id);
-  result.cls = static_cast<AuvObjectCls>(cls);
-  // TODO: calculate AuvBoundingBox from 8 points
-  result.bbox.pose.quat.buf[3] = 1;
-  // world axis aligned, so the flip moves the center but not the sizes
-  const float flip[] = {1, -1, -1};
-  for (int axis = 0; axis < 3; axis++) {
-    const double size = high[axis] - low[axis];
-    if (size <= 0 || size > std::numeric_limits<float>::max()) return false;
-    result.bbox.pose.pos.buf[axis] =
-        static_cast<float>(flip[axis] * (low[axis] + high[axis]) / 2);
-    result.bbox.size.buf[axis] = static_cast<float>(size);
-  }
-  destination = result;
-  return true;
 }
