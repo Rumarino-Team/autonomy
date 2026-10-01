@@ -34,10 +34,10 @@ pid_prev_timestamp_ns: ?u64,
 //ReactiveState 
 seen_objects2d: [Auv.Frame.max_objects]Auv.Object2d = undefined,
 seen_objects2d_len: u8 = 0,
-reactive_pid_sum_err: math.Vector6f,
-reactive_pid_prev_pose_err: math.Vector6f,
-reactive_pid_prev_timestamp_ns : ?u64,
-reactive_prev_tracked_id: i32 = -1,
+non_odometrypid_sum_err: math.Vector6f,
+non_odometrypid_prev_pose_err: math.Vector6f,
+non_odometrypid_prev_timestamp_ns : ?u64,
+non_odometryprev_tracked_id: i32 = -1,
 
 tracked_id: i32 = -1,
 search_yaw: f32 = 0,
@@ -93,9 +93,9 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         .pid_prev_pose_err = @splat(0),
         .pid_prev_timestamp_ns = null,
 
-        .reactive_pid_sum_err = @splat(0),
-        .reactive_pid_prev_pose_err = @splat(0),
-        .reactive_pid_prev_timestamp_ns = null,
+        .non_odometrypid_sum_err = @splat(0),
+        .non_odometrypid_prev_pose_err = @splat(0),
+        .non_odometrypid_prev_timestamp_ns = null,
 
         .auv = auv,
         .auv_loader = auv_loader,
@@ -265,9 +265,9 @@ fn ControllerStep(ctx: *MissionContext) void {
         break :blk (pose_err - ctx.pid_prev_pose_err) / @as(math.Vector6f, @splat(delta_t));
     } else @splat(0.0);
 
-    const kp = ctx.config.kp;
-    const ki = ctx.config.ki;
-    const kd = ctx.config.kd;
+    const kp = ctx.config.odometry.kp;
+    const ki = ctx.config.odometry.ki;
+    const kd = ctx.config.odometry.kd;
 
     const wrench =
         kp * pose_err +
@@ -331,7 +331,7 @@ fn ControllerStep(ctx: *MissionContext) void {
 fn reactiveControllerStep(ctx: *MissionContext) void {
     ctx.trackFirstSeenObject2d();
     const timestamp_ns = ctx.frame.timestamp;
-    const dt: ?f32 = if (ctx.reactive_pid_prev_timestamp_ns) |previous| blk: {
+    const dt: ?f32 = if (ctx.non_odometrypid_prev_timestamp_ns) |previous| blk: {
         const elapsed_ns = timestamp_ns - previous;
         if (elapsed_ns > 0) {
             break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
@@ -342,8 +342,8 @@ fn reactiveControllerStep(ctx: *MissionContext) void {
         );
         break :blk null;
     } else null;
-    ctx.reactive_pid_prev_timestamp_ns = timestamp_ns;
-    const reactive = ctx.config.reactive;
+    ctx.non_odometrypid_prev_timestamp_ns = timestamp_ns;
+    const reactive = ctx.config.non_odometry;
     const dive_sign: f32 = 1;
     const current_pose = math.poseTo6f(ctx.frame.camera_pose);
     const roll_err = ctx.goal[3] - current_pose[3];
@@ -357,9 +357,9 @@ fn reactiveControllerStep(ctx: *MissionContext) void {
         } else null;
 
     const input: math.Vector6f = if (ctx.tracked_id >= 0 and tracked_box == null) blk: {
-        ctx.reactive_pid_sum_err = @splat(0);
-        ctx.reactive_pid_prev_pose_err = @splat(0);
-        ctx.reactive_pid_prev_timestamp_ns = null;
+        ctx.non_odometrypid_sum_err = @splat(0);
+        ctx.non_odometrypid_prev_pose_err = @splat(0);
+        ctx.non_odometrypid_prev_timestamp_ns = null;
         break :blk @splat(0);
     } else if (ctx.tracked_id < 0) blk: {
         var err: math.Vector6f = @splat(0);
@@ -370,8 +370,8 @@ fn reactiveControllerStep(ctx: *MissionContext) void {
         err[3] = roll_err;
         err[4] = pitch_err;
         const wrench = math.pidWrench(
-            &ctx.reactive_pid_sum_err,
-            &ctx.reactive_pid_prev_pose_err,
+            &ctx.non_odometrypid_sum_err,
+            &ctx.non_odometrypid_prev_pose_err,
             reactive.kp,
             reactive.ki,
             reactive.kd,
@@ -398,8 +398,8 @@ fn reactiveControllerStep(ctx: *MissionContext) void {
         err[5] = cx;
 
         const wrench = math.pidWrench(
-            &ctx.reactive_pid_sum_err,
-            &ctx.reactive_pid_prev_pose_err,
+            &ctx.non_odometrypid_sum_err,
+            &ctx.non_odometrypid_prev_pose_err,
             reactive.kp,
             reactive.ki,
             reactive.kd,
@@ -438,9 +438,9 @@ pub fn trackObject2d(ctx: *MissionContext, id: u32) void {
     const tracked_id: i32 = @intCast(id);
     if (ctx.tracked_id == tracked_id) return;
     ctx.tracked_id = tracked_id;
-    ctx.reactive_pid_sum_err = @splat(0);
-    ctx.reactive_pid_prev_pose_err = @splat(0);
-    ctx.reactive_pid_prev_timestamp_ns = null;
+    ctx.non_odometrypid_sum_err = @splat(0);
+    ctx.non_odometrypid_prev_pose_err = @splat(0);
+    ctx.non_odometrypid_prev_timestamp_ns = null;
 }
 
 fn trackFirstSeenObject2d(ctx: *MissionContext) void {
