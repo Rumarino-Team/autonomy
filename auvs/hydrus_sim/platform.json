@@ -1,6 +1,6 @@
 {
   "data_path": "auvs/hydrus_sim/data/",
-  "scenario_file": "scenarios/open_space_env.scn",
+  "scenario_file": "scenarios/pool.scn",
   "steps_per_second": 360.0,
   "realtime_factor_cap": 1.0,
   "tracking_ok_seconds": 10.0,

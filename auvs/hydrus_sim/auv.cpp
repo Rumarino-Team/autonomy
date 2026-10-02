@@ -286,6 +286,12 @@ protected:
             return false;
         }
 
+        std::string cls_name{cls};
+        for(char& c : cls_name)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if(cls_name == "scenery")
+            return ScenarioParser::ParseStatic(element);
+
         const auto mapped = ParseObjectClass(cls);
         if(!mapped)
         {
@@ -383,7 +389,8 @@ public:
 
     void setThrustorValues(const float* thrustor_values, uint8_t thrustor_values_len)
     {
-        for(uint8_t i = 0; i < thrustor_values_len; ++i)
+        const uint8_t count = std::min(thrustor_values_len, static_cast<uint8_t>(thrusters.size()));
+        for(uint8_t i = 0; i < count; ++i)
             thrusters[i]->setSetpoint(thrustor_values[i]);
     }
 
