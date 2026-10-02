@@ -121,6 +121,11 @@ pub fn build(b: *std.Build) !void {
         run_cmd.addArgs(args);
     }
 
+
+
+
+
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
@@ -161,20 +166,23 @@ pub fn build(b: *std.Build) !void {
     // and reading its source code will allow you to master it.
 
 
-    const lib_auv_sleep_sim = b.addLibrary(.{
-        .name = "auv_sleep_sim",
+
+    const lib_auv_stationary_sim = b.addLibrary(.{
+        .name = "auv_stationary_sim",
         .root_module = b.createModule(.{
             .target = b.graph.host,
             .optimize = optimize,
         }),
         .linkage = .dynamic,
     });
-    lib_auv_sleep_sim.root_module.link_libc = true;
-    lib_auv_sleep_sim.root_module.addCSourceFile(.{
-        .file = b.path("auvs/sleep_sim/auv.c"),
+    lib_auv_stationary_sim.root_module.link_libc = true;
+    lib_auv_stationary_sim.root_module.addCSourceFile(.{
+        .file = b.path("auvs/stationary_sim/auv.c"),
         .flags = &.{"-fPIC"},
     });
-    b.installArtifact(lib_auv_sleep_sim);
+    b.installArtifact(lib_auv_stationary_sim);
+
+
 
     const lib_auv_proteus_sim = b.addLibrary(.{
         .name = "auv_proteus_sim",
@@ -238,10 +246,13 @@ pub fn build(b: *std.Build) !void {
     });
     try cmake_configure.step.addWatchInput(b.path("CMakeLists.txt"));
 
+    const cpu_count = std.Thread.getCpuCount() catch 1;
     const cmake_build = b.addSystemCommand(&.{
         "cmake",
         "--build",
         "build",
+        "--parallel",
+        b.fmt("{d}", .{cpu_count}),
         "--target",
     });
     cmake_build.step.dependOn(&cmake_configure.step);
