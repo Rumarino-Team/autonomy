@@ -21,6 +21,7 @@ struct CameraModel {
     struct Box {
         int geom = -1;
         int cls = 0;
+        uint8_t shade = 0;
         float local_min[3]{};
         float local_max[3]{};
     };

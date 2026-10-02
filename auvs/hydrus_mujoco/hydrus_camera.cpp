@@ -13,6 +13,9 @@ namespace {
 constexpr int kW = HYDRUS_CAM_W;
 constexpr int kH = HYDRUS_CAM_H;
 constexpr int kCell = kW / HYDRUS_CAM_GRID_X;
+static_assert(kW % HYDRUS_CAM_GRID_X == 0, "camera width must divide the grid");
+static_assert(kH % HYDRUS_CAM_GRID_Y == 0, "camera height must divide the grid");
+static_assert(kH / HYDRUS_CAM_GRID_Y == kCell, "cells must be square");
 constexpr uint8_t kShadeFloor = 70;
 constexpr uint8_t kShadeGate = 180;
 constexpr uint8_t kShadeMarker = 240;
@@ -230,13 +233,22 @@ void rasterTriangle(uint8_t* image, float* depth, const ScreenPoint& a, const Sc
     }
 }
 
-float sobelAt(const uint8_t* image, int u, int v) {
+// Undirected edge: magnitude plus one of four orientation bins (0, 45, 90, 135 degrees).
+void sobelBin(const uint8_t* image, int u, int v, float& mag, int& bin) {
     auto at = [&](int x, int y) { return static_cast<float>(image[y * kW + x]); };
     const float gx = -at(u - 1, v - 1) + at(u + 1, v - 1) - 2.f * at(u - 1, v) + 2.f * at(u + 1, v) -
         at(u - 1, v + 1) + at(u + 1, v + 1);
     const float gy = -at(u - 1, v - 1) - 2.f * at(u, v - 1) - at(u + 1, v - 1) + at(u - 1, v + 1) +
         2.f * at(u, v + 1) + at(u + 1, v + 1);
-    return std::abs(gx) + std::abs(gy);
+    mag = std::abs(gx) + std::abs(gy);
+    float ang = std::atan2(gy, gx);
+    if (ang < 0.f)
+        ang += 3.14159265f;
+    bin = static_cast<int>(ang / (3.14159265f / 4.f));
+    if (bin > 3)
+        bin = 3;
+    if (bin < 0)
+        bin = 0;
 }
 
 int patchSad(const uint8_t* current, const uint8_t* previous, int u, int v, int du, int dv) {
@@ -270,6 +282,7 @@ CameraModel CameraModel::build(const mjModel* model) {
         CameraModel::Box box;
         box.geom = gate;
         box.cls = kClsGate;
+        box.shade = kShadeGate;
         localAabb(model, gate, box.local_min, box.local_max);
         camera.boxes.push_back(box);
     }
@@ -279,6 +292,7 @@ CameraModel CameraModel::build(const mjModel* model) {
         CameraModel::Box box;
         box.geom = marker;
         box.cls = kClsCube;
+        box.shade = kShadeMarker;
         localAabb(model, marker, box.local_min, box.local_max);
         camera.boxes.push_back(box);
     }
@@ -336,6 +350,7 @@ void CameraView::render(const mjModel*, const mjData* data, const CameraModel& c
         float cy = 0;
         float w = 0;
         float h = 0;
+        float vis = 0;
     };
     Seen seen[8];
     int seen_n = 0;
@@ -374,12 +389,31 @@ void CameraView::render(const mjModel*, const mjData* data, const CameraModel& c
         }
         if (!any || u_max <= u_min || v_max <= v_min || seen_n >= 8)
             continue;
+        const int iu0 = std::max(0, static_cast<int>(std::floor(u_min)));
+        const int iu1 = std::min(kW - 1, static_cast<int>(std::ceil(u_max)));
+        const int iv0 = std::max(0, static_cast<int>(std::floor(v_min)));
+        const int iv1 = std::min(kH - 1, static_cast<int>(std::ceil(v_max)));
+        int hit = 0;
+        int area = 0;
+        if (iu0 <= iu1 && iv0 <= iv1) {
+            for (int v = iv0; v <= iv1; ++v) {
+                for (int u = iu0; u <= iu1; ++u) {
+                    ++area;
+                    if (image[v * kW + u] == box.shade)
+                        ++hit;
+                }
+            }
+        }
+        // A projected box with almost no pixels of this object is a miss, not a detection.
+        if (hit < 4)
+            continue;
         Seen& slot = seen[seen_n++];
         slot.cls = box.cls;
         slot.cx = 0.5f * (u_min + u_max) / kW - 0.5f;
         slot.cy = 0.5f * (v_min + v_max) / kH - 0.5f;
         slot.w = (u_max - u_min) / kW;
         slot.h = (v_max - v_min) / kH;
+        slot.vis = static_cast<float>(hit) / static_cast<float>(std::max(area, 1));
     }
     for (int i = 1; i < seen_n; ++i) {
         const Seen key = seen[i];
@@ -404,12 +438,14 @@ void CameraView::render(const mjModel*, const mjData* data, const CameraModel& c
         dst[4] = seen[i].cy;
         dst[5] = seen[i].w;
         dst[6] = seen[i].h;
+        dst[7] = seen[i].vis;
     }
 
-    float* edges = features + HYDRUS_CAM_BOXES * HYDRUS_CAM_BOX_STRIDE;
+    float* cells = features + HYDRUS_CAM_BOXES * HYDRUS_CAM_BOX_STRIDE;
+    constexpr int kStride = HYDRUS_CAM_CELL_STRIDE;
     for (int gy = 0; gy < HYDRUS_CAM_GRID_Y; ++gy) {
         for (int gx = 0; gx < HYDRUS_CAM_GRID_X; ++gx) {
-            float sum = 0;
+            float bins[4] = {};
             const int u0 = gx * kCell;
             const int v0 = gy * kCell;
             for (int y = 0; y < kCell; ++y) {
@@ -418,16 +454,22 @@ void CameraView::render(const mjModel*, const mjData* data, const CameraModel& c
                     const int v = v0 + y;
                     if (u < 1 || v < 1 || u >= kW - 1 || v >= kH - 1)
                         continue;
-                    sum += sobelAt(image.data(), u, v);
+                    float mag = 0;
+                    int bin = 0;
+                    sobelBin(image.data(), u, v, mag, bin);
+                    bins[bin] += mag;
                 }
             }
-            edges[gy * HYDRUS_CAM_GRID_X + gx] = sum / (static_cast<float>(kCell * kCell) * 1020.f);
+            float* cell = cells + (gy * HYDRUS_CAM_GRID_X + gx) * kStride;
+            const float norm = static_cast<float>(kCell * kCell) * 1020.f;
+            for (int b = 0; b < 4; ++b)
+                cell[b] = bins[b] / norm;
         }
     }
 
-    float* flow = edges + HYDRUS_CAM_EDGES;
     if (has_previous) {
         constexpr int kSearch = 8;
+        const float worst = static_cast<float>(kCell * kCell * 255);
         for (int gy = 0; gy < HYDRUS_CAM_GRID_Y; ++gy) {
             for (int gx = 0; gx < HYDRUS_CAM_GRID_X; ++gx) {
                 const int u0 = gx * kCell;
@@ -445,9 +487,10 @@ void CameraView::render(const mjModel*, const mjData* data, const CameraModel& c
                         }
                     }
                 }
-                const int cell = gy * HYDRUS_CAM_GRID_X + gx;
-                flow[2 * cell] = static_cast<float>(best_du) / kCell;
-                flow[2 * cell + 1] = static_cast<float>(best_dv) / kCell;
+                float* cell = cells + (gy * HYDRUS_CAM_GRID_X + gx) * kStride;
+                cell[4] = static_cast<float>(best_du) / kCell;
+                cell[5] = static_cast<float>(best_dv) / kCell;
+                cell[6] = 1.f - static_cast<float>(best) / worst;
             }
         }
     }

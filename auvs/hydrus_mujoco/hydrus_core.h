@@ -38,7 +38,7 @@ struct Randomization {
 };
 
 // Compiled scene plus everything derived from it. Read-only once loaded, so any number of
-// HydrusSim instances on any threads can share it.
+// SimulationManager instances on any threads can share it.
 class HydrusModel {
 public:
     static HydrusModel* load(const char* xml_path, std::string& error);
@@ -72,12 +72,12 @@ struct Rotor {
 };
 
 // One Hydrus vehicle: MuJoCo state plus the Stonefish thruster and fluid model.
-class HydrusSim {
+class SimulationManager {
 public:
-    explicit HydrusSim(const HydrusModel& model);
-    ~HydrusSim();
-    HydrusSim(const HydrusSim&) = delete;
-    HydrusSim& operator=(const HydrusSim&) = delete;
+    explicit SimulationManager(const HydrusModel& model);
+    ~SimulationManager();
+    SimulationManager(const SimulationManager&) = delete;
+    SimulationManager& operator=(const SimulationManager&) = delete;
 
     // Back to the pose in hydrus.xml, at rest.
     void reset();

@@ -2,5 +2,6 @@ zig-out/
 .zig-cache/
 .vscode/
 .clangd
+compile_commands.json
 rl/runs/
 __pycache__/

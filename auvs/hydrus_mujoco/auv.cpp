@@ -23,7 +23,7 @@ using hydrus::kThrusters;
 constexpr char kModelPath[] = "auvs/hydrus_mujoco/hydrus.xml";
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRealtimeFactorCap = 1.0;
-
+static constexpr bool Headless = false;
 enum class ObjectCls : AuvObjectCls {
     cube = 0,
     rect = 1,
@@ -226,7 +226,7 @@ bool projectAabb(
 
 struct Simulation {
     hydrus::HydrusModel* hydrus_model = nullptr;
-    hydrus::HydrusSim* core = nullptr;
+    hydrus::SimulationManager* core = nullptr;
     const mjModel* model = nullptr;
     mjData* data = nullptr;
     std::mutex mu;
@@ -257,10 +257,6 @@ struct Simulation {
 
 Simulation* g_sim = nullptr;
 
-bool headlessRequested() {
-    const char* env = std::getenv("HYDRUS_MUJOCO_HEADLESS");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
 
 void cacheObject(Simulation& sim, const char* name, ObjectCls cls, uint32_t id) {
     const int geom = mj_name2id(sim.model, mjOBJ_GEOM, name);
@@ -305,47 +301,6 @@ AuvFrame makeFrame(const Simulation& sim) {
         object.id = sim.tracked[i].id;
         object.cls = static_cast<AuvObjectCls>(sim.tracked[i].cls);
         frame.objects[frame.objects_len++] = object;
-    }
-    return frame;
-}
-
-AuvReactiveFrame makeReactiveFrame(const Simulation& sim) {
-    AuvReactiveFrame frame{};
-    frame.quat.buf[3] = 1.f;
-    frame.timestamp = static_cast<uint64_t>(sim.data->time * 1e9);
-    frame.image_width = sim.image_width;
-    frame.image_height = sim.image_height;
-    writeQuat(frame.quat, sim.core->quaternion());
-    const mjtNum depth = sim.core->position()[2];
-    if (depth > 0) {
-        frame.pressure_depth = static_cast<float>(depth);
-        frame.pressure_depth_ok = true;
-    }
-    if (const mjtNum* gyro = sim.core->gyro())
-        writeVec3(frame.gyro, gyro[0], gyro[1], gyro[2]);
-    if (const mjtNum* accel = sim.core->accel())
-        writeVec3(frame.accel, accel[0], accel[1], accel[2]);
-    const int camera_site = sim.hydrus_model->camera_site;
-    if (camera_site < 0)
-        return frame;
-    const mjtNum* cam_pos = sim.data->site_xpos + 3 * camera_site;
-    const mjtNum* cam_mat = sim.data->site_xmat + 9 * camera_site;
-    for (int i = 0; i < sim.tracked_len && frame.object_len < AUV_FRAME_MAX_OBJECTS; ++i) {
-        Object2DYolo box{};
-        if (!projectAabb(
-                cam_pos,
-                cam_mat,
-                sim.fov_h_deg,
-                sim.image_width,
-                sim.image_height,
-                sim.tracked[i].aabb_min,
-                sim.tracked[i].aabb_max,
-                box.top_left,
-                box.bottom_right))
-            continue;
-        box.id = sim.tracked[i].id;
-        box.cls = static_cast<AuvObjectCls>(sim.tracked[i].cls);
-        frame.objects2d[frame.object_len++] = box;
     }
     return frame;
 }
@@ -480,7 +435,7 @@ void auv_init(void) {
 
     auto* sim = new Simulation();
     sim->hydrus_model = hydrus_model;
-    sim->core = new hydrus::HydrusSim(*hydrus_model);
+    sim->core = new hydrus::SimulationManager(*hydrus_model);
     sim->model = hydrus_model->model;
     sim->data = sim->core->data();
     sim->hydrus_body = hydrus_model->body;
@@ -507,12 +462,10 @@ void auv_init(void) {
             part.area);
     }
 
-    const bool headless = headlessRequested();
-    std::fprintf(stdout, "[hydrus_mujoco] app=%s\n", headless ? "console" : "graphical");
     std::fflush(stdout);
     sim->running.store(true);
     g_sim = sim;
-    if (!headless)
+    if (!Headless)
         sim->viewer = std::thread(viewerMain, sim);
 }
 
@@ -531,7 +484,7 @@ void auv_deinit(void) {
 
 namespace {
 
-bool advanceSimulation() {
+bool step_simulation() {
     if (g_sim == nullptr)
         return false;
 
@@ -556,17 +509,14 @@ bool advanceSimulation() {
 }  // namespace
 
 void auv_yield_until_next_frame(AuvFrame* frame) {
-    if (!advanceSimulation())
+    if (!step_simulation())
         return;
     std::lock_guard<std::mutex> lock(g_sim->mu);
     *frame = makeFrame(*g_sim);
 }
 
 void auv_yield_until_reactive_frame(AuvReactiveFrame* frame) {
-    if (!advanceSimulation())
-        return;
-    std::lock_guard<std::mutex> lock(g_sim->mu);
-    *frame = makeReactiveFrame(*g_sim);
+    // 
 }
 
 void auv_set_thrustor_values(const float* thrustor_values, uint8_t thrustor_values_len) {

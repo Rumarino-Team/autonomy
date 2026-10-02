@@ -17,15 +17,16 @@ RANDOMIZATION_SIZE = 8
 STATE_SIZE = 21
 CAM_W = 96
 CAM_H = 72
-CAM_BOXES = 4
-CAM_BOX_STRIDE = 7
-CAM_EDGES = 48
-CAM_FLOW = 96
-CAM_FEATURE_SIZE = CAM_BOXES * CAM_BOX_STRIDE + CAM_EDGES + CAM_FLOW
+CAM_GRID_X = 16
+CAM_GRID_Y = 12
+CAM_BOXES = 8
+CAM_BOX_STRIDE = 8
+CAM_CELL_STRIDE = 7
+CAM_CELLS = CAM_GRID_X * CAM_GRID_Y
+CAM_FEATURE_SIZE = CAM_BOXES * CAM_BOX_STRIDE + CAM_CELLS * CAM_CELL_STRIDE
 MOCAP_POSE = 7
 BOXES = slice(0, CAM_BOXES * CAM_BOX_STRIDE)
-EDGES = slice(BOXES.stop, BOXES.stop + CAM_EDGES)
-FLOW = slice(EDGES.stop, EDGES.stop + CAM_FLOW)
+CELLS = slice(BOXES.stop, BOXES.stop + CAM_CELLS * CAM_CELL_STRIDE)
 
 # Column slices into the state rows returned by step().
 POS = slice(0, 3)
@@ -128,7 +129,7 @@ class HydrusBatch:
         self._lib.hydrus_batch_set_mocap(self._handle, _ptr(mocap, ctypes.c_double))
 
     def camera(self) -> np.ndarray:
-        """YOLO boxes, pooled Sobel edges, and pooled optical flow. Shape (num_envs, CAM_FEATURE_SIZE)."""
+        """YOLO boxes and per-cell edges, flow, and flow confidence. Shape (num_envs, CAM_FEATURE_SIZE)."""
         self._lib.hydrus_batch_camera(self._handle, _ptr(self._features, ctypes.c_float))
         return self._features.copy()
 

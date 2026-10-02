@@ -21,16 +21,17 @@ enum {
     // Low-res camera the planner filters. Same horizontal FOV as camera_spec.
     HYDRUS_CAM_W = 96,
     HYDRUS_CAM_H = 72,
-    HYDRUS_CAM_GRID_X = 8,
-    HYDRUS_CAM_GRID_Y = 6,
-    HYDRUS_CAM_BOXES = 4,
-    // class one-hot (cube, rect, gate), cx, cy, width, height. Image center is the origin.
-    HYDRUS_CAM_BOX_STRIDE = 7,
-    HYDRUS_CAM_EDGES = HYDRUS_CAM_GRID_X * HYDRUS_CAM_GRID_Y,
-    HYDRUS_CAM_FLOW = HYDRUS_CAM_GRID_X * HYDRUS_CAM_GRID_Y * 2,
-    // boxes, then mean Sobel magnitude per cell, then optical flow (du, dv) per cell.
+    HYDRUS_CAM_GRID_X = 16,
+    HYDRUS_CAM_GRID_Y = 12,
+    HYDRUS_CAM_BOXES = 8,
+    // class one-hot (cube, rect, gate), cx, cy, width, height, visibility fraction.
+    HYDRUS_CAM_BOX_STRIDE = 8,
+    // Four Sobel orientation bins, optical flow (du, dv), and match confidence.
+    HYDRUS_CAM_CELL_STRIDE = 7,
+    HYDRUS_CAM_CELLS = HYDRUS_CAM_GRID_X * HYDRUS_CAM_GRID_Y,
+    // boxes, then one cell record per grid cell.
     HYDRUS_CAM_FEATURE_SIZE =
-        HYDRUS_CAM_BOXES * HYDRUS_CAM_BOX_STRIDE + HYDRUS_CAM_EDGES + HYDRUS_CAM_FLOW,
+        HYDRUS_CAM_BOXES * HYDRUS_CAM_BOX_STRIDE + HYDRUS_CAM_CELLS * HYDRUS_CAM_CELL_STRIDE,
     // xyz plus quaternion xyzw, in mocap-id order (gate, then marker).
     HYDRUS_BATCH_MOCAP_POSE = 7,
 };
