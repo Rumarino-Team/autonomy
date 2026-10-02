@@ -238,13 +238,16 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(&install_lib_auv_proteus_hwd.step);
     }
 
+    const nlohmann_include = b.path("vendor/nlohmann_json/single_include").getPath(b);
     const cmake_configure = b.addSystemCommand(&.{
         "cmake",
         "-B",
         "build",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        b.fmt("-DCMAKE_CXX_FLAGS=-isystem{s}", .{nlohmann_include}),
     });
     try cmake_configure.step.addWatchInput(b.path("CMakeLists.txt"));
+    cmake_configure.addFileInput(b.path("vendor/nlohmann_json/single_include/nlohmann/json.hpp"));
 
     const cpu_count = std.Thread.getCpuCount() catch 1;
     const cmake_build = b.addSystemCommand(&.{

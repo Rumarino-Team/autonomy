@@ -32,16 +32,80 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <nlohmann/json.hpp>
+#include <fstream>
+
+static constexpr const char* kPlatformConfigPath = "auvs/hydrus_sim/platform.json";
+
+struct PlatformConfig {
+    std::filesystem::path dataPath;
+    std::string scenarioFile;
+    sf::Scalar kPhysicsDt;
+    sf::Scalar kStepsPerSecond;
+    sf::Scalar kRealtimeFactorCap;
+    sf::Scalar kTrackingOkSeconds;
+    std::chrono::milliseconds kMinRenderInterval;
+    bool kConsoleApp = false;
+};
+
+std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& path){
+    std::ifstream json_file(path);
+    if(!json_file){
+        return std::nullopt;
+    }
+
+    const nlohmann::json parsed_json = nlohmann::json::parse(json_file);
+
+    PlatformConfig config{
+        .dataPath = parsed_json.at("data_path").get<std::string>(),
+        .scenarioFile = parsed_json.at("scenario_file").get<std::string>(),
+        .kStepsPerSecond = parsed_json.at("steps_per_second").get<double>(),
+        .kRealtimeFactorCap = parsed_json.at("realtime_factor_cap").get<double>(),
+        .kTrackingOkSeconds = parsed_json.at("tracking_ok_seconds").get<double>(),
+        .kMinRenderInterval = std::chrono::milliseconds{
+            parsed_json.at("min_render_interval_ms").get<int>()},
+        .kConsoleApp = parsed_json.at("console").get<bool>(),
+    };
 
 
-static std::filesystem::path dataPath = "auvs/hydrus_sim/data/";
-static std::string scenario_file = "scenarios/hydrus_env.scn";
-static constexpr sf::Scalar kStepsPerSecond = 360.0;
-static constexpr sf::Scalar kPhysicsDt = sf::Scalar(1) / kStepsPerSecond;
-static constexpr sf::Scalar kRealtimeFactorCap = 8.0;
-static constexpr sf::Scalar kTrackingOkSeconds = 1.0;
-static constexpr auto kMinRenderInterval = std::chrono::milliseconds(16);
-static constexpr bool kConsoleApp = false;
+    if(config.dataPath.empty()){
+        std::println(stderr, "[Parser] data_path is empty in {}", path.string());
+        return std::nullopt;
+    }
+    if(config.scenarioFile.empty()){
+        std::println(stderr, "[Parser] scenario_file is empty in {}", path.string());
+        return std::nullopt;
+    }
+    if(!std::filesystem::is_directory(config.dataPath)){
+        std::println(stderr, "[Parser] data_path is not a directory: {}", config.dataPath.string());
+        return std::nullopt;
+    }
+    const std::filesystem::path scenario_path = config.dataPath / config.scenarioFile;
+    if(!std::filesystem::is_regular_file(scenario_path)){
+        std::println(stderr, "[Parser] scenario file not found: {}", scenario_path.string());
+        return std::nullopt;
+    }
+    if(config.kStepsPerSecond <= sf::Scalar(0)){
+        std::println(stderr, "[Parser] steps_per_second must be > 0 in {}", path.string());
+        return std::nullopt;
+    }
+    if(config.kRealtimeFactorCap < sf::Scalar(0)){
+        std::println(stderr, "[Parser] realtime_factor_cap must be >= 0 in {}", path.string());
+        return std::nullopt;
+    }
+    if(config.kTrackingOkSeconds < sf::Scalar(0)){
+        std::println(stderr, "[Parser] tracking_ok_seconds must be >= 0 in {}", path.string());
+        return std::nullopt;
+    }
+    if(config.kMinRenderInterval.count() < 0){
+        std::println(stderr, "[Parser] min_render_interval_ms must be >= 0 in {}", path.string());
+        return std::nullopt;
+    }
+
+    config.kPhysicsDt = sf::Scalar(1) / config.kStepsPerSecond;
+    return config;
+}
+
 
 namespace
 {
@@ -361,11 +425,11 @@ public:
 
         frame.image_width = image_width;
         frame.image_height = image_height;
-        frame.tracking_ok = getSimulationTime() < kTrackingOkSeconds;
+        frame.tracking_ok = getSimulationTime() < trackingOkSeconds;
         if(!frame.tracking_ok && !logged_tracking_loss)
         {
             logged_tracking_loss = true;
-            std::println(stdout, "[hydrus_sim] tracking_ok false after {} s", kTrackingOkSeconds);
+            std::println(stdout, "[hydrus_sim] tracking_ok false after {} s", trackingOkSeconds);
         }
         if(have_odometry)
         {
@@ -386,6 +450,7 @@ public:
     };
 
     std::filesystem::path scenarioPath;
+    sf::Scalar trackingOkSeconds = std::numeric_limits<uint32_t>::max();;
     bool have_odometry = false;
     sf::ScalarSensor* odometry = nullptr;
     sf::Camera* camera = nullptr;
@@ -419,7 +484,7 @@ public:
             return;
 
         const auto now = std::chrono::steady_clock::now();
-        if(lastRender.has_value() && now - *lastRender < kMinRenderInterval)
+        if(lastRender.has_value() && now - *lastRender < minRenderInterval)
             return;
         else{
         lastRender = now;
@@ -442,6 +507,8 @@ public:
         CleanUp();
         cleaned = true;
     }
+
+    std::chrono::milliseconds minRenderInterval{0};
 
 private:
     bool cleaned = false;
@@ -482,7 +549,7 @@ struct RealtimeThrottle
 {
     void wait(sf::Scalar sim_time)
     {
-        if(kRealtimeFactorCap <= sf::Scalar(0))
+        if(realtimeFactorCap <= sf::Scalar(0))
             return;
 
         const auto wall = std::chrono::steady_clock::now();
@@ -497,7 +564,7 @@ struct RealtimeThrottle
         const sf::Scalar sim_elapsed = sim_time - base_sim;
         const sf::Scalar wall_elapsed =
             std::chrono::duration<sf::Scalar>(wall - base_wall).count();
-        const sf::Scalar wall_budget = sim_elapsed / kRealtimeFactorCap;
+        const sf::Scalar wall_budget = sim_elapsed / realtimeFactorCap;
 
         if(wall_budget > wall_elapsed)
         {
@@ -514,6 +581,7 @@ struct RealtimeThrottle
         }
     }
 
+    sf::Scalar realtimeFactorCap = 0;
     bool base_set = false;
     sf::Scalar base_sim = 0;
     std::chrono::steady_clock::time_point base_wall{};
@@ -521,6 +589,7 @@ struct RealtimeThrottle
 
 struct SimulationContext
 {
+    PlatformConfig config;
     SimManager* sim = nullptr;
     SimApp* graphical = nullptr;
     ConsoleSimApp* console = nullptr;
@@ -560,20 +629,32 @@ void auv_init(void)
 {
     auv_deinit();
 
+    const std::optional<PlatformConfig> loadedJson = loadPlatformConfig(kPlatformConfigPath);
+    if(!loadedJson)
+    {
+        std::println(stderr, "[hydrus_sim] platform config failed; simulation not started");
+        return;
+    }
+
     g_simulation_context = new SimulationContext();
-    g_simulation_context->sim = new SimManager(kStepsPerSecond, dataPath / scenario_file);
-    if(kConsoleApp)
+    g_simulation_context->config = *loadedJson;
+    const PlatformConfig& config = g_simulation_context->config;
+    g_simulation_context->sim = new SimManager(config.kStepsPerSecond, config.dataPath / config.scenarioFile);
+    g_simulation_context->sim->trackingOkSeconds = config.kTrackingOkSeconds;
+    g_simulation_context->realtime.realtimeFactorCap = config.kRealtimeFactorCap;
+    if(config.kConsoleApp)
     {
         std::println(stdout, "[hydrus_sim] app=console");
-        g_simulation_context->console = new ConsoleSimApp(dataPath.string(), g_simulation_context->sim);
-        g_simulation_context->console->start(kPhysicsDt);
+        g_simulation_context->console = new ConsoleSimApp(config.dataPath.string(), g_simulation_context->sim);
+        g_simulation_context->console->start(config.kPhysicsDt);
     }
     else
     {
         std::println(stdout, "[hydrus_sim] app=graphical");
         g_simulation_context->graphical = new SimApp(
-            dataPath.string(), DefaultRenderSettings(), DefaultHelperSettings(), g_simulation_context->sim);
-        g_simulation_context->graphical->start(kPhysicsDt);
+            config.dataPath.string(), DefaultRenderSettings(), DefaultHelperSettings(), g_simulation_context->sim);
+        g_simulation_context->graphical->minRenderInterval = config.kMinRenderInterval;
+        g_simulation_context->graphical->start(config.kPhysicsDt);
     }
 }
 
@@ -582,7 +663,7 @@ void auv_yield_until_next_frame(AuvFrame* frame)
     if(g_simulation_context == nullptr)
         return;
 
-    g_simulation_context->sim->StepSimulation(kPhysicsDt);
+    g_simulation_context->sim->StepSimulation(g_simulation_context->config.kPhysicsDt);
     if(g_simulation_context->graphical != nullptr)
         g_simulation_context->graphical->updateGraphics();
     g_simulation_context->realtime.wait(g_simulation_context->sim->getSimulationTime());
