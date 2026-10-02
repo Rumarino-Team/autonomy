@@ -24,7 +24,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <print>
@@ -35,7 +37,26 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 
-static constexpr const char* kPlatformConfigPath = "auvs/hydrus_sim/platform.json";
+#ifndef AUV_PLATFORM_CONFIG
+#define AUV_PLATFORM_CONFIG "auvs/hydrus_sim/platform.json"
+#endif
+static constexpr const char* kPlatformConfigPath = AUV_PLATFORM_CONFIG;
+
+volatile std::sig_atomic_t g_stop_requested = 0;
+
+void requestStop(int)
+{
+    g_stop_requested = 1;
+}
+
+void stopIfRequested()
+{
+    if(g_stop_requested == 0)
+        return;
+    std::println(stderr, "[hydrus_sim] interrupted; shutting down");
+    auv_deinit();
+    std::exit(130);
+}
 
 struct PlatformConfig {
     std::filesystem::path dataPath;
@@ -46,6 +67,7 @@ struct PlatformConfig {
     sf::Scalar kTrackingOkSeconds;
     std::chrono::milliseconds kMinRenderInterval;
     bool kConsoleApp = false;
+    bool kBBoxOnlyInFrontOfCamera = false;
 };
 
 std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& path){
@@ -65,6 +87,7 @@ std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& pa
         .kMinRenderInterval = std::chrono::milliseconds{
             parsed_json.at("min_render_interval_ms").get<int>()},
         .kConsoleApp = parsed_json.at("console").get<bool>(),
+        .kBBoxOnlyInFrontOfCamera = parsed_json.at("bbox_only_in_front_of_camera").get<bool>(),
     };
 
 
@@ -192,6 +215,29 @@ bool FillObjectBBox(sf::Entity* entity, MathBoundingBox& bbox)
 }
 
 // Stonefish camera frame: +X right, +Y down, +Z along the optical axis.
+bool IsInFrontOfCamera(sf::Camera* camera, sf::Entity* entity)
+{
+    if(camera == nullptr || entity == nullptr)
+        return false;
+
+    sf::Vector3 min;
+    sf::Vector3 max;
+    entity->getAABB(min, max);
+    const sf::Transform world_to_camera = camera->getSensorFrame().inverse();
+
+    for(int corner = 0; corner < 8; ++corner)
+    {
+        const sf::Vector3 world(
+            (corner & 1) != 0 ? max.x() : min.x(),
+            (corner & 2) != 0 ? max.y() : min.y(),
+            (corner & 4) != 0 ? max.z() : min.z());
+        const sf::Vector3 local = world_to_camera * world;
+        if(local.z() > sf::Scalar(0.05))
+            return true;
+    }
+    return false;
+}
+
 bool ProjectObjectBox(
     sf::Camera* camera,
     unsigned int image_width,
@@ -413,6 +459,9 @@ public:
 
         for(const TrackedObject& tracked : tracked_objects)
         {
+            if(bboxOnlyInFrontOfCamera && !IsInFrontOfCamera(camera, tracked.entity))
+                continue;
+
             AuvObject object{};
             if(!FillObjectBBox(tracked.entity, object.bbox))
                 continue;
@@ -458,6 +507,7 @@ public:
 
     std::filesystem::path scenarioPath;
     sf::Scalar trackingOkSeconds = std::numeric_limits<uint32_t>::max();;
+    bool bboxOnlyInFrontOfCamera = false;
     bool have_odometry = false;
     sf::ScalarSensor* odometry = nullptr;
     sf::Camera* camera = nullptr;
@@ -635,6 +685,10 @@ sf::HelperSettings DefaultHelperSettings()
 void auv_init(void)
 {
     auv_deinit();
+    // SDL otherwise installs its own SIGINT handler and Ctrl+C never returns the terminal.
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+    std::signal(SIGINT, requestStop);
+    std::signal(SIGTERM, requestStop);
 
     const std::optional<PlatformConfig> loadedJson = loadPlatformConfig(kPlatformConfigPath);
     if(!loadedJson)
@@ -648,6 +702,7 @@ void auv_init(void)
     const PlatformConfig& config = g_simulation_context->config;
     g_simulation_context->sim = new SimManager(config.kStepsPerSecond, config.dataPath / config.scenarioFile);
     g_simulation_context->sim->trackingOkSeconds = config.kTrackingOkSeconds;
+    g_simulation_context->sim->bboxOnlyInFrontOfCamera = config.kBBoxOnlyInFrontOfCamera;
     g_simulation_context->realtime.realtimeFactorCap = config.kRealtimeFactorCap;
     if(config.kConsoleApp)
     {
@@ -667,6 +722,7 @@ void auv_init(void)
 
 void auv_yield_until_next_frame(AuvFrame* frame)
 {
+    stopIfRequested();
     if(g_simulation_context == nullptr)
         return;
 
@@ -680,11 +736,12 @@ void auv_yield_until_next_frame(AuvFrame* frame)
          && g_simulation_context->graphical->getState() == sf::SimulationState::FINISHED)
         || (g_simulation_context->console != nullptr
             && g_simulation_context->console->getState() == sf::SimulationState::FINISHED);
+    stopIfRequested();
     if(finished)
     {
-        std::println(stderr, "[hydrus_sim] simulation finished; restart for another run");
+        std::println(stderr, "[hydrus_sim] simulation finished; shutting down");
         auv_deinit();
-        return;
+        std::exit(0);
     }
     *frame = g_simulation_context->sim->getAuvFrame();
 }

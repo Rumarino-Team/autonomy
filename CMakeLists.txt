@@ -22,46 +22,49 @@ ExternalProject_Add(stonefish
     "${STONEFISH_DIR}/lib/libStonefish.so"
 )
 
-add_library(auv_hydrus_sim SHARED
-    auvs/hydrus_sim/auv.cpp
-)
+function(add_auv_sim target platform_config)
+  add_library(${target} SHARED auvs/hydrus_sim/auv.cpp)
+  add_dependencies(${target} stonefish)
 
-add_dependencies(auv_hydrus_sim stonefish)
+  target_include_directories(${target} PRIVATE
+    "${STONEFISH_DIR}/include"
+    "${STONEFISH_DIR}/include/Stonefish"
+  )
 
-target_include_directories(auv_hydrus_sim PRIVATE
-  "${STONEFISH_DIR}/include"
-  "${STONEFISH_DIR}/include/Stonefish"
-)
+  target_compile_definitions(${target} PRIVATE
+    _GNU_SOURCE
+    BT_EULER_DEFAULT_ZYX
+    BT_USE_DOUBLE_PRECISION
+    SHADER_DIR_PATH="${STONEFISH_DIR}/share/Stonefish/shaders/"
+    AUV_PLATFORM_CONFIG="${platform_config}"
+  )
 
-target_compile_definitions(auv_hydrus_sim PRIVATE
-  _GNU_SOURCE
-  BT_EULER_DEFAULT_ZYX
-  BT_USE_DOUBLE_PRECISION
-  SHADER_DIR_PATH="${STONEFISH_DIR}/share/Stonefish/shaders/"
-)
+  target_compile_options(${target} PRIVATE
+    -fopenmp
+  )
 
-target_compile_options(auv_hydrus_sim PRIVATE
-  -fopenmp
-)
+  target_link_directories(${target} PRIVATE
+    "${STONEFISH_DIR}/lib"
+  )
 
-target_link_directories(auv_hydrus_sim PRIVATE
-  "${STONEFISH_DIR}/lib"
-)
+  target_link_libraries(${target} PRIVATE
+    Stonefish
+    SDL2
+    freetype
+    OpenGL
+    GLX
+    GLU
+    gomp
+  )
 
-target_link_libraries(auv_hydrus_sim PRIVATE
-  Stonefish
-  SDL2
-  freetype
-  OpenGL
-  GLX
-  GLU
-  gomp
-)
+  set_target_properties(${target} PROPERTIES
+    BUILD_RPATH "${STONEFISH_DIR}/lib"
+  )
 
-set_target_properties(auv_hydrus_sim PROPERTIES
-  BUILD_RPATH "${STONEFISH_DIR}/lib"
-)
+  install(TARGETS ${target})
+endfunction()
 
-install(
-  TARGETS auv_hydrus_sim
-)
+add_auv_sim(auv_hydrus_sim "auvs/hydrus_sim/platform.json")
+add_auv_sim(auv_proteus_sim "auvs/proteus_sim/platform.json")
+add_auv_sim(auv_bluerov2_sim "auvs/bluerov2_sim/platform.json")
+add_auv_sim(auv_girona500_sim "auvs/girona500_sim/platform.json")

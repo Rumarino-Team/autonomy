@@ -184,21 +184,6 @@ pub fn build(b: *std.Build) !void {
 
 
 
-    const lib_auv_proteus_sim = b.addLibrary(.{
-        .name = "auv_proteus_sim",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-        .linkage = .dynamic,
-    });
-    lib_auv_proteus_sim.root_module.link_libcpp = true;
-    lib_auv_proteus_sim.root_module.addCSourceFile(.{
-        .file = b.path("auvs/proteus_sim/auv.cpp"),
-        .flags = &.{"-fPIC", "-std=c++17"},
-    });
-    b.installArtifact(lib_auv_proteus_sim);
-
     // the zed sdk exposes c++ types, so this one has to be built with the
     // system g++ to match its libstdc++ abi. off by default so that machines
     // without the sdk and cuda can still build everything else.
@@ -260,20 +245,30 @@ pub fn build(b: *std.Build) !void {
     });
     cmake_build.step.dependOn(&cmake_configure.step);
 
-    const stonefish = b.option(bool, "stonefish", "Build the Stonefish hydrus_sim plugin") orelse false;
+    const stonefish = b.option(bool, "stonefish", "Build the Stonefish AUV plugins") orelse false;
     if (stonefish) {
-        const cmake_target = "auv_hydrus_sim";
-        cmake_build.addArg(cmake_target);
+        const cmake_targets = [_][]const u8{
+            "auv_hydrus_sim",
+            "auv_proteus_sim",
+            "auv_bluerov2_sim",
+            "auv_girona500_sim",
+        };
+        for (cmake_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
 
         _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/hydrus_sim"));
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/proteus_sim"));
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/bluerov2_sim"));
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/girona500_sim"));
 
-        const cmake_dynlib_file = b.fmt("lib{s}{s}", .{cmake_target, target.result.dynamicLibSuffix()});
-        const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
-
-        const install_hydrus_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
-        install_hydrus_sim.step.dependOn(&cmake_build.step);
-
-        b.getInstallStep().dependOn(&install_hydrus_sim.step);
+        for (cmake_targets) |cmake_target| {
+            const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
+            const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
+            const install_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
+            install_sim.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_sim.step);
+        }
     }
 
     cmake_build.step.dependOn(&cmake_configure.step);

@@ -1,6 +1,6 @@
 {
   "data_path": "auvs/hydrus_sim/data/",
-  "scenario_file": "scenarios/pool.scn",
+  "scenario_file": "scenarios/pool_bluerov2.scn",
   "steps_per_second": 360.0,
   "realtime_factor_cap": 1.0,
   "tracking_ok_seconds": 100.0,
