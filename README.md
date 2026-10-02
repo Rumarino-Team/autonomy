@@ -4,9 +4,9 @@
 ## Build & Run: libauv_stationary_sim
 ```sh
 zig build run -- \
-    ./zig-out/lib/libauv_sleep_sim.so \
+    ./zig-out/lib/libauv_stationary_sim.so \
     prequalify \
-    ./auvs/sleep_sim/auv.json
+    ./auvs/stationary_sim/auv.json
 ```
 
 
