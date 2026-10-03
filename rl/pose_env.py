@@ -47,8 +47,10 @@ def load_config(path: Path | str = DEFAULT_CONFIG) -> dict:
     with open(path) as f:
         cfg = json.load(f)
     cfg["tam"] = np.asarray(cfg["tam"], dtype=np.float64)
+    # Global-navigation PID gains live under "odometry" (src/ConfigLoader.zig).
+    gains = cfg["odometry"] if "odometry" in cfg else cfg
     for key in ("kp", "ki", "kd"):
-        cfg[key] = np.asarray(cfg[key], dtype=np.float64)
+        cfg[key] = np.asarray(gains[key], dtype=np.float64)
     return cfg
 
 

@@ -33,7 +33,13 @@ else()
   set(STONEFISH_EXTRA_ARGS)
   set(STONEFISH_EXTRA_DEFS)
 endif()
-set(STONEFISH_INCLUDE_DIR "${STONEFISH_DIR}/include/${STONEFISH_LIB}")
+# Installed headers live in include/Stonefish/. The wrappers include them as
+# "Stonefish/...", so include/ must be on the path or those includes fall
+# through to a system Stonefish under /usr/local/include. Stonefish's own
+# headers include siblings as "StonefishCommon.h" and <version.h>, which
+# need include/Stonefish as well.
+set(STONEFISH_INCLUDE_ROOT "${STONEFISH_DIR}/include")
+set(STONEFISH_INCLUDE_DIR "${STONEFISH_INCLUDE_ROOT}/${STONEFISH_LIB}")
 
 ExternalProject_Add(stonefish
   SOURCE_DIR "${STONEFISH_SOURCE_DIR}"
@@ -56,6 +62,7 @@ set_target_properties(stonefish_c PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(stonefish_c PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/stonefish_c/include"
   PRIVATE
+    "${STONEFISH_INCLUDE_ROOT}"
     "${STONEFISH_INCLUDE_DIR}"
 )
 target_compile_definitions(stonefish_c PRIVATE
@@ -74,6 +81,7 @@ function(add_auv_sim target platform_config)
   add_dependencies(${target} stonefish)
 
   target_include_directories(${target} PRIVATE
+    "${STONEFISH_INCLUDE_ROOT}"
     "${STONEFISH_INCLUDE_DIR}"
     ${Python3_INCLUDE_DIRS}
   )
