@@ -2,4 +2,6 @@ zig-out/
 .zig-cache/
 tmp/
 .cache/
-build
+build/
+blender_stonefish/__pycache__/
+blender_stonefish_addon/__pycache__/

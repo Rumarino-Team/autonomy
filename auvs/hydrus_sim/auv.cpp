@@ -1,8 +1,11 @@
+#include <Python.h>
+
 #include <cmath>
 #include <cstdio>
 #include <math.h>
 
 #include "../../include/auv.h"
+#include "../../stonefish_c/include/stonefish_c.h"
 
 #include "Stonefish/actuators/Actuator.h"
 #include "Stonefish/actuators/Thruster.h"
@@ -27,6 +30,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <filesystem>
 #include <optional>
 #include <print>
@@ -61,6 +65,7 @@ void stopIfRequested()
 struct PlatformConfig {
     std::filesystem::path dataPath;
     std::string scenarioFile;
+    std::string blendFile;
     sf::Scalar kPhysicsDt;
     sf::Scalar kStepsPerSecond;
     sf::Scalar kRealtimeFactorCap;
@@ -80,7 +85,8 @@ std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& pa
 
     PlatformConfig config{
         .dataPath = parsed_json.at("data_path").get<std::string>(),
-        .scenarioFile = parsed_json.at("scenario_file").get<std::string>(),
+        .scenarioFile = parsed_json.contains("scenario_file") ? parsed_json.at("scenario_file").get<std::string>() : "",
+        .blendFile = parsed_json.contains("blend_file") ? parsed_json.at("blend_file").get<std::string>() : "",
         .kStepsPerSecond = parsed_json.at("steps_per_second").get<double>(),
         .kRealtimeFactorCap = parsed_json.at("realtime_factor_cap").get<double>(),
         .kTrackingOkSeconds = parsed_json.at("tracking_ok_seconds").get<double>(),
@@ -95,18 +101,27 @@ std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& pa
         std::println(stderr, "[Parser] data_path is empty in {}", path.string());
         return std::nullopt;
     }
-    if(config.scenarioFile.empty()){
-        std::println(stderr, "[Parser] scenario_file is empty in {}", path.string());
+    if(config.scenarioFile.empty() && config.blendFile.empty()){
+        std::println(stderr, "[Parser] scenario_file or blend_file is required in {}", path.string());
         return std::nullopt;
     }
     if(!std::filesystem::is_directory(config.dataPath)){
         std::println(stderr, "[Parser] data_path is not a directory: {}", config.dataPath.string());
         return std::nullopt;
     }
-    const std::filesystem::path scenario_path = config.dataPath / config.scenarioFile;
-    if(!std::filesystem::is_regular_file(scenario_path)){
-        std::println(stderr, "[Parser] scenario file not found: {}", scenario_path.string());
-        return std::nullopt;
+    if(!config.blendFile.empty()){
+        const std::filesystem::path blend_path = config.dataPath / config.blendFile;
+        if(!std::filesystem::is_regular_file(blend_path)){
+            std::println(stderr, "[Parser] blend file not found: {}", blend_path.string());
+            return std::nullopt;
+        }
+    }
+    if(!config.scenarioFile.empty()){
+        const std::filesystem::path scenario_path = config.dataPath / config.scenarioFile;
+        if(!std::filesystem::is_regular_file(scenario_path)){
+            std::println(stderr, "[Parser] scenario file not found: {}", scenario_path.string());
+            return std::nullopt;
+        }
     }
     if(config.kStepsPerSecond <= sf::Scalar(0)){
         std::println(stderr, "[Parser] steps_per_second must be > 0 in {}", path.string());
@@ -355,24 +370,315 @@ protected:
     }
 };
 
+#ifndef BLENDER_STONEFISH_ROOT
+#define BLENDER_STONEFISH_ROOT "."
+#endif
+#ifndef BLENDER_STONEFISH_CONFIG
+#define BLENDER_STONEFISH_CONFIG "blender_stonefish/config.yaml"
+#endif
+
+SfPose PoseAt(double x, double y, double z, double roll, double pitch, double yaw)
+{
+    SfPose pose{};
+    pose.xyz[0] = x;
+    pose.xyz[1] = y;
+    pose.xyz[2] = z;
+    pose.rpy[0] = roll;
+    pose.rpy[1] = pitch;
+    pose.rpy[2] = yaw;
+    return pose;
+}
+
+SfPart SubmergedPart(const char* name, const char* material, const char* look, double thickness, SfPose origin, SfPose compound)
+{
+    SfPart part{};
+    part.name = name;
+    part.material = material;
+    part.look = look;
+    part.physics = SF_BODY_SUBMERGED;
+    part.buoyant = 1;
+    part.thickness = thickness;
+    part.origin = origin;
+    part.compound = compound;
+    return part;
+}
+
+bool CallOk(int status, const char* what)
+{
+    if(status == 0)
+        return true;
+    std::println(stderr, "[hydrus_sim] {} failed", what);
+    return false;
+}
+
+bool BuildHydrusRobot(SfWorld* world)
+{
+    const SfMaterial materials[] = {
+        {"acrylic", 1200.0, 0.3, 0.0},
+        {"aluminium", 2700.0, 0.8, 0.0},
+        {"abs", 1040.0, 0.4, 0.0},
+        {"hdpe", 950.0, 0.4, 0.0},
+        {"pvc", 1500.0, 0.4, 0.0},
+    };
+    for(const SfMaterial& material : materials)
+    {
+        if(!CallOk(sf_material(world, &material), "hydrus material"))
+            return false;
+    }
+    const SfLook looks[] = {
+        {"clear", {0.9, 0.9, 0.9}, 0.1, 0.0, 0.5, nullptr, nullptr},
+        {"black", {0.0, 0.0, 0.0}, 0.1, 0.0, 0.5, nullptr, nullptr},
+        {"green", {0.0, 0.2, 0.0}, 0.1, 0.1, 0.5, nullptr, nullptr},
+        {"propeller", {1.0, 1.0, 1.0}, 0.3, 0.0, 0.5, nullptr, nullptr},
+    };
+    for(const SfLook& look : looks)
+    {
+        if(!CallOk(sf_look(world, &look), "hydrus look"))
+            return false;
+    }
+
+    SfRobot robot{};
+    robot.name = "HydrusAUV";
+    robot.base_link = "Hydrus";
+    robot.fixed = 0;
+    robot.self_collisions = 0;
+    robot.physics = SF_BODY_SUBMERGED;
+    robot.buoyant = 1;
+    robot.world = PoseAt(0.0, -1.0, 2.0, 0.0, 0.0, 3.14);
+    if(!CallOk(sf_robot_begin(world, &robot), "hydrus robot"))
+        return false;
+
+    const SfPose mesh_origin = PoseAt(0.0, 0.0, 0.0, -1.5708, 0.0, 0.0);
+    SfPartCylinder cabin{};
+    cabin.part = SubmergedPart("Cabin", "acrylic", "clear", 0.005, mesh_origin, PoseAt(0.0, 0.0, -0.0775, 0.0, 0.0, 0.0));
+    cabin.radius = 0.0825;
+    cabin.height = 0.75;
+    SfPartBox electronics{};
+    electronics.part = SubmergedPart("Box", "aluminium", "black", 0.003, mesh_origin, PoseAt(0.0, 0.0, -0.080, 0.0, 0.0, 0.0));
+    electronics.dimensions[0] = 0.22;
+    electronics.dimensions[1] = 0.22;
+    electronics.dimensions[2] = 0.12;
+    SfPartBox dvl{};
+    dvl.part = SubmergedPart("DVL", "abs", "green", -1.0, mesh_origin, PoseAt(0.0, 0.0, 0.07, 0.0, 0.0, 0.0));
+    dvl.dimensions[0] = 0.1;
+    dvl.dimensions[1] = 0.1;
+    dvl.dimensions[2] = 0.1;
+    SfPartMesh legs_left{};
+    legs_left.part = SubmergedPart(
+        "LowLegsLeft", "hdpe", "black", -1.0, mesh_origin, PoseAt(0.0, -0.375, -0.08, 0.0, 0.0, 0.0));
+    legs_left.path = "models/hydrus_lowlegs.obj";
+    legs_left.scale = 0.01;
+    SfPartMesh legs_right{};
+    legs_right.part = SubmergedPart(
+        "LowLegsRight", "hdpe", "black", -1.0, mesh_origin, PoseAt(0.228, -0.375, -0.08, 0.0, 0.0, 0.0));
+    legs_right.path = "models/hydrus_lowlegs.obj";
+    legs_right.scale = 0.01;
+    if(!CallOk(sf_robot_part_cylinder(world, &cabin), "cabin")
+       || !CallOk(sf_robot_part_box(world, &electronics), "electronics box")
+       || !CallOk(sf_robot_part_box(world, &dvl), "dvl")
+       || !CallOk(sf_robot_part_mesh(world, &legs_left), "left legs")
+       || !CallOk(sf_robot_part_mesh(world, &legs_right), "right legs"))
+        return false;
+
+    const double max_setpoint = 1000.0 / 60.0 * 2.0 * 3.14159265358979323846;
+    const SfPose mounts[] = {
+        PoseAt(0.198, 0.407, 0.0, 0.0, 0.0, -1.1781),
+        PoseAt(-0.198, 0.407, 0.0, 0.0, 0.0, -1.9635),
+        PoseAt(0.198, -0.408, 0.0, 0.0, 0.0, 1.1781),
+        PoseAt(-0.198, -0.408, 0.0, 0.0, 0.0, 1.9635),
+        PoseAt(0.211, 0.169, 0.0, 0.0, -1.571, 0.0),
+        PoseAt(-0.211, 0.169, 0.0, 0.0, -1.571, 0.0),
+        PoseAt(0.211, -0.169, 0.0, 0.0, -1.571, 0.0),
+        PoseAt(-0.211, -0.169, 0.0, 0.0, -1.571, 0.0),
+    };
+    const char* thruster_names[] = {
+        "thruster_0_front_left",
+        "thruster_1_front_right",
+        "thruster_2_back_left",
+        "thruster_3_back_right",
+        "thruster_4_depth_front_left",
+        "thruster_5_front_right",
+        "thruster_6_depth_back_left",
+        "thruster_7_back_right",
+    };
+    for(int i = 0; i < 8; ++i)
+    {
+        SfThruster thruster{};
+        thruster.name = thruster_names[i];
+        thruster.link = "Hydrus";
+        thruster.origin = mounts[i];
+        thruster.diameter = 0.18;
+        thruster.max_setpoint = max_setpoint;
+        thruster.right_handed = 1;
+        thruster.inverted_setpoint = 1;
+        thruster.normalized_setpoint = 1;
+        thruster.propeller_mesh = "models/propeller.obj";
+        thruster.propeller_scale = 0.75;
+        thruster.propeller_material = "pvc";
+        thruster.propeller_look = "propeller";
+        thruster.kp = 1.0;
+        thruster.ki = 10.0;
+        thruster.ilimit = 5.0;
+        thruster.thrust_forward = 0.48;
+        thruster.thrust_reverse = 0.48;
+        thruster.torque_coeff = 0.05;
+        if(!CallOk(sf_robot_thruster(world, &thruster), thruster.name))
+            return false;
+    }
+
+    SfSensor odometry{};
+    odometry.name = "Odometry";
+    odometry.link = "Hydrus";
+    odometry.origin = PoseAt(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    odometry.rate = 120.0;
+    odometry.history = -1;
+    SfImu imu{};
+    imu.sensor.name = "HydrusCameraIMU";
+    imu.sensor.link = "Hydrus";
+    imu.sensor.origin = PoseAt(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    imu.sensor.rate = 30.0;
+    imu.sensor.history = 1;
+    imu.angular_velocity_range[0] = 20.0;
+    imu.angular_velocity_range[1] = 20.0;
+    imu.angular_velocity_range[2] = 20.0;
+    imu.linear_acceleration_range = 30.0;
+    imu.angle_noise[0] = 0.001;
+    imu.angle_noise[1] = 0.001;
+    imu.angle_noise[2] = 0.001;
+    imu.angular_velocity_noise = 0.0005;
+    imu.yaw_drift = 0.0;
+    imu.linear_acceleration_noise = 0.005;
+    SfCamera camera{};
+    camera.sensor.name = "RGBCamera";
+    camera.sensor.link = "Hydrus";
+    camera.sensor.origin = PoseAt(0.0, 0.3, 0.0, 1.5708, 0.0, 3.14);
+    camera.sensor.rate = 20.0;
+    camera.sensor.history = -1;
+    camera.resolution_x = 800;
+    camera.resolution_y = 600;
+    camera.horizontal_fov_deg = 60.0;
+    if(!CallOk(sf_robot_odometry(world, &odometry), "odometry")
+       || !CallOk(sf_robot_imu(world, &imu), "imu")
+       || !CallOk(sf_robot_camera(world, &camera), "camera")
+       || !CallOk(sf_robot_end(world), "hydrus robot end"))
+        return false;
+    return true;
+}
+
+bool RunBlendBuilder(SfWorld* world, const std::filesystem::path& blend, const std::filesystem::path& data)
+{
+    Dl_info info{};
+    if(dladdr(reinterpret_cast<void*>(&sf_world_bind), &info) == 0 || info.dli_fname == nullptr)
+    {
+        std::println(stderr, "[hydrus_sim] cannot locate the auv library for ctypes");
+        return false;
+    }
+    if(!Py_IsInitialized())
+    {
+        // The AUV library is dlopened RTLD_LOCAL, so Python extension modules
+        // cannot see libpython unless it is also on the global namespace.
+        Dl_info python_info{};
+        if(dladdr(reinterpret_cast<void*>(&Py_Initialize), &python_info) != 0 && python_info.dli_fname != nullptr)
+            dlopen(python_info.dli_fname, RTLD_NOW | RTLD_GLOBAL);
+        Py_Initialize();
+    }
+    const PyGILState_STATE gil = PyGILState_Ensure();
+    const std::string bootstrap = std::string("import sys\nsys.path.insert(0, \"") + BLENDER_STONEFISH_ROOT + "\")\n";
+    if(PyRun_SimpleString(bootstrap.c_str()) != 0)
+    {
+        PyErr_Print();
+        PyGILState_Release(gil);
+        std::println(stderr, "[hydrus_sim] failed to add blender_stonefish to sys.path");
+        return false;
+    }
+    PyObject* module = PyImport_ImportModule("blender_stonefish");
+    if(module == nullptr)
+    {
+        PyErr_Print();
+        PyGILState_Release(gil);
+        std::println(stderr, "[hydrus_sim] failed to import blender_stonefish");
+        return false;
+    }
+    PyObject* build = PyObject_GetAttrString(module, "build");
+    PyObject* result = PyObject_CallFunction(
+        build,
+        "Kssss",
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(world)),
+        info.dli_fname,
+        blend.c_str(),
+        BLENDER_STONEFISH_CONFIG,
+        data.c_str());
+    const bool ok = result != nullptr && PyLong_Check(result) && PyLong_AsLong(result) == 0;
+    if(!ok)
+        PyErr_Print();
+    Py_XDECREF(result);
+    Py_XDECREF(build);
+    Py_DECREF(module);
+    PyGILState_Release(gil);
+    if(!ok)
+        std::println(stderr, "[hydrus_sim] blend builder failed for {}", blend.string());
+    return ok;
+}
+
 class SimManager : public sf::SimulationManager
 {
 public:
-    SimManager(sf::Scalar stepsPerSecond, std::filesystem::path scenarioPath)
+    SimManager(
+        sf::Scalar stepsPerSecond,
+        std::filesystem::path data,
+        std::string scenarioFile,
+        std::string blendFile)
         : SimulationManager(stepsPerSecond),
-          scenarioPath(std::move(scenarioPath))
+          dataPath(std::move(data)),
+          scenarioPath(scenarioFile.empty() ? std::filesystem::path{} : dataPath / scenarioFile),
+          blendPath(blendFile.empty() ? std::filesystem::path{} : dataPath / blendFile)
     {
+    }
+
+    ~SimManager() override
+    {
+        sf_world_free(sceneWorld);
     }
 
     void BuildScenario() override
     {
-        AuvScenarioParser parser(this);
-        if(!parser.Parse(scenarioPath.string()))
+        std::unordered_map<std::string, ObjectCls> objectClasses;
+        if(!blendPath.empty())
         {
-            std::println(stderr, "Failed to parse scenario {}", scenarioPath.string());
-            return;
+            sf_world_free(sceneWorld);
+            sceneWorld = sf_world_bind(this);
+            sf_world_set_data_dir(sceneWorld, dataPath.c_str());
+            if(!RunBlendBuilder(sceneWorld, blendPath, dataPath) || !BuildHydrusRobot(sceneWorld))
+            {
+                std::println(stderr, "[hydrus_sim] failed to build scenario from {}", blendPath.string());
+                return;
+            }
+            const int count = sf_world_class_count(sceneWorld);
+            for(int i = 0; i < count; ++i)
+            {
+                char name[256];
+                char cls[64];
+                if(sf_world_class_at(sceneWorld, i, name, sizeof(name), cls, sizeof(cls)) != 0)
+                    continue;
+                const auto mapped = ParseObjectClass(cls);
+                if(!mapped)
+                {
+                    std::println(stderr, "[hydrus_sim] static object '{}' has unknown cls '{}'", name, cls);
+                    continue;
+                }
+                objectClasses[name] = *mapped;
+            }
         }
-        const auto objectClasses = std::move(parser.objectClasses);
+        else
+        {
+            AuvScenarioParser parser(this);
+            if(!parser.Parse(scenarioPath.string()))
+            {
+                std::println(stderr, "Failed to parse scenario {}", scenarioPath.string());
+                return;
+            }
+            objectClasses = std::move(parser.objectClasses);
+        }
 
         odometry = nullptr;
         have_odometry = false;
@@ -505,7 +811,10 @@ public:
         ObjectCls cls;
     };
 
+    std::filesystem::path dataPath;
     std::filesystem::path scenarioPath;
+    std::filesystem::path blendPath;
+    SfWorld* sceneWorld = nullptr;
     sf::Scalar trackingOkSeconds = std::numeric_limits<uint32_t>::max();;
     bool bboxOnlyInFrontOfCamera = false;
     bool have_odometry = false;
@@ -700,7 +1009,8 @@ void auv_init(void)
     g_simulation_context = new SimulationContext();
     g_simulation_context->config = *loadedJson;
     const PlatformConfig& config = g_simulation_context->config;
-    g_simulation_context->sim = new SimManager(config.kStepsPerSecond, config.dataPath / config.scenarioFile);
+    g_simulation_context->sim = new SimManager(
+        config.kStepsPerSecond, config.dataPath, config.scenarioFile, config.blendFile);
     g_simulation_context->sim->trackingOkSeconds = config.kTrackingOkSeconds;
     g_simulation_context->sim->bboxOnlyInFrontOfCamera = config.kBBoxOnlyInFrontOfCamera;
     g_simulation_context->realtime.realtimeFactorCap = config.kRealtimeFactorCap;

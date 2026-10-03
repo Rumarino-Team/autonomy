@@ -1,6 +1,6 @@
 {
   "data_path": "auvs/hydrus_sim/data/",
-  "scenario_file": "scenarios/pool.scn",
+  "blend_file": "pool_scene.blend",
   "steps_per_second": 360.0,
   "realtime_factor_cap": 1.0,
   "tracking_ok_seconds": 100.0,
