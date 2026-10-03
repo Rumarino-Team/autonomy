@@ -86,6 +86,3 @@ function(add_auv_sim target platform_config)
 endfunction()
 
 add_auv_sim(auv_hydrus_sim "auvs/hydrus_sim/platform.json")
-add_auv_sim(auv_proteus_sim "auvs/proteus_sim/platform.json")
-add_auv_sim(auv_bluerov2_sim "auvs/bluerov2_sim/platform.json")
-add_auv_sim(auv_girona500_sim "auvs/girona500_sim/platform.json")

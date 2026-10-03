@@ -249,18 +249,12 @@ pub fn build(b: *std.Build) !void {
     if (stonefish) {
         const cmake_targets = [_][]const u8{
             "auv_hydrus_sim",
-            "auv_proteus_sim",
-            "auv_bluerov2_sim",
-            "auv_girona500_sim",
         };
         for (cmake_targets) |cmake_target| {
             cmake_build.addArg(cmake_target);
         }
 
         _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/hydrus_sim"));
-        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/proteus_sim"));
-        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/bluerov2_sim"));
-        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/girona500_sim"));
 
         for (cmake_targets) |cmake_target| {
             const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
