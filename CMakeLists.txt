@@ -86,3 +86,79 @@ function(add_auv_sim target platform_config)
 endfunction()
 
 add_auv_sim(auv_hydrus_sim "auvs/hydrus_sim/platform.json")
+
+# MuJoCo prefix is an install tree (include/ and lib/libmujoco.so) or a source
+# tree whose library lives at build/lib/libmujoco.so. Unset, the Stonefish
+# targets still configure.
+set(MUJOCO_PREFIX "" CACHE PATH "MuJoCo install prefix or source tree")
+
+if(MUJOCO_PREFIX)
+  if(EXISTS "${MUJOCO_PREFIX}/lib/libmujoco.so")
+    set(MUJOCO_LIB_DIR "${MUJOCO_PREFIX}/lib")
+  elseif(EXISTS "${MUJOCO_PREFIX}/build/lib/libmujoco.so")
+    set(MUJOCO_LIB_DIR "${MUJOCO_PREFIX}/build/lib")
+  else()
+    message(FATAL_ERROR
+      "libmujoco.so not found under ${MUJOCO_PREFIX}/lib or ${MUJOCO_PREFIX}/build/lib")
+  endif()
+
+  set(MUJOCO_INCLUDE_DIR "${MUJOCO_PREFIX}/include")
+  if(EXISTS "${MUJOCO_INCLUDE_DIR}/GLFW/glfw3.h")
+    set(GLFW_INCLUDE_DIR "${MUJOCO_INCLUDE_DIR}")
+  elseif(EXISTS "${MUJOCO_PREFIX}/build/_deps/glfw3-src/include/GLFW/glfw3.h")
+    set(GLFW_INCLUDE_DIR "${MUJOCO_PREFIX}/build/_deps/glfw3-src/include")
+  else()
+    set(GLFW_INCLUDE_DIR "/usr/include")
+  endif()
+
+  add_library(auv_hydrus_mujoco SHARED
+    auvs/hydrus_mujoco/auv.cpp
+    auvs/hydrus_mujoco/hydrus_core.cpp
+  )
+  target_include_directories(auv_hydrus_mujoco PRIVATE
+    "${CMAKE_SOURCE_DIR}/include"
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${MUJOCO_INCLUDE_DIR}"
+    "${GLFW_INCLUDE_DIR}"
+  )
+  target_link_directories(auv_hydrus_mujoco PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(auv_hydrus_mujoco PRIVATE mujoco)
+  if(EXISTS "${MUJOCO_LIB_DIR}/libglfw.so" OR
+      EXISTS "/usr/lib/x86_64-linux-gnu/libglfw.so" OR
+      EXISTS "/usr/lib/libglfw.so")
+    target_link_libraries(auv_hydrus_mujoco PRIVATE glfw)
+  elseif(EXISTS "${MUJOCO_LIB_DIR}/libglfw3.a")
+    target_link_libraries(auv_hydrus_mujoco PRIVATE
+      "${MUJOCO_LIB_DIR}/libglfw3.a"
+      X11
+      Xrandr
+      Xi
+      Xinerama
+      Xcursor
+      GL
+      dl
+      m
+    )
+  else()
+    target_link_libraries(auv_hydrus_mujoco PRIVATE glfw)
+  endif()
+  target_link_libraries(auv_hydrus_mujoco PRIVATE pthread)
+  set_target_properties(auv_hydrus_mujoco PROPERTIES
+    BUILD_RPATH "${MUJOCO_LIB_DIR}"
+  )
+
+  add_library(hydrus_mujoco_rl SHARED
+    auvs/hydrus_mujoco/hydrus_batch.cpp
+    auvs/hydrus_mujoco/hydrus_camera.cpp
+    auvs/hydrus_mujoco/hydrus_core.cpp
+  )
+  target_include_directories(hydrus_mujoco_rl PRIVATE
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${MUJOCO_INCLUDE_DIR}"
+  )
+  target_link_directories(hydrus_mujoco_rl PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(hydrus_mujoco_rl PRIVATE mujoco pthread)
+  set_target_properties(hydrus_mujoco_rl PROPERTIES
+    BUILD_RPATH "${MUJOCO_LIB_DIR}"
+  )
+endif()

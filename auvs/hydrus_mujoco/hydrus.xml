@@ -1,0 +1,114 @@
+<mujoco model="hydrus">
+  <!-- NED world: +X north, +Y east, +Z down. Gravity points down. -->
+  <compiler angle="radian" meshdir="../hydrus_sim/data/models"/>
+  <option timestep="0.00277777777778" gravity="0 0 9.81" integrator="implicitfast">
+    <flag sleep="disable"/>
+  </option>
+  <!-- Hull geom user data: volume [m^3], then Stonefish form drag Cd (x y z) and skin
+       friction Cf (x y z) in the body frame. Values come from Stonefish 1.5 for hydrus_auv.scn. -->
+  <size nuser_geom="7"/>
+
+  <visual>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
+    <rgba haze="0.10 0.20 0.30 1"/>
+  </visual>
+
+  <asset>
+    <mesh name="gate" file="gate.obj"/>
+    <mesh name="lowlegs" file="hydrus_lowlegs.obj" scale="0.01 0.01 0.01"/>
+    <mesh name="propeller" file="propeller.obj" scale="0.75 0.75 0.75"/>
+  </asset>
+
+  <!-- camera_spec: width, height, horizontal FOV in degrees. water_density in kg/m^3.
+       hydrus_dry_mass is the real mass gravity acts on; the body inertial mass also carries
+       Stonefish added mass. hydrus_volume and hydrus_cb (body frame) set buoyancy when fully
+       submerged. hydro_rate is how often Stonefish recomputes fluid forces, in Hz. -->
+  <custom>
+    <numeric name="camera_spec" size="3" data="800 600 60"/>
+    <numeric name="water_density" size="1" data="1025"/>
+    <numeric name="hydrus_dry_mass" size="1" data="8.679731"/>
+    <numeric name="hydrus_inertia" size="3" data="1.304482 2.261308 21.169488"/>
+    <numeric name="hydrus_volume" size="1" data="0.00735533"/>
+    <numeric name="hydrus_cb" size="3" data="-0.00014622 -0.00024171 0.00931505"/>
+    <numeric name="hydro_rate" size="1" data="50"/>
+  </custom>
+
+  <worldbody>
+    <light pos="0 -4 -6" dir="0 0.2 1" directional="true" diffuse="0.8 0.8 0.8"/>
+
+    <!-- Floor at 3 m depth. Local +Z is flipped to world -Z so the solid side faces the vehicle. -->
+    <geom name="floor" type="plane" pos="1 10 3" euler="3.141592653589793 0 0"
+          size="15 20 0.5" rgba="0.5 0.5 0.5 1"/>
+
+    <geom name="surface" type="plane" pos="1 10 0" euler="3.141592653589793 0 0"
+          size="15 20 0.5" rgba="0.15 0.40 0.65 0.25" contype="0" conaffinity="0"/>
+
+    <body name="gate" pos="1 8 3" mocap="true">
+      <geom name="gate" type="mesh" mesh="gate" contype="0" conaffinity="0" rgba="0.75 0.75 0.75 1"/>
+    </body>
+
+    <body name="marker" pos="1 20 2" mocap="true">
+      <geom name="marker" type="cylinder" size="0.1 2" rgba="1 1 0 1"/>
+    </body>
+
+    <!-- Start pose matches hydrus_env.scn: xyz 0 -1 2, yaw 3.14. -->
+    <body name="hydrus" pos="0 -1 2" euler="0 0 3.14">
+      <freejoint name="hydrus_free"/>
+      <!-- Stonefish compound: 8.68 kg of shell parts plus added mass. Stonefish integrates
+           with this augmented mass and inertia, and applies gravity to the dry mass only.
+           The added inertia breaks A + B >= C, which MuJoCo only checks when compiling, so
+           the plugin writes hydrus_inertia over this placeholder after loading. -->
+      <inertial pos="-0.00011753 -0.00019489 -0.00638696" quat="1 -6.95e-05 4.2e-05 4e-06"
+                mass="154.627734" diaginertia="1.304482 2.261308 3.56579"/>
+      <site name="imu" pos="0 0 0" size="0.01"/>
+      <site name="camera" pos="0 0.3 0" euler="1.5708 0 3.14" size="0.01"/>
+
+      <geom name="cabin" type="cylinder" size="0.0825 0.375" pos="0 0 -0.0775"
+            euler="-1.5708 0 0" rgba="0.9 0.9 0.9 0.35"
+            user="0.00215788 0.5 1.0 0.5 0.05 0.1 0.05"/>
+      <geom name="box" type="box" size="0.11 0.11 0.06" pos="0 0 -0.08"
+            euler="-1.5708 0 0" rgba="0.05 0.05 0.05 1"
+            user="0.00060725 0.550949 1.0 0.489041 0.0550949 0.1 0.0489041"/>
+      <geom name="dvl" type="box" size="0.05 0.05 0.05" pos="0 0 0.07"
+            euler="-1.5708 0 0" rgba="0.0 0.2 0.0 1"
+            user="0.001 1.0 0.990024 0.887632 0.1 0.0990024 0.0887632"/>
+      <geom name="legs_left" type="mesh" mesh="lowlegs" pos="0 -0.375 -0.08"
+            euler="-1.5708 0 0" rgba="0.02 0.02 0.02 1"
+            user="0.0017951 1.0 0.01663 0.081449 0.1 0.001663 0.0081449"/>
+      <geom name="legs_right" type="mesh" mesh="lowlegs" pos="0.228 -0.375 -0.08"
+            euler="-1.5708 0 0" rgba="0.02 0.02 0.02 1"
+            user="0.0017951 1.0 0.01663 0.081449 0.1 0.001663 0.0081449"/>
+
+      <site name="thruster_0" pos="0.198 0.407 0" euler="0 0 -1.1781" size="0.01"/>
+      <site name="thruster_1" pos="-0.198 0.407 0" euler="0 0 -1.9635" size="0.01"/>
+      <site name="thruster_2" pos="0.198 -0.408 0" euler="0 0 1.1781" size="0.01"/>
+      <site name="thruster_3" pos="-0.198 -0.408 0" euler="0 0 1.9635" size="0.01"/>
+      <site name="thruster_4" pos="0.211 0.169 0" euler="0 -1.571 0" size="0.01"/>
+      <site name="thruster_5" pos="-0.211 0.169 0" euler="0 -1.571 0" size="0.01"/>
+      <site name="thruster_6" pos="0.211 -0.169 0" euler="0 -1.571 0" size="0.01"/>
+      <site name="thruster_7" pos="-0.211 -0.169 0" euler="0 -1.571 0" size="0.01"/>
+
+      <geom name="prop_0" type="mesh" mesh="propeller" pos="0.198 0.407 0" euler="0 0 -1.1781"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_1" type="mesh" mesh="propeller" pos="-0.198 0.407 0" euler="0 0 -1.9635"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_2" type="mesh" mesh="propeller" pos="0.198 -0.408 0" euler="0 0 1.1781"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_3" type="mesh" mesh="propeller" pos="-0.198 -0.408 0" euler="0 0 1.9635"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_4" type="mesh" mesh="propeller" pos="0.211 0.169 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_5" type="mesh" mesh="propeller" pos="-0.211 0.169 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_6" type="mesh" mesh="propeller" pos="0.211 -0.169 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_7" type="mesh" mesh="propeller" pos="-0.211 -0.169 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <gyro name="gyro" site="imu"/>
+    <accelerometer name="accel" site="imu"/>
+  </sensor>
+</mujoco>

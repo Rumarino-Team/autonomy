@@ -265,5 +265,30 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
+    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo hydrus plugin and the batched RL library") orelse false;
+    const mujoco_prefix = b.option([]const u8, "MUJOCO_PREFIX", "MuJoCo install prefix or source tree");
+    if (mujoco) {
+        const prefix = mujoco_prefix orelse @panic("-Dmujoco requires -DMUJOCO_PREFIX");
+        cmake_configure.addArg(b.fmt("-DMUJOCO_PREFIX={s}", .{prefix}));
+
+        const cmake_targets = [_][]const u8{
+            "auv_hydrus_mujoco",
+            "hydrus_mujoco_rl",
+        };
+        for (cmake_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
+
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/hydrus_mujoco"));
+
+        for (cmake_targets) |cmake_target| {
+            const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
+            const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
+            const install_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
+            install_sim.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_sim.step);
+        }
+    }
+
     cmake_build.step.dependOn(&cmake_configure.step);
 }
