@@ -9,19 +9,45 @@ include(ExternalProject)
 
 find_package(Python3 COMPONENTS Development REQUIRED)
 
-set(STONEFISH_DIR "${CMAKE_BINARY_DIR}/stonefish")
-set(STONEFISH_BUILD_DIR "${CMAKE_BINARY_DIR}/stonefish-build")
+# OFF builds the upstream vendor/stonefish submodule; ON builds the vendor/stonefish_rtx
+# fork with the OptiX path tracer and DLSS.
+option(AUTONOMY_STONEFISH_RTX "Build against vendor/stonefish_rtx (StonefishRTX)" OFF)
+# Empty uses the toolkit's nvcc. Set an older one when the toolkit is newer than the driver.
+set(AUTONOMY_STONEFISH_RTX_NVCC "" CACHE FILEPATH "nvcc for the StonefishRTX OptiX programs")
+
+if(AUTONOMY_STONEFISH_RTX)
+  set(STONEFISH_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/stonefish_rtx")
+  set(STONEFISH_DIR "${CMAKE_BINARY_DIR}/stonefish_rtx")
+  set(STONEFISH_BUILD_DIR "${CMAKE_BINARY_DIR}/stonefish_rtx-build")
+  set(STONEFISH_LIB StonefishRTX)
+  set(STONEFISH_EXTRA_ARGS -DSTONEFISH_RTX=ON -DSTONEFISH_DLSS=ON)
+  if(AUTONOMY_STONEFISH_RTX_NVCC)
+    list(APPEND STONEFISH_EXTRA_ARGS -DSTONEFISH_RTX_PROGRAMS_NVCC=${AUTONOMY_STONEFISH_RTX_NVCC})
+  endif()
+  set(STONEFISH_EXTRA_DEFS STONEFISH_HAS_RTX STONEFISH_HAS_DLSS)
+else()
+  set(STONEFISH_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/stonefish")
+  set(STONEFISH_DIR "${CMAKE_BINARY_DIR}/stonefish")
+  set(STONEFISH_BUILD_DIR "${CMAKE_BINARY_DIR}/stonefish-build")
+  set(STONEFISH_LIB Stonefish)
+  set(STONEFISH_EXTRA_ARGS)
+  set(STONEFISH_EXTRA_DEFS)
+endif()
+set(STONEFISH_INCLUDE_DIR "${STONEFISH_DIR}/include/${STONEFISH_LIB}")
 
 ExternalProject_Add(stonefish
-  SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/stonefish"
+  SOURCE_DIR "${STONEFISH_SOURCE_DIR}"
   BINARY_DIR "${STONEFISH_BUILD_DIR}"
 
   CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=${STONEFISH_DIR}
     -DCMAKE_BUILD_TYPE=Release
+    ${STONEFISH_EXTRA_ARGS}
+
+  BUILD_ALWAYS ${AUTONOMY_STONEFISH_RTX}
 
   BUILD_BYPRODUCTS
-    "${STONEFISH_DIR}/lib/libStonefish.so"
+    "${STONEFISH_DIR}/lib/lib${STONEFISH_LIB}.so"
 )
 
 add_library(stonefish_c STATIC stonefish_c/src/stonefish_c.cpp)
@@ -30,29 +56,40 @@ set_target_properties(stonefish_c PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(stonefish_c PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/stonefish_c/include"
   PRIVATE
-    "${STONEFISH_DIR}/include"
-    "${STONEFISH_DIR}/include/Stonefish"
+    "${STONEFISH_INCLUDE_DIR}"
 )
 target_compile_definitions(stonefish_c PRIVATE
   BT_EULER_DEFAULT_ZYX
   BT_USE_DOUBLE_PRECISION
+  ${STONEFISH_EXTRA_DEFS}
 )
+
+include(CheckIncludeFileCXX)
+set(CMAKE_REQUIRED_FLAGS "-std=c++23")
+check_include_file_cxx(print AUTONOMY_HAS_STD_PRINT)
+unset(CMAKE_REQUIRED_FLAGS)
 
 function(add_auv_sim target platform_config)
   add_library(${target} SHARED auvs/hydrus_sim/auv.cpp)
   add_dependencies(${target} stonefish)
 
   target_include_directories(${target} PRIVATE
-    "${STONEFISH_DIR}/include"
-    "${STONEFISH_DIR}/include/Stonefish"
+    "${STONEFISH_INCLUDE_DIR}"
     ${Python3_INCLUDE_DIRS}
   )
+  # GCC 13 and earlier ship C++23 without <print>. auvs/hydrus_sim/compat fills that gap.
+  if(NOT AUTONOMY_HAS_STD_PRINT)
+    target_include_directories(${target} BEFORE PRIVATE
+      "${CMAKE_SOURCE_DIR}/auvs/hydrus_sim/compat"
+    )
+  endif()
 
   target_compile_definitions(${target} PRIVATE
     _GNU_SOURCE
     BT_EULER_DEFAULT_ZYX
     BT_USE_DOUBLE_PRECISION
-    SHADER_DIR_PATH="${STONEFISH_DIR}/share/Stonefish/shaders/"
+    ${STONEFISH_EXTRA_DEFS}
+    SHADER_DIR_PATH="${STONEFISH_DIR}/share/${STONEFISH_LIB}/shaders/"
     AUV_PLATFORM_CONFIG="${platform_config}"
     BLENDER_STONEFISH_ROOT="${CMAKE_SOURCE_DIR}"
     BLENDER_STONEFISH_CONFIG="${CMAKE_SOURCE_DIR}/blender_stonefish/config.yaml"
@@ -68,7 +105,7 @@ function(add_auv_sim target platform_config)
 
   target_link_libraries(${target} PRIVATE
     stonefish_c
-    Stonefish
+    ${STONEFISH_LIB}
     SDL2
     freetype
     OpenGL
