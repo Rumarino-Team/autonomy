@@ -11,6 +11,12 @@ extern "C" {
 
 typedef uint8_t AuvObjectCls;
 
+typedef uint8_t AuvError;
+enum {
+  AUV_ERROR_NONE = 0,
+  AUV_ERROR_SCENARIO_RESTART = 1,
+};
+
 typedef struct {
   uint32_t x;
   uint32_t y;
@@ -45,6 +51,7 @@ typedef struct {
   uint32_t image_height;
   float pressure_depth;
   bool pressure_depth_ok;
+  AuvError error;
 } AuvFrame;
 
 void auv_init(void);

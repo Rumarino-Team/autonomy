@@ -12,7 +12,6 @@
 #include "Stonefish/core/ConsoleSimulationApp.h"
 #include "Stonefish/core/GraphicalSimulationApp.h"
 #include "Stonefish/core/Robot.h"
-#include "Stonefish/core/ScenarioParser.h"
 #include "Stonefish/core/SimulationManager.h"
 #include "Stonefish/entities/Entity.h"
 #include "Stonefish/entities/MovingEntity.h"
@@ -25,13 +24,16 @@
 
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <exception>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <print>
 #include <string>
@@ -64,7 +66,6 @@ void stopIfRequested()
 
 struct PlatformConfig {
     std::filesystem::path dataPath;
-    std::string scenarioFile;
     std::string blendFile;
     std::string robot;
     sf::Scalar kPhysicsDt;
@@ -86,8 +87,7 @@ std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& pa
 
     PlatformConfig config{
         .dataPath = parsed_json.at("data_path").get<std::string>(),
-        .scenarioFile = parsed_json.contains("scenario_file") ? parsed_json.at("scenario_file").get<std::string>() : "",
-        .blendFile = parsed_json.contains("blend_file") ? parsed_json.at("blend_file").get<std::string>() : "",
+        .blendFile = parsed_json.at("blend_file").get<std::string>(),
         .robot = parsed_json.contains("robot") ? parsed_json.at("robot").get<std::string>() : "hydrus",
         .kStepsPerSecond = parsed_json.at("steps_per_second").get<double>(),
         .kRealtimeFactorCap = parsed_json.at("realtime_factor_cap").get<double>(),
@@ -103,27 +103,18 @@ std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& pa
         std::println(stderr, "[Parser] data_path is empty in {}", path.string());
         return std::nullopt;
     }
-    if(config.scenarioFile.empty() && config.blendFile.empty()){
-        std::println(stderr, "[Parser] scenario_file or blend_file is required in {}", path.string());
+    if(config.blendFile.empty()){
+        std::println(stderr, "[Parser] blend_file is required in {}", path.string());
         return std::nullopt;
     }
     if(!std::filesystem::is_directory(config.dataPath)){
         std::println(stderr, "[Parser] data_path is not a directory: {}", config.dataPath.string());
         return std::nullopt;
     }
-    if(!config.blendFile.empty()){
-        const std::filesystem::path blend_path = config.dataPath / config.blendFile;
-        if(!std::filesystem::is_regular_file(blend_path)){
-            std::println(stderr, "[Parser] blend file not found: {}", blend_path.string());
-            return std::nullopt;
-        }
-    }
-    if(!config.scenarioFile.empty()){
-        const std::filesystem::path scenario_path = config.dataPath / config.scenarioFile;
-        if(!std::filesystem::is_regular_file(scenario_path)){
-            std::println(stderr, "[Parser] scenario file not found: {}", scenario_path.string());
-            return std::nullopt;
-        }
+    const std::filesystem::path blend_path = config.dataPath / config.blendFile;
+    if(!std::filesystem::is_regular_file(blend_path)){
+        std::println(stderr, "[Parser] blend file not found: {}", blend_path.string());
+        return std::nullopt;
     }
     if(config.kStepsPerSecond <= sf::Scalar(0)){
         std::println(stderr, "[Parser] steps_per_second must be > 0 in {}", path.string());
@@ -320,57 +311,6 @@ bool ProjectObjectBox(
     box.bottom_right.y = clamp_pixel(v_max, image_height);
     return box.bottom_right.x > box.top_left.x && box.bottom_right.y > box.top_left.y;
 }
-
-class AuvScenarioParser : public sf::ScenarioParser
-{
-public:
-    using ScenarioParser::ScenarioParser;
-    std::unordered_map<std::string, ObjectCls> objectClasses;
-
-protected:
-    bool ParseStatic(XMLElement* element) override
-    {
-        const char* type = nullptr;
-        element->QueryStringAttribute("type", &type);
-        if(type != nullptr && (std::string(type) == "plane" || std::string(type) == "terrain"))
-            return ScenarioParser::ParseStatic(element);
-
-        const char* name = nullptr;
-        element->QueryStringAttribute("name", &name);
-        const char* display_name = name != nullptr ? name : "<unnamed>";
-
-        const char* cls = nullptr;
-        if(element->QueryStringAttribute("cls", &cls) != XML_SUCCESS)
-            element->QueryStringAttribute("clss", &cls);
-
-        if(cls == nullptr || *cls == '\0')
-        {
-            std::println(stderr, "[hydrus_sim] static object '{}' is missing a cls tag", display_name);
-            return false;
-        }
-
-        std::string cls_name{cls};
-        for(char& c : cls_name)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if(cls_name == "scenery")
-            return ScenarioParser::ParseStatic(element);
-
-        const auto mapped = ParseObjectClass(cls);
-        if(!mapped)
-        {
-            std::println(stderr, "[hydrus_sim] static object '{}' has unknown cls '{}'", display_name, cls);
-            return false;
-        }
-        if(name == nullptr)
-        {
-            std::println(stderr, "[hydrus_sim] static object with cls '{}' is missing a name", cls);
-            return false;
-        }
-
-        objectClasses[name] = *mapped;
-        return ScenarioParser::ParseStatic(element);
-    }
-};
 
 #ifndef BLENDER_STONEFISH_ROOT
 #define BLENDER_STONEFISH_ROOT "."
@@ -1104,13 +1044,11 @@ public:
     SimManager(
         sf::Scalar stepsPerSecond,
         std::filesystem::path data,
-        std::string scenarioFile,
         std::string blendFile,
         std::string robot)
         : SimulationManager(stepsPerSecond),
           dataPath(std::move(data)),
-          scenarioPath(scenarioFile.empty() ? std::filesystem::path{} : dataPath / scenarioFile),
-          blendPath(blendFile.empty() ? std::filesystem::path{} : dataPath / blendFile),
+          blendPath(dataPath / blendFile),
           robotName(std::move(robot))
     {
     }
@@ -1123,41 +1061,28 @@ public:
     void BuildScenario() override
     {
         std::unordered_map<std::string, ObjectCls> objectClasses;
-        if(!blendPath.empty())
+        sf_world_free(sceneWorld);
+        sceneWorld = sf_world_bind(this);
+        sf_world_set_data_dir(sceneWorld, dataPath.c_str());
+        if(!RunBlendBuilder(sceneWorld, blendPath, dataPath) || !BuildRobot(sceneWorld, robotName))
         {
-            sf_world_free(sceneWorld);
-            sceneWorld = sf_world_bind(this);
-            sf_world_set_data_dir(sceneWorld, dataPath.c_str());
-            if(!RunBlendBuilder(sceneWorld, blendPath, dataPath) || !BuildRobot(sceneWorld, robotName))
-            {
-                std::println(stderr, "[hydrus_sim] failed to build scenario from {}", blendPath.string());
-                return;
-            }
-            const int count = sf_world_class_count(sceneWorld);
-            for(int i = 0; i < count; ++i)
-            {
-                char name[256];
-                char cls[64];
-                if(sf_world_class_at(sceneWorld, i, name, sizeof(name), cls, sizeof(cls)) != 0)
-                    continue;
-                const auto mapped = ParseObjectClass(cls);
-                if(!mapped)
-                {
-                    std::println(stderr, "[hydrus_sim] static object '{}' has unknown cls '{}'", name, cls);
-                    continue;
-                }
-                objectClasses[name] = *mapped;
-            }
+            std::println(stderr, "[hydrus_sim] failed to build scenario from {}", blendPath.string());
+            return;
         }
-        else
+        const int count = sf_world_class_count(sceneWorld);
+        for(int i = 0; i < count; ++i)
         {
-            AuvScenarioParser parser(this);
-            if(!parser.Parse(scenarioPath.string()))
+            char name[256];
+            char cls[64];
+            if(sf_world_class_at(sceneWorld, i, name, sizeof(name), cls, sizeof(cls)) != 0)
+                continue;
+            const auto mapped = ParseObjectClass(cls);
+            if(!mapped)
             {
-                std::println(stderr, "Failed to parse scenario {}", scenarioPath.string());
-                return;
+                std::println(stderr, "[hydrus_sim] static object '{}' has unknown cls '{}'", name, cls);
+                continue;
             }
-            objectClasses = std::move(parser.objectClasses);
+            objectClasses[name] = *mapped;
         }
 
         odometry = nullptr;
@@ -1292,7 +1217,6 @@ public:
     };
 
     std::filesystem::path dataPath;
-    std::filesystem::path scenarioPath;
     std::filesystem::path blendPath;
     std::string robotName;
     SfWorld* sceneWorld = nullptr;
@@ -1357,6 +1281,11 @@ public:
 
     std::chrono::milliseconds minRenderInterval{0};
 
+    void setTimeStep(sf::Scalar timeStep)
+    {
+        timeStep_ = timeStep;
+    }
+
 private:
     bool cleaned = false;
     std::optional<std::chrono::steady_clock::time_point> lastRender;
@@ -1386,6 +1315,11 @@ public:
             Quit();
         CleanUp();
         cleaned = true;
+    }
+
+    void setTimeStep(sf::Scalar timeStep)
+    {
+        timeStep_ = timeStep;
     }
 
 private:
@@ -1441,7 +1375,127 @@ struct SimulationContext
     SimApp* graphical = nullptr;
     ConsoleSimApp* console = nullptr;
     RealtimeThrottle realtime;
+    std::atomic<bool> watcherStop{false};
+    std::atomic<bool> scenarioReload{false};
+    std::mutex watchMutex;
+    std::filesystem::path watchedBlend;
+    std::filesystem::file_time_type platformMtime{};
+    std::filesystem::file_time_type blendMtime{};
+    std::thread watcher;
 };
+
+void scenarioWatchLoop(SimulationContext* ctx)
+{
+    while(!ctx->watcherStop.load())
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if(ctx->watcherStop.load())
+            break;
+
+        std::filesystem::path blend;
+        std::filesystem::file_time_type platformBase{};
+        std::filesystem::file_time_type blendBase{};
+        {
+            std::lock_guard<std::mutex> lock(ctx->watchMutex);
+            blend = ctx->watchedBlend;
+            platformBase = ctx->platformMtime;
+            blendBase = ctx->blendMtime;
+        }
+
+        std::error_code platformError;
+        const auto platformNow = std::filesystem::last_write_time(kPlatformConfigPath, platformError);
+        if(platformError)
+            continue;
+        std::error_code blendError;
+        const auto blendNow = std::filesystem::last_write_time(blend, blendError);
+        if(blendError)
+            continue;
+        if(platformNow == platformBase && blendNow == blendBase)
+            continue;
+
+        std::lock_guard<std::mutex> lock(ctx->watchMutex);
+        if(ctx->watchedBlend != blend)
+            continue;
+        ctx->platformMtime = platformNow;
+        ctx->blendMtime = blendNow;
+        ctx->scenarioReload.store(true);
+    }
+}
+
+void noteWatchedFiles(SimulationContext* ctx)
+{
+    std::lock_guard<std::mutex> lock(ctx->watchMutex);
+    ctx->watchedBlend = ctx->sim->blendPath;
+    std::error_code ec;
+    ctx->platformMtime = std::filesystem::last_write_time(kPlatformConfigPath, ec);
+    ctx->blendMtime = std::filesystem::last_write_time(ctx->sim->blendPath, ec);
+}
+
+void startScenarioWatcher(SimulationContext* ctx)
+{
+    noteWatchedFiles(ctx);
+    ctx->watcherStop.store(false);
+    ctx->scenarioReload.store(false);
+    ctx->watcher = std::thread(scenarioWatchLoop, ctx);
+}
+
+void stopScenarioWatcher(SimulationContext* ctx)
+{
+    if(!ctx->watcher.joinable())
+        return;
+    ctx->watcherStop.store(true);
+    ctx->watcher.join();
+}
+
+bool reloadScenario(SimulationContext* ctx)
+{
+    std::optional<PlatformConfig> loaded;
+    try
+    {
+        loaded = loadPlatformConfig(kPlatformConfigPath);
+    }
+    catch(const std::exception& ex)
+    {
+        std::println(stderr, "[hydrus_sim] platform reload failed: {}", ex.what());
+        return false;
+    }
+    if(!loaded)
+    {
+        std::println(stderr, "[hydrus_sim] platform reload failed; keeping scenario");
+        return false;
+    }
+    if(loaded->kConsoleApp != ctx->config.kConsoleApp)
+    {
+        std::println(stderr, "[hydrus_sim] console change ignored while the app is running");
+        loaded->kConsoleApp = ctx->config.kConsoleApp;
+    }
+
+    ctx->config = *loaded;
+    SimManager* sim = ctx->sim;
+    sim->dataPath = ctx->config.dataPath;
+    sim->blendPath = ctx->config.dataPath / ctx->config.blendFile;
+    sim->robotName = ctx->config.robot;
+    sim->trackingOkSeconds = ctx->config.kTrackingOkSeconds;
+    sim->bboxOnlyInFrontOfCamera = ctx->config.kBBoxOnlyInFrontOfCamera;
+    sim->logged_tracking_loss = false;
+    sim->setStepsPerSecond(ctx->config.kStepsPerSecond);
+    ctx->realtime.realtimeFactorCap = ctx->config.kRealtimeFactorCap;
+    ctx->realtime.base_set = false;
+    if(ctx->graphical != nullptr)
+    {
+        ctx->graphical->minRenderInterval = ctx->config.kMinRenderInterval;
+        ctx->graphical->setTimeStep(ctx->config.kPhysicsDt);
+    }
+    if(ctx->console != nullptr)
+        ctx->console->setTimeStep(ctx->config.kPhysicsDt);
+
+    noteWatchedFiles(ctx);
+    std::println(stdout, "[hydrus_sim] reloading scenario robot={} blend={}", sim->robotName, sim->blendPath.string());
+    sim->RestartScenario();
+    if(!sim->StartSimulation())
+        std::println(stderr, "[hydrus_sim] scenario restart failed to solve initial conditions");
+    return true;
+}
 
 SimulationContext* g_simulation_context = nullptr;
 
@@ -1491,7 +1545,7 @@ void auv_init(void)
     g_simulation_context->config = *loadedJson;
     const PlatformConfig& config = g_simulation_context->config;
     g_simulation_context->sim = new SimManager(
-        config.kStepsPerSecond, config.dataPath, config.scenarioFile, config.blendFile, config.robot);
+        config.kStepsPerSecond, config.dataPath, config.blendFile, config.robot);
     g_simulation_context->sim->trackingOkSeconds = config.kTrackingOkSeconds;
     g_simulation_context->sim->bboxOnlyInFrontOfCamera = config.kBBoxOnlyInFrontOfCamera;
     g_simulation_context->realtime.realtimeFactorCap = config.kRealtimeFactorCap;
@@ -1509,13 +1563,20 @@ void auv_init(void)
         g_simulation_context->graphical->minRenderInterval = config.kMinRenderInterval;
         g_simulation_context->graphical->start(config.kPhysicsDt);
     }
+    startScenarioWatcher(g_simulation_context);
 }
 
 void auv_yield_until_next_frame(AuvFrame* frame)
 {
     stopIfRequested();
     if(g_simulation_context == nullptr)
+    {
+        frame->error = AUV_ERROR_NONE;
         return;
+    }
+
+    const bool scenarioRestarted =
+        g_simulation_context->scenarioReload.exchange(false) && reloadScenario(g_simulation_context);
 
     g_simulation_context->sim->StepSimulation(g_simulation_context->config.kPhysicsDt);
     if(g_simulation_context->graphical != nullptr)
@@ -1535,6 +1596,7 @@ void auv_yield_until_next_frame(AuvFrame* frame)
         std::exit(0);
     }
     *frame = g_simulation_context->sim->getAuvFrame();
+    frame->error = scenarioRestarted ? AUV_ERROR_SCENARIO_RESTART : AUV_ERROR_NONE;
 }
 
 
@@ -1550,6 +1612,8 @@ void auv_deinit(void)
 {
     if(g_simulation_context == nullptr)
         return;
+
+    stopScenarioWatcher(g_simulation_context);
 
     if(g_simulation_context->graphical != nullptr)
     {

@@ -10,9 +10,14 @@ pub fn main(init: std.process.Init) !void {
 
     var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
 
-    ctx.yieldUntilNextFrameAndUpdate();
+    while (true) {
+        ctx.yieldUntilNextFrameAndUpdate();
+        if (ctx.frame.@"error" != .none) continue;
 
-    switch (args.mission_id) {
-        .prequalify => @import("missions/prequalify.zig").mission(&ctx),
+        switch (args.mission_id) {
+            .prequalify => @import("missions/prequalify.zig").mission(&ctx),
+        }
+        if (ctx.frame.@"error" != .none) continue;
+        break;
     }
 }

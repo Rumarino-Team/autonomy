@@ -10,6 +10,11 @@ pub const ObjectCls = enum(u8) {
     rect,
     gate,
 };
+
+pub const Error = enum(u8) {
+    none,
+    scenario_restart,
+};
 pub const Object = extern struct {
     bbox: math.BoundingBox,
     id: u32,
@@ -45,6 +50,7 @@ pub const Frame = extern struct {
     image_height: u32,
     pressure_depth: f32,
     pressure_depth_ok: bool,
+    @"error": Error,
 };
 
 pub const InitFunc = fn () callconv(.c) void;
@@ -141,6 +147,7 @@ comptime {
     assertSameLayout(math.Pose, c.MathPose);
     assertSameLayout(math.BoundingBox, c.MathBoundingBox);
     assertSameLayout(ObjectCls, c.AuvObjectCls);
+    assertSameLayout(Error, c.AuvError);
     assertSameLayout(Object, c.AuvObject);
     assertSameLayout(Point2u, c.AuvPoint2u);
     assertSameLayout(Object2d, c.AuvObject2d);

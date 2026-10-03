@@ -109,8 +109,29 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
     };
 }
 
+pub fn resetMissionState(ctx: *MissionContext) void {
+    ctx.seen_objects_len = 0;
+    ctx.seen_objects2d_len = 0;
+    ctx.goal = @splat(0);
+    ctx.pid_sum_err = @splat(0);
+    ctx.pid_prev_pose_err = @splat(0);
+    ctx.pid_prev_timestamp_ns = null;
+    ctx.non_odometrypid_sum_err = @splat(0);
+    ctx.non_odometrypid_prev_pose_err = @splat(0);
+    ctx.non_odometrypid_prev_timestamp_ns = null;
+    ctx.non_odometryprev_tracked_id = -1;
+    ctx.tracked_id = -1;
+    ctx.search_yaw = 0;
+    ctx.hold_depth = 2;
+    ctx.log_counter = 0;
+}
+
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
+    if (ctx.frame.@"error" != .none) {
+        ctx.resetMissionState();
+        return;
+    }
     const start = Io.Clock.Timestamp.now(ctx.io, .awake);
 
     // std.log.debug("updating seen_objects...", .{});
@@ -451,7 +472,7 @@ fn trackFirstSeenObject2d(ctx: *MissionContext) void {
 fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const Auv.ObjectCls, start: usize) *const Auv.Object {
     var seen = start;
 
-    while (true) {
+    while (ctx.frame.@"error" == .none) {
         for (ctx.seen_objects[seen..ctx.seen_objects_len]) |*reacted_object| {
             for (clss) |cls| {
                 if (reacted_object.cls == cls) {
@@ -463,6 +484,7 @@ fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const Auv.ObjectCls, st
 
         ctx.yieldUntilNextFrameAndUpdate();
     }
+    return &ctx.seen_objects[0];
 }
 
 /// yield until getting first object with any of the `cls` in `clss`
@@ -490,7 +512,7 @@ pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) void {
     ctx.goal[0] = goal_pos[0];
     ctx.goal[1] = goal_pos[1];
     ctx.goal[2] = goal_pos[2];
-    while (true) {
+    while (ctx.frame.@"error" == .none) {
         const camera_pos = ctx.frame.camera_pose.pos;
         const goal_delta = goal_pos - camera_pos;
         const goal_dist = @sqrt(@reduce(.Add, goal_delta * goal_delta));
