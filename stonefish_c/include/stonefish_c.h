@@ -113,6 +113,9 @@ typedef struct SfPart
     double thickness;
     SfPose origin;
     SfPose compound;
+    double mass;
+    int internal;
+    int pad1;
 } SfPart;
 
 typedef struct SfPartBox
@@ -133,7 +136,16 @@ typedef struct SfPartMesh
     SfPart part;
     const char* path;
     double scale;
+    const char* visual_path;
+    double visual_scale;
+    SfPose visual_origin;
 } SfPartMesh;
+
+typedef struct SfPartSphere
+{
+    SfPart part;
+    double radius;
+} SfPartSphere;
 
 typedef struct SfThruster
 {
@@ -156,6 +168,7 @@ typedef struct SfThruster
     double thrust_forward;
     double thrust_reverse;
     double torque_coeff;
+    double time_constant;
 } SfThruster;
 
 typedef struct SfSensor
@@ -211,6 +224,7 @@ SF_API int sf_robot_begin(SfWorld* world, const SfRobot* robot);
 SF_API int sf_robot_part_box(SfWorld* world, const SfPartBox* part);
 SF_API int sf_robot_part_cylinder(SfWorld* world, const SfPartCylinder* part);
 SF_API int sf_robot_part_mesh(SfWorld* world, const SfPartMesh* part);
+SF_API int sf_robot_part_sphere(SfWorld* world, const SfPartSphere* part);
 SF_API int sf_robot_thruster(SfWorld* world, const SfThruster* thruster);
 SF_API int sf_robot_odometry(SfWorld* world, const SfSensor* sensor);
 SF_API int sf_robot_imu(SfWorld* world, const SfImu* imu);

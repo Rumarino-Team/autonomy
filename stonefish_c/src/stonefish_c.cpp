@@ -15,6 +15,7 @@
 #include "Stonefish/entities/solids/Compound.h"
 #include "Stonefish/entities/solids/Cylinder.h"
 #include "Stonefish/entities/solids/Polyhedron.h"
+#include "Stonefish/entities/solids/Sphere.h"
 #include "Stonefish/entities/statics/Obstacle.h"
 #include "Stonefish/entities/statics/Plane.h"
 #include "Stonefish/graphics/OpenGLDataStructs.h"
@@ -172,9 +173,13 @@ int AddPart(WorldImpl& world, const SfPart& part, sf::SolidEntity* solid)
         delete solid;
         return Fail("robot part added out of order");
     }
+    if(part.mass > 0.0)
+        solid->ScalePhysicalPropertiesToArbitraryMass(part.mass);
     const sf::Transform compound = ToTransform(part.compound);
     if(build.compound == nullptr)
         build.compound = new sf::Compound(build.robot_name, build.base_phy, solid, compound);
+    else if(part.internal != 0)
+        build.compound->AddInternalPart(solid, compound, false);
     else
         build.compound->AddExternalPart(solid, compound);
     return 0;
@@ -402,11 +407,47 @@ int sf_robot_part_mesh(SfWorld* world, const SfPartMesh* part)
 {
     if(!Ready(world) || part == nullptr || !Named(part->part.name) || !Named(part->path))
         return Fail("robot mesh part is missing a name or path");
-    auto* solid = new sf::Polyhedron(
+    const sf::PhysicsSettings phy = ToPhysics(part->part.physics, part->part.buoyant);
+    const std::string name = PartName(world->robot, part->part.name);
+    sf::Polyhedron* solid = nullptr;
+    if(Named(part->visual_path))
+    {
+        solid = new sf::Polyhedron(
+            name,
+            phy,
+            FullPath(*world, part->visual_path),
+            part->visual_scale,
+            ToTransform(part->visual_origin),
+            FullPath(*world, part->path),
+            part->scale,
+            ToTransform(part->part.origin),
+            Text(part->part.material),
+            Text(part->part.look),
+            part->part.thickness);
+    }
+    else
+    {
+        solid = new sf::Polyhedron(
+            name,
+            phy,
+            FullPath(*world, part->path),
+            part->scale,
+            ToTransform(part->part.origin),
+            Text(part->part.material),
+            Text(part->part.look),
+            part->part.thickness);
+    }
+    return AddPart(*world, part->part, solid);
+}
+
+int sf_robot_part_sphere(SfWorld* world, const SfPartSphere* part)
+{
+    if(!Ready(world) || part == nullptr || !Named(part->part.name))
+        return Fail("robot sphere part is missing a name");
+    auto* solid = new sf::Sphere(
         PartName(world->robot, part->part.name),
         ToPhysics(part->part.physics, part->part.buoyant),
-        FullPath(*world, part->path),
-        part->scale,
+        part->radius,
         ToTransform(part->part.origin),
         Text(part->part.material),
         Text(part->part.look),
@@ -439,7 +480,11 @@ int sf_robot_thruster(SfWorld* world, const SfThruster* thruster)
         sf::Scalar(-1),
         sf::GeometryApproxType::CYLINDER);
     const sf::Scalar inertia = propeller->getInertia().getX() + propeller->getAddedInertia().getX();
-    auto rotor = std::make_shared<sf::MechanicalPI>(inertia, thruster->kp, thruster->ki, thruster->ilimit);
+    std::shared_ptr<sf::RotorDynamics> rotor;
+    if(thruster->time_constant > 0.0)
+        rotor = std::make_shared<sf::FirstOrder>(thruster->time_constant);
+    else
+        rotor = std::make_shared<sf::MechanicalPI>(inertia, thruster->kp, thruster->ki, thruster->ilimit);
     auto thrust = std::make_shared<sf::FDThrust>(
         thruster->diameter,
         thruster->thrust_forward,
@@ -562,15 +607,20 @@ static_assert(offsetof(SfMesh, convex) == 128, "SfMesh.convex");
 static_assert(sizeof(SfMesh) == 136, "SfMesh");
 static_assert(offsetof(SfRobot, world) == 32, "SfRobot.world");
 static_assert(sizeof(SfRobot) == 80, "SfRobot");
-static_assert(sizeof(SfPart) == 136, "SfPart");
-static_assert(offsetof(SfPartBox, dimensions) == 136, "SfPartBox.dimensions");
-static_assert(sizeof(SfPartBox) == 160, "SfPartBox");
-static_assert(offsetof(SfPartCylinder, radius) == 136, "SfPartCylinder.radius");
-static_assert(sizeof(SfPartCylinder) == 152, "SfPartCylinder");
-static_assert(offsetof(SfPartMesh, path) == 136, "SfPartMesh.path");
-static_assert(sizeof(SfPartMesh) == 152, "SfPartMesh");
+static_assert(sizeof(SfPart) == 152, "SfPart");
+static_assert(offsetof(SfPart, mass) == 136, "SfPart.mass");
+static_assert(offsetof(SfPartBox, dimensions) == 152, "SfPartBox.dimensions");
+static_assert(sizeof(SfPartBox) == 176, "SfPartBox");
+static_assert(offsetof(SfPartCylinder, radius) == 152, "SfPartCylinder.radius");
+static_assert(sizeof(SfPartCylinder) == 168, "SfPartCylinder");
+static_assert(offsetof(SfPartSphere, radius) == 152, "SfPartSphere.radius");
+static_assert(sizeof(SfPartSphere) == 160, "SfPartSphere");
+static_assert(offsetof(SfPartMesh, path) == 152, "SfPartMesh.path");
+static_assert(offsetof(SfPartMesh, visual_origin) == 184, "SfPartMesh.visual_origin");
+static_assert(sizeof(SfPartMesh) == 232, "SfPartMesh");
 static_assert(offsetof(SfThruster, propeller_mesh) == 96, "SfThruster.propeller_mesh");
-static_assert(sizeof(SfThruster) == 176, "SfThruster");
+static_assert(offsetof(SfThruster, time_constant) == 176, "SfThruster.time_constant");
+static_assert(sizeof(SfThruster) == 184, "SfThruster");
 static_assert(offsetof(SfSensor, history) == 72, "SfSensor.history");
 static_assert(sizeof(SfSensor) == 80, "SfSensor");
 static_assert(offsetof(SfImu, angular_velocity_range) == 80, "SfImu.angular_velocity_range");
