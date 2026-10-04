@@ -1,6 +1,6 @@
-#include "hydrus_batch.h"
-#include "hydrus_camera.h"
-#include "hydrus_core.h"
+#include "auv_batch.h"
+#include "auv_camera.h"
+#include "auv_core.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -95,7 +95,7 @@ private:
     bool stop_ = false;
 };
 
-void writeState(const hydrus::HydrusSim& sim, double* out) {
+void writeState(const auv::SimulationManager& sim, double* out) {
     const mjtNum* pos = sim.position();
     const mjtNum* quat = sim.quaternion();
     out[0] = pos[0];
@@ -118,41 +118,41 @@ void writeState(const hydrus::HydrusSim& sim, double* out) {
 
 }  // namespace
 
-struct HydrusBatch {
-    std::unique_ptr<hydrus::HydrusModel> model;
-    std::vector<std::unique_ptr<hydrus::HydrusSim>> sims;
+struct AuvBatch {
+    std::unique_ptr<auv::AuvModel> model;
+    std::vector<std::unique_ptr<auv::SimulationManager>> sims;
     std::unique_ptr<ThreadPool> pool;
-    hydrus::CameraModel camera;
-    std::vector<hydrus::CameraView> views;
+    auv::CameraModel camera;
+    std::vector<auv::CameraView> views;
 };
 
 extern "C" {
 
-HydrusBatch* hydrus_batch_create(const char* xml_path, int num_envs, int num_threads) {
+AuvBatch* auv_batch_create(const char* xml_path, int num_envs, int num_threads) {
     if (xml_path == nullptr || num_envs <= 0) {
-        std::fprintf(stderr, "[hydrus_batch] need an xml path and num_envs > 0\n");
+        std::fprintf(stderr, "[auv_batch] need an xml path and num_envs > 0\n");
         return nullptr;
     }
     std::string error;
-    hydrus::HydrusModel* model = hydrus::HydrusModel::load(xml_path, error);
+    auv::AuvModel* model = auv::AuvModel::load(xml_path, error);
     if (model == nullptr) {
-        std::fprintf(stderr, "[hydrus_batch] failed to load %s: %s\n", xml_path, error.c_str());
+        std::fprintf(stderr, "[auv_batch] failed to load %s: %s\n", xml_path, error.c_str());
         return nullptr;
     }
-    auto* batch = new HydrusBatch();
+    auto* batch = new AuvBatch();
     batch->model.reset(model);
     batch->sims.reserve(num_envs);
     for (int i = 0; i < num_envs; ++i)
-        batch->sims.emplace_back(new hydrus::HydrusSim(*model));
+        batch->sims.emplace_back(new auv::SimulationManager(*model));
     if (num_threads <= 0)
         num_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     batch->pool.reset(new ThreadPool(std::min(num_threads, num_envs)));
-    batch->camera = hydrus::CameraModel::build(model->model);
+    batch->camera = auv::CameraModel::build(model->model);
     batch->views.resize(num_envs);
     return batch;
 }
 
-void hydrus_batch_destroy(HydrusBatch* batch) {
+void auv_batch_destroy(AuvBatch* batch) {
     if (batch == nullptr)
         return;
     batch->pool.reset();
@@ -160,16 +160,20 @@ void hydrus_batch_destroy(HydrusBatch* batch) {
     delete batch;
 }
 
-int hydrus_batch_num_envs(const HydrusBatch* batch) {
+int auv_batch_num_envs(const AuvBatch* batch) {
     return batch != nullptr ? static_cast<int>(batch->sims.size()) : 0;
 }
 
-double hydrus_batch_timestep(const HydrusBatch* batch) {
+int auv_batch_num_thrusters(const AuvBatch* batch) {
+    return batch != nullptr ? batch->model->thrusterCount() : 0;
+}
+
+double auv_batch_timestep(const AuvBatch* batch) {
     return batch != nullptr ? batch->model->model->opt.timestep : 0.0;
 }
 
-void hydrus_batch_reset(
-    HydrusBatch* batch,
+void auv_batch_reset(
+    AuvBatch* batch,
     const uint8_t* mask,
     const double* init_state,
     const double* randomization) {
@@ -178,10 +182,10 @@ void hydrus_batch_reset(
     batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
         if (mask != nullptr && mask[i] == 0)
             return;
-        hydrus::HydrusSim& sim = *batch->sims[i];
-        hydrus::Randomization r;
+        auv::SimulationManager& sim = *batch->sims[i];
+        auv::Randomization r;
         if (randomization != nullptr) {
-            const double* src = randomization + HYDRUS_BATCH_RANDOMIZATION_SIZE * i;
+            const double* src = randomization + AUV_BATCH_RANDOMIZATION_SIZE * i;
             r.dry_mass_scale = src[0];
             r.volume_scale = src[1];
             r.drag_scale = src[2];
@@ -197,40 +201,39 @@ void hydrus_batch_reset(
             sim.reset();
             return;
         }
-        const double* s = init_state + HYDRUS_BATCH_INIT_SIZE * i;
+        const double* s = init_state + AUV_BATCH_INIT_SIZE * i;
         const mjtNum quat[4] = {s[6], s[3], s[4], s[5]};
         sim.reset(s, quat, s + 7, s + 10);
     });
 }
 
-void hydrus_batch_step(HydrusBatch* batch, const float* thrusters, int substeps, double* state_out) {
+void auv_batch_step(AuvBatch* batch, const float* thrusters, int substeps, double* state_out) {
     if (batch == nullptr)
         return;
+    const int nthr = batch->model->thrusterCount();
     batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
-        hydrus::HydrusSim& sim = *batch->sims[i];
-        sim.setThrusters(
-            thrusters != nullptr ? thrusters + HYDRUS_BATCH_THRUSTERS * i : nullptr,
-            HYDRUS_BATCH_THRUSTERS);
+        auv::SimulationManager& sim = *batch->sims[i];
+        sim.setThrusters(thrusters != nullptr ? thrusters + nthr * i : nullptr, nthr);
         for (int k = 0; k < substeps; ++k)
             sim.step();
         if (state_out != nullptr)
-            writeState(sim, state_out + HYDRUS_BATCH_STATE_SIZE * i);
+            writeState(sim, state_out + AUV_BATCH_STATE_SIZE * i);
     });
 }
 
-int hydrus_batch_mocap_count(const HydrusBatch* batch) {
+int auv_batch_mocap_count(const AuvBatch* batch) {
     return batch != nullptr ? batch->model->model->nmocap : 0;
 }
 
-void hydrus_batch_set_mocap(HydrusBatch* batch, const double* poses) {
+void auv_batch_set_mocap(AuvBatch* batch, const double* poses) {
     if (batch == nullptr || poses == nullptr)
         return;
     const int nmocap = batch->model->model->nmocap;
     batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
         mjData* data = batch->sims[i]->data();
-        const double* src = poses + HYDRUS_BATCH_MOCAP_POSE * nmocap * i;
+        const double* src = poses + AUV_BATCH_MOCAP_POSE * nmocap * i;
         for (int m = 0; m < nmocap; ++m) {
-            const double* pose = src + HYDRUS_BATCH_MOCAP_POSE * m;
+            const double* pose = src + AUV_BATCH_MOCAP_POSE * m;
             mju_copy3(data->mocap_pos + 3 * m, pose);
             data->mocap_quat[4 * m] = pose[6];
             data->mocap_quat[4 * m + 1] = pose[3];
@@ -241,7 +244,7 @@ void hydrus_batch_set_mocap(HydrusBatch* batch, const double* poses) {
     });
 }
 
-void hydrus_batch_camera(HydrusBatch* batch, float* features) {
+void auv_batch_camera(AuvBatch* batch, float* features) {
     if (batch == nullptr || features == nullptr)
         return;
     batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
@@ -249,23 +252,23 @@ void hydrus_batch_camera(HydrusBatch* batch, float* features) {
             batch->model->model,
             batch->sims[i]->data(),
             batch->camera,
-            features + HYDRUS_CAM_FEATURE_SIZE * i);
+            features + AUV_CAM_FEATURE_SIZE * i);
     });
 }
 
-void hydrus_batch_camera_image(const HydrusBatch* batch, int env, uint8_t* pixels) {
+void auv_batch_camera_image(const AuvBatch* batch, int env, uint8_t* pixels) {
     if (batch == nullptr || pixels == nullptr || env < 0 || env >= static_cast<int>(batch->views.size()))
         return;
-    const hydrus::CameraView& view = batch->views[env];
+    const auv::CameraView& view = batch->views[env];
     const std::vector<uint8_t>& src = view.has_previous ? view.previous : view.image;
     std::memcpy(pixels, src.data(), src.size());
 }
 
-void hydrus_batch_get_state(const HydrusBatch* batch, double* state_out) {
+void auv_batch_get_state(const AuvBatch* batch, double* state_out) {
     if (batch == nullptr || state_out == nullptr)
         return;
     for (size_t i = 0; i < batch->sims.size(); ++i)
-        writeState(*batch->sims[i], state_out + HYDRUS_BATCH_STATE_SIZE * i);
+        writeState(*batch->sims[i], state_out + AUV_BATCH_STATE_SIZE * i);
 }
 
 }  // extern "C"

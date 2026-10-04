@@ -1,29 +1,36 @@
+#include <cmath>
+#include <cstdlib>
+
 #include "auv.h"
-#include "hydrus_core.h"
+#include "auv_core.h"
 
 #include <mujoco/mujoco.h>
-#include <GLFW/glfw3.h>
+
+#include "auv_view.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
 
 namespace {
 
-using hydrus::kThrusters;
+constexpr char kDefaultModelPath[] = "auvs/hydrus_mujoco/proteus.xml";
 
-constexpr char kModelPath[] = "auvs/hydrus_mujoco/hydrus.xml";
+const char* modelPath() {
+    const char* path = std::getenv("AUV_MJCF");
+    if (path != nullptr && path[0] != '\0')
+        return path;
+    return kDefaultModelPath;
+}
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRealtimeFactorCap = 1.0;
-
 enum class ObjectCls : AuvObjectCls {
     cube = 0,
     rect = 1,
@@ -224,48 +231,97 @@ bool projectAabb(
     return bottom_right.x > top_left.x && bottom_right.y > top_left.y;
 }
 
+bool headlessRequested() {
+    const char* env = std::getenv("HYDRUS_MUJOCO_HEADLESS");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+struct StonefishViewApi {
+    void* handle = nullptr;
+    StonefishView* view = nullptr;
+    void (*sync)(StonefishView*, const double*, const double*, const double*, const double*, double) = nullptr;
+    int (*present)(StonefishView*, double) = nullptr;
+    void (*destroy)(StonefishView*) = nullptr;
+};
+
+struct StonefishScene {
+    const char* scenario;
+    const char* robot;
+};
+
+StonefishScene stonefishSceneFor(const mjModel* model, int body) {
+    const char* name = mj_id2name(model, mjOBJ_BODY, body);
+    if (name != nullptr && std::strcmp(name, "proteus") == 0)
+        return {"scenarios/open_space_proteus.scn", "ProteusAUV"};
+    if (name != nullptr && std::strcmp(name, "bluerov") == 0)
+        return {"scenarios/pool_bluerov2.scn", "bluerov2"};
+    return {"scenarios/open_space_env.scn", "HydrusAUV"};
+}
+
+// MuJoCo and Stonefish both export TinyXML. Loading the view with RTLD_DEEPBIND
+// keeps Stonefish bound to its own copy.
+bool openStonefishView(StonefishViewApi& api, StonefishScene scene) {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&auv_init), &info) == 0 || info.dli_fname == nullptr) {
+        std::fprintf(stderr, "[auv_mujoco] cannot locate the plugin to load the Stonefish view\n");
+        return false;
+    }
+    const auto path = std::filesystem::path(info.dli_fname).parent_path() / "libauv_mujoco_view.so";
+    api.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_DEEPBIND);
+    if (api.handle == nullptr) {
+        std::fprintf(stderr, "[auv_mujoco] %s\n", dlerror());
+        return false;
+    }
+    auto* create = reinterpret_cast<StonefishView* (*)(const char*, const char*)>(
+        dlsym(api.handle, "stonefish_view_create"));
+    api.sync = reinterpret_cast<decltype(api.sync)>(dlsym(api.handle, "stonefish_view_sync"));
+    api.present = reinterpret_cast<decltype(api.present)>(dlsym(api.handle, "stonefish_view_present"));
+    api.destroy = reinterpret_cast<decltype(api.destroy)>(dlsym(api.handle, "stonefish_view_destroy"));
+    if (create == nullptr || api.sync == nullptr || api.present == nullptr || api.destroy == nullptr) {
+        std::fprintf(stderr, "[auv_mujoco] Stonefish view is missing an entry point\n");
+        dlclose(api.handle);
+        api = {};
+        return false;
+    }
+    api.view = create(scene.scenario, scene.robot);
+    return api.view != nullptr;
+}
+
+void closeStonefishView(StonefishViewApi& api) {
+    if (api.destroy != nullptr && api.view != nullptr)
+        api.destroy(api.view);
+    api.view = nullptr;
+    if (api.handle != nullptr)
+        dlclose(api.handle);
+    api = {};
+}
+
 struct Simulation {
-    hydrus::HydrusModel* hydrus_model = nullptr;
-    hydrus::HydrusSim* core = nullptr;
+    auv::AuvModel* vehicle = nullptr;
+    auv::SimulationManager* core = nullptr;
     const mjModel* model = nullptr;
     mjData* data = nullptr;
     std::mutex mu;
-    std::thread viewer;
-    std::atomic<bool> running{false};
-    std::atomic<bool> finished{false};
     RealtimeThrottle realtime;
 
-    int hydrus_body = -1;
+    int body = -1;
     unsigned image_width = 800;
     unsigned image_height = 600;
     double fov_h_deg = 60;
     TrackedObject tracked[2]{};
     int tracked_len = 0;
 
-    GLFWwindow* window = nullptr;
-    mjvCamera cam{};
-    mjvOption opt{};
-    mjvPerturb pert{};
-    mjvScene scn{};
-    mjrContext con{};
-    bool button_left = false;
-    bool button_middle = false;
-    bool button_right = false;
-    double lastx = 0;
-    double lasty = 0;
+    StonefishViewApi stonefish;
+    double camera_dt = 0;
 };
 
 Simulation* g_sim = nullptr;
 
-bool headlessRequested() {
-    const char* env = std::getenv("HYDRUS_MUJOCO_HEADLESS");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
 
 void cacheObject(Simulation& sim, const char* name, ObjectCls cls, uint32_t id) {
     const int geom = mj_name2id(sim.model, mjOBJ_GEOM, name);
     if (geom < 0 || sim.tracked_len >= 2) {
-        std::fprintf(stderr, "[hydrus_mujoco] missing geom '%s'\n", name);
+        std::fprintf(stderr, "[auv_mujoco] missing geom '%s'\n", name);
         return;
     }
     TrackedObject& tracked = sim.tracked[sim.tracked_len++];
@@ -288,7 +344,7 @@ void cacheObject(Simulation& sim, const char* name, ObjectCls cls, uint32_t id) 
         tracked.aabb_max[0] - tracked.aabb_min[0],
         tracked.aabb_max[1] - tracked.aabb_min[1],
         tracked.aabb_max[2] - tracked.aabb_min[2]);
-    std::fprintf(stdout, "[hydrus_mujoco] tracking '%s' as %s\n", name, objectClsName(cls));
+    std::fprintf(stdout, "[auv_mujoco] tracking '%s' as %s\n", name, objectClsName(cls));
 }
 
 AuvFrame makeFrame(const Simulation& sim) {
@@ -320,7 +376,7 @@ AuvFrame makeFrame(const Simulation& sim) {
         object.cls = static_cast<AuvObjectCls>(sim.tracked[i].cls);
         frame.objects[frame.objects_len++] = object;
     }
-    const int camera_site = sim.hydrus_model->camera_site;
+    const int camera_site = sim.vehicle->camera_site;
     if (camera_site < 0)
         return frame;
     const mjtNum* cam_pos = sim.data->site_xpos + 3 * camera_site;
@@ -345,120 +401,28 @@ AuvFrame makeFrame(const Simulation& sim) {
     return frame;
 }
 
-void detachTrackingCamera(Simulation& sim) {
-    if (sim.cam.type != mjCAMERA_TRACKING || sim.hydrus_body < 0)
+void syncView(Simulation& sim) {
+    if (sim.stonefish.view == nullptr)
         return;
-    const mjtNum* pos = sim.data->xpos + 3 * sim.hydrus_body;
-    sim.cam.lookat[0] = pos[0];
-    sim.cam.lookat[1] = pos[1];
-    sim.cam.lookat[2] = pos[2];
-    sim.cam.type = mjCAMERA_FREE;
-}
-
-void mouseButton(GLFWwindow* window, int, int, int) {
-    auto* sim = static_cast<Simulation*>(glfwGetWindowUserPointer(window));
-    sim->button_left = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-    sim->button_middle = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
-    sim->button_right = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-    glfwGetCursorPos(window, &sim->lastx, &sim->lasty);
-}
-
-void mouseMove(GLFWwindow* window, double xpos, double ypos) {
-    auto* sim = static_cast<Simulation*>(glfwGetWindowUserPointer(window));
-    if (!sim->button_left && !sim->button_middle && !sim->button_right)
-        return;
-
-    const double dx = xpos - sim->lastx;
-    const double dy = ypos - sim->lasty;
-    sim->lastx = xpos;
-    sim->lasty = ypos;
-
-    int height = 1;
-    glfwGetWindowSize(window, nullptr, &height);
-    if (height <= 0)
-        height = 1;
-
-    const bool shift = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-        glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-    mjtMouse action;
-    if (sim->button_right)
-        action = shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
-    else if (sim->button_left)
-        action = shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
-    else
-        action = mjMOUSE_ZOOM;
-
-    std::lock_guard<std::mutex> lock(sim->mu);
-    if (action == mjMOUSE_MOVE_V || action == mjMOUSE_MOVE_H)
-        detachTrackingCamera(*sim);
-    // The rendered up axis is flipped for NED, so invert vertical drag.
-    mjv_moveCamera(sim->model, action, dx / height, -dy / height, &sim->cam);
-}
-
-void mouseScroll(GLFWwindow* window, double, double yoffset) {
-    auto* sim = static_cast<Simulation*>(glfwGetWindowUserPointer(window));
-    std::lock_guard<std::mutex> lock(sim->mu);
-    mjv_moveCamera(sim->model, mjMOUSE_ZOOM, 0, -0.05 * yoffset, &sim->cam);
-}
-
-void viewerMain(Simulation* sim) {
-    if (!glfwInit()) {
-        std::fprintf(stderr, "[hydrus_mujoco] glfwInit failed; continuing headless\n");
-        return;
+    const mjtNum* pos_mj = sim.core->position();
+    const mjtNum* quat_mj = sim.core->quaternion();
+    mjtNum linear_mj[3];
+    mjtNum angular_mj[3];
+    sim.core->velocity(linear_mj, angular_mj);
+    double pos[3];
+    double quat[4];
+    double linear[3];
+    double angular[3];
+    for (int i = 0; i < 3; ++i) {
+        pos[i] = pos_mj[i];
+        linear[i] = linear_mj[i];
+        angular[i] = angular_mj[i];
     }
-    glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
-    sim->window = glfwCreateWindow(1200, 900, "hydrus_mujoco", nullptr, nullptr);
-    if (sim->window == nullptr) {
-        std::fprintf(stderr, "[hydrus_mujoco] GLFW window failed; continuing headless\n");
-        glfwTerminate();
-        return;
-    }
-    glfwMakeContextCurrent(sim->window);
-    glfwSwapInterval(1);
-    glfwSetWindowUserPointer(sim->window, sim);
-    glfwSetMouseButtonCallback(sim->window, mouseButton);
-    glfwSetCursorPosCallback(sim->window, mouseMove);
-    glfwSetScrollCallback(sim->window, mouseScroll);
-
-    mjv_defaultCamera(&sim->cam);
-    mjv_defaultOption(&sim->opt);
-    mjv_defaultPerturb(&sim->pert);
-    mjv_defaultScene(&sim->scn);
-    mjr_defaultContext(&sim->con);
-    mjv_makeScene(sim->model, &sim->scn, 4000);
-    mjr_makeContext(sim->model, &sim->con, mjFONTSCALE_150);
-    sim->cam.type = mjCAMERA_TRACKING;
-    sim->cam.trackbodyid = sim->hydrus_body;
-    sim->cam.distance = 8;
-    sim->cam.azimuth = 140;
-    sim->cam.elevation = -35;
-
-    while (sim->running.load() && !glfwWindowShouldClose(sim->window)) {
-        {
-            std::lock_guard<std::mutex> lock(sim->mu);
-            mjv_updateScene(sim->model, sim->data, &sim->opt, &sim->pert, &sim->cam, mjCAT_ALL, &sim->scn);
-            // MuJoCo treats +Z as up. This world is NED, so flip the camera up axis.
-            for (mjvGLCamera& cam : sim->scn.camera) {
-                cam.up[0] = -cam.up[0];
-                cam.up[1] = -cam.up[1];
-                cam.up[2] = -cam.up[2];
-            }
-        }
-        mjrRect viewport = {0, 0, 0, 0};
-        glfwGetFramebufferSize(sim->window, &viewport.width, &viewport.height);
-        mjr_render(viewport, &sim->scn, &sim->con);
-        glfwSwapBuffers(sim->window);
-        glfwPollEvents();
-    }
-
-    const bool user_closed = sim->running.load() && glfwWindowShouldClose(sim->window);
-    mjr_freeContext(&sim->con);
-    mjv_freeScene(&sim->scn);
-    glfwDestroyWindow(sim->window);
-    sim->window = nullptr;
-    glfwTerminate();
-    if (user_closed)
-        sim->finished.store(true);
+    for (int i = 0; i < 4; ++i)
+        quat[i] = quat_mj[i];
+    const double dt = sim.model->opt.timestep;
+    sim.stonefish.sync(sim.stonefish.view, pos, quat, linear, angular, dt);
+    sim.camera_dt += dt;
 }
 
 }  // namespace
@@ -467,48 +431,48 @@ void auv_init(void) {
     auv_deinit();
 
     std::string error;
-    hydrus::HydrusModel* hydrus_model = hydrus::HydrusModel::load(kModelPath, error);
-    if (hydrus_model == nullptr) {
-        std::fprintf(stderr, "[hydrus_mujoco] failed to load %s: %s\n", kModelPath, error.c_str());
+    const char* path = modelPath();
+    auv::AuvModel* vehicle = auv::AuvModel::load(path, error);
+    if (vehicle == nullptr) {
+        std::fprintf(stderr, "[auv_mujoco] failed to load %s: %s\n", path, error.c_str());
         return;
     }
 
     auto* sim = new Simulation();
-    sim->hydrus_model = hydrus_model;
-    sim->core = new hydrus::HydrusSim(*hydrus_model);
-    sim->model = hydrus_model->model;
+    sim->vehicle = vehicle;
+    sim->core = new auv::SimulationManager(*vehicle);
+    sim->model = vehicle->model;
     sim->data = sim->core->data();
-    sim->hydrus_body = hydrus_model->body;
+    sim->body = vehicle->body;
     const mjModel* model = sim->model;
-    sim->image_width = static_cast<unsigned>(hydrus::numericOr(model, "camera_spec", 0, 800));
-    sim->image_height = static_cast<unsigned>(hydrus::numericOr(model, "camera_spec", 1, 600));
-    sim->fov_h_deg = hydrus::numericOr(model, "camera_spec", 2, 60);
+    sim->image_width = static_cast<unsigned>(auv::numericOr(model, "camera_spec", 0, 800));
+    sim->image_height = static_cast<unsigned>(auv::numericOr(model, "camera_spec", 1, 600));
+    sim->fov_h_deg = auv::numericOr(model, "camera_spec", 2, 60);
 
     cacheObject(*sim, "gate", ObjectCls::gate, 1);
     cacheObject(*sim, "marker", ObjectCls::cube, 2);
     std::fprintf(
         stdout,
-        "[hydrus_mujoco] dry mass=%.3f kg, inertial mass=%.3f kg, volume=%.1f cm3, fluid forces every %d steps\n",
-        hydrus_model->dry_mass,
-        model->body_mass[sim->hydrus_body],
-        hydrus_model->volume * 1e6,
-        hydrus_model->hydro_prescaler);
-    for (const hydrus::HullPart& part : hydrus_model->hull) {
+        "[auv_mujoco] dry mass=%.3f kg, inertial mass=%.3f kg, volume=%.1f cm3, fluid forces every %d steps\n",
+        vehicle->dry_mass,
+        model->body_mass[sim->body],
+        vehicle->volume * 1e6,
+        vehicle->hydro_prescaler);
+    for (const auv::HullPart& part : vehicle->hull) {
         std::fprintf(
             stdout,
-            "[hydrus_mujoco] hull '%s': %zu faces, %.4f m2\n",
+            "[auv_mujoco] hull '%s': %zu faces, %.4f m2\n",
             mj_id2name(model, mjOBJ_GEOM, part.geom),
             part.faces.size(),
             part.area);
     }
 
     const bool headless = headlessRequested();
-    std::fprintf(stdout, "[hydrus_mujoco] app=%s\n", headless ? "console" : "graphical");
+    std::fprintf(stdout, "[auv_mujoco] render=%s\n", headless ? "headless" : "stonefish");
     std::fflush(stdout);
-    sim->running.store(true);
     g_sim = sim;
-    if (!headless)
-        sim->viewer = std::thread(viewerMain, sim);
+    if (!headless && !openStonefishView(sim->stonefish, stonefishSceneFor(model, sim->body)))
+        std::fprintf(stderr, "[auv_mujoco] continuing without the Stonefish window\n");
 }
 
 void auv_deinit(void) {
@@ -516,33 +480,34 @@ void auv_deinit(void) {
         return;
     Simulation* sim = g_sim;
     g_sim = nullptr;
-    sim->running.store(false);
-    if (sim->viewer.joinable())
-        sim->viewer.join();
+    closeStonefishView(sim->stonefish);
     delete sim->core;
-    delete sim->hydrus_model;
+    delete sim->vehicle;
     delete sim;
 }
 
 namespace {
 
-bool advanceSimulation() {
+bool step_simulation() {
     if (g_sim == nullptr)
         return false;
 
     mjtNum sim_time = 0;
-    bool stop = false;
     {
         std::lock_guard<std::mutex> lock(g_sim->mu);
-        stop = g_sim->finished.load();
-        if (!stop)
-            g_sim->core->step();
+        g_sim->core->step();
+        syncView(*g_sim);
         sim_time = g_sim->data->time;
     }
-    if (stop) {
-        std::fprintf(stderr, "[hydrus_mujoco] simulation finished; restart for another run\n");
-        auv_deinit();
-        return false;
+    if (g_sim->stonefish.view != nullptr) {
+        const int presented = g_sim->stonefish.present(g_sim->stonefish.view, g_sim->camera_dt);
+        if (presented > 0)
+            g_sim->camera_dt = 0;
+        if (presented < 0) {
+            std::fprintf(stderr, "[auv_mujoco] simulation finished; restart for another run\n");
+            auv_deinit();
+            return false;
+        }
     }
     g_sim->realtime.wait(sim_time);
     return true;
@@ -551,7 +516,7 @@ bool advanceSimulation() {
 }  // namespace
 
 void auv_yield_until_next_frame(AuvFrame* frame) {
-    if (!advanceSimulation())
+    if (!step_simulation())
         return;
     std::lock_guard<std::mutex> lock(g_sim->mu);
     *frame = makeFrame(*g_sim);

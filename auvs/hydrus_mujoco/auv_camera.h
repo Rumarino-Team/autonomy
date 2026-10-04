@@ -1,13 +1,13 @@
 #pragma once
 
-#include "hydrus_batch.h"
+#include "auv_batch.h"
 
 #include <mujoco/mujoco.h>
 
 #include <cstdint>
 #include <vector>
 
-namespace hydrus {
+namespace auv {
 
 // Triangles and boxes used to fake a YOLO camera without opening a window.
 struct CameraModel {
@@ -21,6 +21,7 @@ struct CameraModel {
     struct Box {
         int geom = -1;
         int cls = 0;
+        uint8_t shade = 0;
         float local_min[3]{};
         float local_max[3]{};
     };
@@ -42,4 +43,4 @@ struct CameraView {
     void render(const mjModel* model, const mjData* data, const CameraModel& camera, float* features);
 };
 
-}  // namespace hydrus
+}  // namespace auv

@@ -1,0 +1,103 @@
+<mujoco model="bluerov">
+  <!-- NED world: +X north, +Y east, +Z down. Gravity points down.
+       Hull constants are Stonefish 1.5 for bluerov2.scn. The hull and ring are not buoyant;
+       displaced volume is the four internal boxes. Thrusters are a first-order rotor with
+       time constant 0.2 s. thruster_spec uses kp=1, ki=0 and rotor inertia 0.2 so the
+       mechanical PI in the plugin has that time constant. Sites whose Stonefish setpoint
+       is not inverted are turned half a revolution, because the plugin always inverts. -->
+  <compiler angle="radian" meshdir="."/>
+  <option timestep="0.00277777777778" gravity="0 0 9.81" integrator="implicitfast">
+    <flag sleep="disable"/>
+  </option>
+  <!-- Hull geom user data: volume [m^3], then Stonefish form drag Cd (x y z) and skin
+       friction Cf (x y z) in the body frame. Volume 0 keeps drag and skips buoyancy. -->
+  <size nuser_geom="7"/>
+
+  <visual>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
+    <rgba haze="0.10 0.20 0.30 1"/>
+  </visual>
+
+  <asset>
+    <mesh name="hull" file="meshes/bluerov2_phy.obj"/>
+    <mesh name="ring" file="meshes/bluerov2_ring.obj"/>
+    <mesh name="prop_ccw" file="meshes/ccw.obj"/>
+    <mesh name="prop_cw" file="meshes/cw.obj"/>
+  </asset>
+
+  <!-- camera_spec: width, height, horizontal FOV in degrees, from the left camera.
+       water_density in kg/m^3. dry_mass is the real mass gravity acts on; the body
+       inertial mass also carries Stonefish added mass. volume and cb (body frame) set
+       buoyancy when fully submerged. hydro_rate is how often fluid forces are recomputed.
+       thruster_spec: max rpm, diameter, thrust coeff, torque coeff, rotor inertia, kp, ki.
+       Added inertia breaks the triangle inequality, so the inertial element holds a legal
+       placeholder and the plugin writes inertia over it after loading. -->
+  <custom>
+    <numeric name="camera_spec" size="3" data="640 480 75"/>
+    <numeric name="water_density" size="1" data="1025"/>
+    <numeric name="dry_mass" size="1" data="11.18880611"/>
+    <numeric name="inertia" size="3" data="0.48181000 0.60181776 3.42234859"/>
+    <numeric name="volume" size="1" data="0.01092000"/>
+    <numeric name="cb" size="3" data="-0.005 0 0"/>
+    <numeric name="hydro_rate" size="1" data="50"/>
+    <numeric name="thruster_spec" size="7" data="4000 0.076 0.334 0.032 0.2 1 0"/>
+  </custom>
+
+  <worldbody>
+    <light pos="0 -4 -6" dir="0 0.2 1" directional="true" diffuse="0.8 0.8 0.8"/>
+
+    <!-- Pool floor at 2.1 m, matching pool_env.scn. -->
+    <geom name="floor" type="plane" pos="0 0 2.1" euler="3.141592653589793 0 0"
+          size="25 15 0.5" rgba="0.5 0.5 0.5 1"/>
+
+    <geom name="surface" type="plane" pos="0 0 0" euler="3.141592653589793 0 0"
+          size="25 15 0.5" rgba="0.15 0.40 0.65 0.25" contype="0" conaffinity="0"/>
+
+    <!-- Start pose matches pool_env_bluerov2.scn: xyz 1 1 1. -->
+    <body name="bluerov" pos="1 1 1">
+      <freejoint name="bluerov_free"/>
+      <inertial pos="-0.00547897 -0.00009245 0.07699239"
+                quat="0.70052045 -0.70041338 -0.09666979 -0.09668068"
+                mass="163.78488689" diaginertia="0.48181000 0.60181776 1.08362776"/>
+      <site name="imu" pos="0 0 0" size="0.01"/>
+      <site name="camera" pos="0.16 -0.0725 0.15" euler="1.571 0 1.571" size="0.01"/>
+      <site name="camera_right" pos="0.16 0.0725 0.15" euler="1.571 0 1.571" size="0.01"/>
+
+      <geom name="hull" type="mesh" mesh="hull" rgba="0.15 0.35 0.75 1"
+            user="0 0.544357 0.713886 0.997523 0.0544357 0.0713886 0.0997523"/>
+      <geom name="ring" type="mesh" mesh="ring" pos="0 0 0.03" rgba="0.05 0.05 0.05 1"
+            user="0 0.027129 0.023306 1.0 0.0027129 0.0023306 0.1"/>
+
+      <site name="thruster_0" pos="0.1355 0.1 0.0725" euler="0 0 -0.7853981634" size="0.01"/>
+      <site name="thruster_1" pos="0.1355 -0.1 0.0725" euler="0 0 0.7853981634" size="0.01"/>
+      <site name="thruster_2" pos="-0.1475 0.1 0.0725" euler="0 0 0.7853981634" size="0.01"/>
+      <site name="thruster_3" pos="-0.1475 -0.1 0.0725" euler="0 0 -0.7853981634" size="0.01"/>
+      <site name="thruster_4" pos="0.12 0.218 0" euler="0 1.5707963268 0" size="0.01"/>
+      <site name="thruster_5" pos="0.12 -0.218 0" euler="0 -1.5707963268 0" size="0.01"/>
+      <site name="thruster_6" pos="-0.12 0.218 0" euler="0 -1.5707963268 0" size="0.01"/>
+      <site name="thruster_7" pos="-0.12 -0.218 0" euler="0 1.5707963268 0" size="0.01"/>
+
+      <geom name="prop_0" type="mesh" mesh="prop_ccw" pos="0.1355 0.1 0.0725" euler="0 0 -0.7853981634"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+      <geom name="prop_1" type="mesh" mesh="prop_ccw" pos="0.1355 -0.1 0.0725" euler="0 0 0.7853981634"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+      <geom name="prop_2" type="mesh" mesh="prop_cw" pos="-0.1475 0.1 0.0725" euler="0 0 0.7853981634"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+      <geom name="prop_3" type="mesh" mesh="prop_cw" pos="-0.1475 -0.1 0.0725" euler="0 0 -0.7853981634"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+      <geom name="prop_4" type="mesh" mesh="prop_cw" pos="0.12 0.218 0" euler="0 1.5707963268 0"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+      <geom name="prop_5" type="mesh" mesh="prop_ccw" pos="0.12 -0.218 0" euler="0 -1.5707963268 0"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+      <geom name="prop_6" type="mesh" mesh="prop_ccw" pos="-0.12 0.218 0" euler="0 -1.5707963268 0"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+      <geom name="prop_7" type="mesh" mesh="prop_cw" pos="-0.12 -0.218 0" euler="0 1.5707963268 0"
+            density="0" contype="0" conaffinity="0" rgba="0.0 0.45 0.9 1"/>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <gyro name="gyro" site="imu"/>
+    <accelerometer name="accel" site="imu"/>
+  </sensor>
+</mujoco>

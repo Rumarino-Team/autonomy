@@ -1,4 +1,4 @@
-"""ctypes binding for libhydrus_mujoco_rl.so (auvs/hydrus_mujoco/hydrus_batch.h)."""
+"""ctypes binding for libauv_mujoco_rl.so (auvs/hydrus_mujoco/auv_batch.h)."""
 
 from __future__ import annotations
 
@@ -8,24 +8,24 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULT_LIB = REPO / "zig-out" / "lib" / "libhydrus_mujoco_rl.so"
+DEFAULT_LIB = REPO / "zig-out" / "lib" / "libauv_mujoco_rl.so"
 DEFAULT_XML = REPO / "auvs" / "hydrus_mujoco" / "hydrus.xml"
 
-THRUSTERS = 8
 INIT_SIZE = 13
 RANDOMIZATION_SIZE = 8
 STATE_SIZE = 21
 CAM_W = 96
 CAM_H = 72
-CAM_BOXES = 4
-CAM_BOX_STRIDE = 7
-CAM_EDGES = 48
-CAM_FLOW = 96
-CAM_FEATURE_SIZE = CAM_BOXES * CAM_BOX_STRIDE + CAM_EDGES + CAM_FLOW
+CAM_GRID_X = 16
+CAM_GRID_Y = 12
+CAM_BOXES = 8
+CAM_BOX_STRIDE = 8
+CAM_CELL_STRIDE = 7
+CAM_CELLS = CAM_GRID_X * CAM_GRID_Y
+CAM_FEATURE_SIZE = CAM_BOXES * CAM_BOX_STRIDE + CAM_CELLS * CAM_CELL_STRIDE
 MOCAP_POSE = 7
 BOXES = slice(0, CAM_BOXES * CAM_BOX_STRIDE)
-EDGES = slice(BOXES.stop, BOXES.stop + CAM_EDGES)
-FLOW = slice(EDGES.stop, EDGES.stop + CAM_FLOW)
+CELLS = slice(BOXES.stop, BOXES.stop + CAM_CELLS * CAM_CELL_STRIDE)
 
 # Column slices into the state rows returned by step().
 POS = slice(0, 3)
@@ -44,21 +44,23 @@ _u8p = ctypes.POINTER(ctypes.c_uint8)
 
 def _load(path: Path) -> ctypes.CDLL:
     lib = ctypes.CDLL(str(path))
-    lib.hydrus_batch_create.restype = ctypes.c_void_p
-    lib.hydrus_batch_create.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
-    lib.hydrus_batch_destroy.argtypes = [ctypes.c_void_p]
-    lib.hydrus_batch_num_envs.restype = ctypes.c_int
-    lib.hydrus_batch_num_envs.argtypes = [ctypes.c_void_p]
-    lib.hydrus_batch_timestep.restype = ctypes.c_double
-    lib.hydrus_batch_timestep.argtypes = [ctypes.c_void_p]
-    lib.hydrus_batch_reset.argtypes = [ctypes.c_void_p, _u8p, _f64p, _f64p]
-    lib.hydrus_batch_step.argtypes = [ctypes.c_void_p, _f32p, ctypes.c_int, _f64p]
-    lib.hydrus_batch_get_state.argtypes = [ctypes.c_void_p, _f64p]
-    lib.hydrus_batch_mocap_count.restype = ctypes.c_int
-    lib.hydrus_batch_mocap_count.argtypes = [ctypes.c_void_p]
-    lib.hydrus_batch_set_mocap.argtypes = [ctypes.c_void_p, _f64p]
-    lib.hydrus_batch_camera.argtypes = [ctypes.c_void_p, _f32p]
-    lib.hydrus_batch_camera_image.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint8)]
+    lib.auv_batch_create.restype = ctypes.c_void_p
+    lib.auv_batch_create.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    lib.auv_batch_destroy.argtypes = [ctypes.c_void_p]
+    lib.auv_batch_num_envs.restype = ctypes.c_int
+    lib.auv_batch_num_envs.argtypes = [ctypes.c_void_p]
+    lib.auv_batch_num_thrusters.restype = ctypes.c_int
+    lib.auv_batch_num_thrusters.argtypes = [ctypes.c_void_p]
+    lib.auv_batch_timestep.restype = ctypes.c_double
+    lib.auv_batch_timestep.argtypes = [ctypes.c_void_p]
+    lib.auv_batch_reset.argtypes = [ctypes.c_void_p, _u8p, _f64p, _f64p]
+    lib.auv_batch_step.argtypes = [ctypes.c_void_p, _f32p, ctypes.c_int, _f64p]
+    lib.auv_batch_get_state.argtypes = [ctypes.c_void_p, _f64p]
+    lib.auv_batch_mocap_count.restype = ctypes.c_int
+    lib.auv_batch_mocap_count.argtypes = [ctypes.c_void_p]
+    lib.auv_batch_set_mocap.argtypes = [ctypes.c_void_p, _f64p]
+    lib.auv_batch_camera.argtypes = [ctypes.c_void_p, _f32p]
+    lib.auv_batch_camera_image.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint8)]
     return lib
 
 
@@ -68,8 +70,8 @@ def _ptr(array: np.ndarray | None, ctype):
     return array.ctypes.data_as(ctypes.POINTER(ctype))
 
 
-class HydrusBatch:
-    """num_envs Hydrus vehicles with the Stonefish-matched physics, stepped in C++ threads."""
+class AuvBatch:
+    """num_envs vehicles with the Stonefish-matched physics, stepped in C++ threads."""
 
     def __init__(
         self,
@@ -79,18 +81,19 @@ class HydrusBatch:
         lib_path: Path | str = DEFAULT_LIB,
     ):
         self._lib = _load(Path(lib_path))
-        self._handle = self._lib.hydrus_batch_create(str(xml_path).encode(), num_envs, num_threads)
+        self._handle = self._lib.auv_batch_create(str(xml_path).encode(), num_envs, num_threads)
         if not self._handle:
-            raise RuntimeError(f"hydrus_batch_create failed for {xml_path}")
+            raise RuntimeError(f"auv_batch_create failed for {xml_path}")
         self.num_envs = num_envs
-        self.timestep = self._lib.hydrus_batch_timestep(self._handle)
-        self.mocap_count = self._lib.hydrus_batch_mocap_count(self._handle)
+        self.num_thrusters = self._lib.auv_batch_num_thrusters(self._handle)
+        self.timestep = self._lib.auv_batch_timestep(self._handle)
+        self.mocap_count = self._lib.auv_batch_mocap_count(self._handle)
         self._state = np.zeros((num_envs, STATE_SIZE), dtype=np.float64)
         self._features = np.zeros((num_envs, CAM_FEATURE_SIZE), dtype=np.float32)
 
     def close(self) -> None:
         if self._handle:
-            self._lib.hydrus_batch_destroy(self._handle)
+            self._lib.auv_batch_destroy(self._handle)
             self._handle = None
 
     def __del__(self):
@@ -111,35 +114,35 @@ class HydrusBatch:
             assert s.shape == (self.num_envs, INIT_SIZE)
         if r is not None:
             assert r.shape == (self.num_envs, RANDOMIZATION_SIZE)
-        self._lib.hydrus_batch_reset(self._handle, _ptr(m, ctypes.c_uint8), _ptr(s, ctypes.c_double), _ptr(r, ctypes.c_double))
-        self._lib.hydrus_batch_get_state(self._handle, _ptr(self._state, ctypes.c_double))
+        self._lib.auv_batch_reset(self._handle, _ptr(m, ctypes.c_uint8), _ptr(s, ctypes.c_double), _ptr(r, ctypes.c_double))
+        self._lib.auv_batch_get_state(self._handle, _ptr(self._state, ctypes.c_double))
         return self._state.copy()
 
     def step(self, thrusters: np.ndarray, substeps: int = 1) -> np.ndarray:
         cmd = np.ascontiguousarray(thrusters, dtype=np.float32)
-        assert cmd.shape == (self.num_envs, THRUSTERS)
-        self._lib.hydrus_batch_step(self._handle, _ptr(cmd, ctypes.c_float), substeps, _ptr(self._state, ctypes.c_double))
+        assert cmd.shape == (self.num_envs, self.num_thrusters)
+        self._lib.auv_batch_step(self._handle, _ptr(cmd, ctypes.c_float), substeps, _ptr(self._state, ctypes.c_double))
         return self._state.copy()
 
     def set_mocap(self, poses: np.ndarray) -> None:
         """poses: (num_envs, mocap_count, 7) xyz + quaternion xyzw. Gate is mocap 0, marker is mocap 1."""
         mocap = np.ascontiguousarray(poses, dtype=np.float64)
         assert mocap.shape == (self.num_envs, self.mocap_count, MOCAP_POSE)
-        self._lib.hydrus_batch_set_mocap(self._handle, _ptr(mocap, ctypes.c_double))
+        self._lib.auv_batch_set_mocap(self._handle, _ptr(mocap, ctypes.c_double))
 
     def camera(self) -> np.ndarray:
-        """YOLO boxes, pooled Sobel edges, and pooled optical flow. Shape (num_envs, CAM_FEATURE_SIZE)."""
-        self._lib.hydrus_batch_camera(self._handle, _ptr(self._features, ctypes.c_float))
+        """YOLO boxes and per-cell edges, flow, and flow confidence. Shape (num_envs, CAM_FEATURE_SIZE)."""
+        self._lib.auv_batch_camera(self._handle, _ptr(self._features, ctypes.c_float))
         return self._features.copy()
 
     def camera_image(self, env: int = 0) -> np.ndarray:
         """Last 96x72 raster for one env, after camera()."""
         pixels = np.zeros(CAM_W * CAM_H, dtype=np.uint8)
-        self._lib.hydrus_batch_camera_image(self._handle, env, _ptr(pixels, ctypes.c_uint8))
+        self._lib.auv_batch_camera_image(self._handle, env, _ptr(pixels, ctypes.c_uint8))
         return pixels.reshape(CAM_H, CAM_W)
 
     def state(self) -> np.ndarray:
-        self._lib.hydrus_batch_get_state(self._handle, _ptr(self._state, ctypes.c_double))
+        self._lib.auv_batch_get_state(self._handle, _ptr(self._state, ctypes.c_double))
         return self._state.copy()
 
 
@@ -147,18 +150,18 @@ if __name__ == "__main__":
     import argparse
     import time
 
-    parser = argparse.ArgumentParser(description="Measure batched Hydrus physics throughput.")
+    parser = argparse.ArgumentParser(description="Measure batched MuJoCo physics throughput.")
     parser.add_argument("--envs", type=int, nargs="+", default=[1, 16, 64, 256])
     parser.add_argument("--threads", type=int, default=0)
     parser.add_argument("--seconds", type=float, default=5.0, help="simulated seconds per env")
     args = parser.parse_args()
 
     for n in args.envs:
-        batch = HydrusBatch(n, args.threads)
+        batch = AuvBatch(n, args.threads)
         batch.reset()
         rng = np.random.default_rng(0)
         policy_steps = int(args.seconds * 60)
-        cmd = rng.uniform(-0.3, 0.3, size=(n, THRUSTERS)).astype(np.float32)
+        cmd = rng.uniform(-0.3, 0.3, size=(n, batch.num_thrusters)).astype(np.float32)
         t0 = time.perf_counter()
         for _ in range(policy_steps):
             state = batch.step(cmd, substeps=6)

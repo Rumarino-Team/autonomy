@@ -15,7 +15,7 @@ import gymnasium as gym
 import numpy as np
 from stable_baselines3.common.vec_env import VecEnv
 
-import hydrus_mujoco as hm
+import auv_mujoco as hm
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO / "auvs" / "hydrus_mujoco" / "auv.json"
@@ -185,7 +185,7 @@ class TaskConfig:
 
 
 def sample_scenarios(rng: np.random.Generator, n: int, task: TaskConfig):
-    """Initial states (hydrus_batch init rows), goals (x, y, z, yaw), randomization rows."""
+    """Initial states (auv_batch init rows), goals (x, y, z, yaw), randomization rows."""
     pos = np.column_stack(
         [
             rng.uniform(-task.xy_range, task.xy_range, n),
@@ -261,7 +261,7 @@ class HydrusPoseVecEnv(VecEnv):
         self.task = task or TaskConfig()
         self.cfg = load_config(config_path)
         self.tam = self.cfg["tam"]
-        self.batch = hm.HydrusBatch(num_envs, num_threads)
+        self.batch = hm.AuvBatch(num_envs, num_threads)
         assert abs(self.batch.timestep - 1.0 / PHYSICS_HZ) < 1e-9
         observation_space = gym.spaces.Box(-np.inf, np.inf, (OBS_SIZE,), np.float32)
         action_space = gym.spaces.Box(-1.0, 1.0, (ACT_SIZE,), np.float32)

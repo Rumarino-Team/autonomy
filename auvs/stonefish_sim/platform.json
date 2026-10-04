@@ -3,9 +3,9 @@
   "blend_file": "pool_scene.blend",
   "robot": "proteus",
   "steps_per_second": 360.0,
-  "realtime_factor_cap": 1.0,
+  "realtime_factor_cap": 8.0,
   "tracking_ok_seconds": 100.0,
   "min_render_interval_ms": 16,
   "console": false,
-  "bbox_only_in_front_of_camera": true
+  "bbox_only_in_front_of_camera": false
 }

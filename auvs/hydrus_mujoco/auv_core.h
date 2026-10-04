@@ -6,9 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace hydrus {
-
-constexpr int kThrusters = 8;
+namespace auv {
 
 struct Triangle {
     mjtNum v[3][3];
@@ -26,6 +24,18 @@ struct HullPart {
     mjtNum area = 0;
 };
 
+// Propeller model. Defaults match hydrus_auv.scn. An XML numeric named thruster_spec
+// overrides them, in order: max_rpm, diameter, thrust_coeff, torque_coeff, rotor_inertia, kp, ki.
+struct ThrusterSpec {
+    double max_rpm = 1000.0;
+    double diameter = 0.18;
+    double thrust_coeff = 0.48;
+    double torque_coeff = 0.05;
+    double rotor_inertia = 0.00146468;
+    double kp = 1.0;
+    double ki = 10.0;
+};
+
 // Per-environment physical variation. The defaults reproduce Stonefish.
 struct Randomization {
     double dry_mass_scale = 1;
@@ -38,19 +48,21 @@ struct Randomization {
 };
 
 // Compiled scene plus everything derived from it. Read-only once loaded, so any number of
-// HydrusSim instances on any threads can share it.
-class HydrusModel {
+// SimulationManager instances on any threads can share it.
+class AuvModel {
 public:
-    static HydrusModel* load(const char* xml_path, std::string& error);
-    ~HydrusModel();
-    HydrusModel(const HydrusModel&) = delete;
-    HydrusModel& operator=(const HydrusModel&) = delete;
+    static AuvModel* load(const char* xml_path, std::string& error);
+    ~AuvModel();
+    AuvModel(const AuvModel&) = delete;
+    AuvModel& operator=(const AuvModel&) = delete;
 
     mjModel* model = nullptr;
     int body = -1;
     int qpos_adr = -1;
     int qvel_adr = -1;
-    int thruster_site[kThrusters]{};
+    // thruster_0 .. thruster_{n-1}. A missing index before a later thruster is a load error.
+    std::vector<int> thruster_site;
+    ThrusterSpec thruster;
     int camera_site = -1;
     int gyro_adr = -1;
     int accel_adr = -1;
@@ -61,8 +73,10 @@ public:
     int hydro_prescaler = 1;
     std::vector<HullPart> hull;
 
+    int thrusterCount() const { return static_cast<int>(thruster_site.size()); }
+
 private:
-    HydrusModel() = default;
+    AuvModel() = default;
 };
 
 struct Rotor {
@@ -71,15 +85,15 @@ struct Rotor {
     double torque = 0;
 };
 
-// One Hydrus vehicle: MuJoCo state plus the Stonefish thruster and fluid model.
-class HydrusSim {
+// One vehicle: MuJoCo state plus the Stonefish thruster and fluid model.
+class SimulationManager {
 public:
-    explicit HydrusSim(const HydrusModel& model);
-    ~HydrusSim();
-    HydrusSim(const HydrusSim&) = delete;
-    HydrusSim& operator=(const HydrusSim&) = delete;
+    explicit SimulationManager(const AuvModel& model);
+    ~SimulationManager();
+    SimulationManager(const SimulationManager&) = delete;
+    SimulationManager& operator=(const SimulationManager&) = delete;
 
-    // Back to the pose in hydrus.xml, at rest.
+    // Back to the pose in the XML, at rest.
     void reset();
     // pos world, quat wxyz, velocities in the world frame.
     void reset(const mjtNum pos[3], const mjtNum quat[4], const mjtNum lin_vel[3], const mjtNum ang_vel[3]);
@@ -87,7 +101,7 @@ public:
     void setThrusters(const float* values, int count);
     void step();
 
-    const HydrusModel& hydrusModel() const { return model_; }
+    const AuvModel& auvModel() const { return model_; }
     const mjModel* model() const { return model_.model; }
     mjData* data() const { return data_; }
     const mjtNum* position() const;
@@ -103,11 +117,11 @@ private:
     void computeHydrodynamics();
     void applyThrusters();
 
-    const HydrusModel& model_;
+    const AuvModel& model_;
     mjData* data_ = nullptr;
     Randomization randomization_;
-    double cmd_[kThrusters]{};
-    Rotor rotor_[kThrusters]{};
+    std::vector<double> cmd_;
+    std::vector<Rotor> rotor_;
     uint64_t hydro_counter_ = 0;
     mjtNum hydro_force_[3]{};
     mjtNum hydro_torque_[3]{};
@@ -117,4 +131,4 @@ private:
 
 double numericOr(const mjModel* model, const char* name, int index, double fallback);
 
-}  // namespace hydrus
+}  // namespace auv

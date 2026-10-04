@@ -1,26 +1,18 @@
-#include "hydrus_core.h"
+#include "auv_core.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
-namespace hydrus {
+namespace auv {
 
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
-// Thruster specs from hydrus_auv.scn: normalized, inverted setpoint onto ±1000 RPM,
-// right-handed propeller, fluid_dynamics thrust model, mechanical_pi rotor dynamics.
-constexpr double kMaxOmega = 1000.0 / 60.0 * 2.0 * kPi;
-constexpr double kRotorOmegaLimit = 2.0 * kMaxOmega;
-constexpr double kThrustCoeff = 0.48;
-constexpr double kTorqueCoeff = 0.05;
-constexpr double kDiameter = 0.18;
-// Stonefish derives rotor inertia from the propeller mesh plus its added inertia.
-constexpr double kRotorInertia = 0.00146468;
-constexpr double kRotorKp = 1.0;
-constexpr double kRotorKi = 10.0;
+// Stonefish MechanicalPI integral clamp. Not part of thruster_spec.
 constexpr double kRotorILimit = 5.0;
 constexpr int kHullUserFields = 7;
 
@@ -229,16 +221,18 @@ mjtNum signedVolume(const Faces& faces, mjtNum centroid[3]) {
     return vol6 / 6.0;
 }
 
-void buildHull(HydrusModel& hm) {
-    const mjModel* model = hm.model;
-    if (model->nuser_geom < kHullUserFields || hm.body < 0)
+void buildHull(AuvModel& vehicle) {
+    const mjModel* model = vehicle.model;
+    if (model->nuser_geom < kHullUserFields || vehicle.body < 0)
         return;
-    const int geom_adr = model->body_geomadr[hm.body];
-    const int geom_num = model->body_geomnum[hm.body];
+    const int geom_adr = model->body_geomadr[vehicle.body];
+    const int geom_num = model->body_geomnum[vehicle.body];
     for (int i = 0; i < geom_num; ++i) {
         const int geom = geom_adr + i;
         const mjtNum* user = model->geom_user + model->nuser_geom * geom;
-        if (user[0] <= 0)
+        // Volume is the buoyant displacement. A non-buoyant shell still has drag coefficients.
+        const bool has_drag = user[1] != 0 || user[2] != 0 || user[3] != 0;
+        if (user[0] <= 0 && !has_drag)
             continue;
         HullPart part;
         part.geom = geom;
@@ -261,7 +255,7 @@ void buildHull(HydrusModel& hm) {
                 break;
         }
         if (part.faces.empty()) {
-            std::fprintf(stderr, "[hydrus_mujoco] hull geom %d has no drag mesh\n", geom);
+            std::fprintf(stderr, "[auv_mujoco] hull geom %d has no drag mesh\n", geom);
             continue;
         }
         if (signedVolume(part.faces, part.centroid) < 0) {
@@ -274,7 +268,7 @@ void buildHull(HydrusModel& hm) {
         }
         for (const Triangle& t : part.faces)
             part.area += triangleArea(t);
-        hm.hull.push_back(std::move(part));
+        vehicle.hull.push_back(std::move(part));
     }
 }
 
@@ -295,14 +289,35 @@ void worldPoint(mjtNum out[3], const mjtNum* pos, const mjtNum* mat, const mjtNu
     mju_addTo3(out, pos);
 }
 
+// True when name is exactly thruster_<index> and index is at or past the first missing site.
+bool thrusterPastGap(const char* name, int first_missing) {
+    constexpr char kPrefix[] = "thruster_";
+    constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    if (name == nullptr || std::strncmp(name, kPrefix, kPrefixLen) != 0)
+        return false;
+    const char* rest = name + kPrefixLen;
+    if (*rest == '\0')
+        return false;
+    char* end = nullptr;
+    const long index = std::strtol(rest, &end, 10);
+    return end != rest && *end == '\0' && index >= first_missing;
+}
+
+// Prefer the generic numeric name, then the hydrus_* name the original model uses.
+double numericAlias(const mjModel* model, const char* name, const char* legacy, int index, double fallback) {
+    if (mj_name2id(model, mjOBJ_NUMERIC, name) >= 0)
+        return numericOr(model, name, index, fallback);
+    return numericOr(model, legacy, index, fallback);
+}
+
 // Stonefish MechanicalPI::Update. The damping torque is the propeller torque of the last step.
-double updateRotor(Rotor& rotor, double setpoint, double inertia, double dt) {
+double updateRotor(Rotor& rotor, double setpoint, double inertia, double dt, double kp, double ki, double omega_limit) {
     const double error = setpoint - rotor.omega;
-    const double tau = kRotorKp * error + kRotorKi * rotor.integral;
+    const double tau = kp * error + ki * rotor.integral;
     rotor.integral = std::clamp(rotor.integral + error * dt, -kRotorILimit, kRotorILimit);
     const double damping = std::abs(rotor.torque);
     const double tau_d = rotor.omega > 0 ? damping : -damping;
-    rotor.omega = std::clamp(rotor.omega + (tau - tau_d) / inertia * dt, -kRotorOmegaLimit, kRotorOmegaLimit);
+    rotor.omega = std::clamp(rotor.omega + (tau - tau_d) / inertia * dt, -omega_limit, omega_limit);
     return rotor.omega;
 }
 
@@ -315,83 +330,118 @@ double numericOr(const mjModel* model, const char* name, int index, double fallb
     return model->numeric_data[model->numeric_adr[id] + index];
 }
 
-HydrusModel* HydrusModel::load(const char* xml_path, std::string& error) {
+AuvModel* AuvModel::load(const char* xml_path, std::string& error) {
     char buffer[1024] = {};
     mjModel* model = mj_loadXML(xml_path, nullptr, buffer, sizeof(buffer));
     if (model == nullptr) {
         error = buffer;
         return nullptr;
     }
-    auto* hm = new HydrusModel();
-    hm->model = model;
-    hm->body = mj_name2id(model, mjOBJ_BODY, "hydrus");
-    if (hm->body < 0) {
-        error = "missing body 'hydrus'";
-        delete hm;
+    auto* loaded = new AuvModel();
+    loaded->model = model;
+    const char* body_name = nullptr;
+    const char* body_candidates[] = {"auv", "hydrus", "proteus", "bluerov"};
+    for (const char* candidate : body_candidates) {
+        if (mj_name2id(model, mjOBJ_BODY, candidate) >= 0) {
+            body_name = candidate;
+            break;
+        }
+    }
+    loaded->body = body_name == nullptr ? -1 : mj_name2id(model, mjOBJ_BODY, body_name);
+    if (loaded->body < 0) {
+        error = "missing body 'auv', 'hydrus', 'proteus', or 'bluerov'";
+        delete loaded;
         return nullptr;
     }
-    const int joint = model->body_jntadr[hm->body];
+    const int joint = model->body_jntadr[loaded->body];
     if (joint < 0 || model->jnt_type[joint] != mjJNT_FREE) {
-        error = "body 'hydrus' needs a free joint";
-        delete hm;
+        error = std::string("body '") + body_name + "' needs a free joint";
+        delete loaded;
         return nullptr;
     }
-    hm->qpos_adr = model->jnt_qposadr[joint];
-    hm->qvel_adr = model->jnt_dofadr[joint];
+    loaded->qpos_adr = model->jnt_qposadr[joint];
+    loaded->qvel_adr = model->jnt_dofadr[joint];
 
-    if (mj_name2id(model, mjOBJ_NUMERIC, "hydrus_inertia") >= 0) {
+    const char* inertia_name = nullptr;
+    if (mj_name2id(model, mjOBJ_NUMERIC, "inertia") >= 0)
+        inertia_name = "inertia";
+    else if (mj_name2id(model, mjOBJ_NUMERIC, "hydrus_inertia") >= 0)
+        inertia_name = "hydrus_inertia";
+    if (inertia_name != nullptr) {
         for (int i = 0; i < 3; ++i)
-            model->body_inertia[3 * hm->body + i] = numericOr(model, "hydrus_inertia", i, 0);
+            model->body_inertia[3 * loaded->body + i] = numericOr(model, inertia_name, i, 0);
         mjData* data = mj_makeData(model);
         mj_setConst(model, data);
         mj_deleteData(data);
     }
 
-    hm->camera_site = mj_name2id(model, mjOBJ_SITE, "camera");
-    for (int i = 0; i < kThrusters; ++i) {
+    loaded->camera_site = mj_name2id(model, mjOBJ_SITE, "camera");
+    for (int i = 0;; ++i) {
         const std::string name = "thruster_" + std::to_string(i);
-        hm->thruster_site[i] = mj_name2id(model, mjOBJ_SITE, name.c_str());
-        if (hm->thruster_site[i] < 0)
-            std::fprintf(stderr, "[hydrus_mujoco] missing site '%s'\n", name.c_str());
+        const int site = mj_name2id(model, mjOBJ_SITE, name.c_str());
+        if (site < 0)
+            break;
+        loaded->thruster_site.push_back(site);
+    }
+    const int first_missing = loaded->thrusterCount();
+    for (int s = 0; s < model->nsite; ++s) {
+        const char* name = mj_id2name(model, mjOBJ_SITE, s);
+        if (!thrusterPastGap(name, first_missing))
+            continue;
+        error = "missing site 'thruster_" + std::to_string(first_missing) + "'";
+        delete loaded;
+        return nullptr;
+    }
+    if (mj_name2id(model, mjOBJ_NUMERIC, "thruster_spec") >= 0) {
+        ThrusterSpec& spec = loaded->thruster;
+        spec.max_rpm = numericOr(model, "thruster_spec", 0, spec.max_rpm);
+        spec.diameter = numericOr(model, "thruster_spec", 1, spec.diameter);
+        spec.thrust_coeff = numericOr(model, "thruster_spec", 2, spec.thrust_coeff);
+        spec.torque_coeff = numericOr(model, "thruster_spec", 3, spec.torque_coeff);
+        spec.rotor_inertia = numericOr(model, "thruster_spec", 4, spec.rotor_inertia);
+        spec.kp = numericOr(model, "thruster_spec", 5, spec.kp);
+        spec.ki = numericOr(model, "thruster_spec", 6, spec.ki);
     }
     const int gyro = mj_name2id(model, mjOBJ_SENSOR, "gyro");
     const int accel = mj_name2id(model, mjOBJ_SENSOR, "accel");
     if (gyro >= 0)
-        hm->gyro_adr = model->sensor_adr[gyro];
+        loaded->gyro_adr = model->sensor_adr[gyro];
     if (accel >= 0)
-        hm->accel_adr = model->sensor_adr[accel];
+        loaded->accel_adr = model->sensor_adr[accel];
 
-    hm->water_density = numericOr(model, "water_density", 0, 1025);
+    loaded->water_density = numericOr(model, "water_density", 0, 1025);
     const double steps_per_second = 1.0 / model->opt.timestep;
     const double hydro_rate = numericOr(model, "hydro_rate", 0, 50);
-    hm->hydro_prescaler = std::max(1, static_cast<int>(std::lround(steps_per_second / hydro_rate)));
-    hm->volume = numericOr(model, "hydrus_volume", 0, 0);
+    loaded->hydro_prescaler = std::max(1, static_cast<int>(std::lround(steps_per_second / hydro_rate)));
+    loaded->volume = numericAlias(model, "volume", "hydrus_volume", 0, 0);
     for (int i = 0; i < 3; ++i)
-        hm->cb[i] = numericOr(model, "hydrus_cb", i, 0);
-    hm->dry_mass = numericOr(model, "hydrus_dry_mass", 0, model->body_mass[hm->body]);
-    buildHull(*hm);
-    return hm;
+        loaded->cb[i] = numericAlias(model, "cb", "hydrus_cb", i, 0);
+    loaded->dry_mass = numericAlias(model, "dry_mass", "hydrus_dry_mass", 0, model->body_mass[loaded->body]);
+    buildHull(*loaded);
+    return loaded;
 }
 
-HydrusModel::~HydrusModel() {
+AuvModel::~AuvModel() {
     if (model != nullptr)
         mj_deleteModel(model);
 }
 
-HydrusSim::HydrusSim(const HydrusModel& model)
+SimulationManager::SimulationManager(const AuvModel& model)
     : model_(model),
       data_(mj_makeData(model.model)),
+      cmd_(model.thruster_site.size()),
+      rotor_(model.thruster_site.size()),
       part_min_(model.hull.size()),
       part_max_(model.hull.size()) {
     reset();
 }
 
-HydrusSim::~HydrusSim() {
+SimulationManager::~SimulationManager() {
     mj_deleteData(data_);
 }
 
-void HydrusSim::clearActuation() {
-    for (int i = 0; i < kThrusters; ++i) {
+void SimulationManager::clearActuation() {
+    for (size_t i = 0; i < cmd_.size(); ++i) {
         cmd_[i] = 0;
         rotor_[i] = {};
     }
@@ -400,13 +450,13 @@ void HydrusSim::clearActuation() {
     mju_zero3(hydro_torque_);
 }
 
-void HydrusSim::reset() {
+void SimulationManager::reset() {
     mj_resetData(model_.model, data_);
     clearActuation();
     mj_forward(model_.model, data_);
 }
 
-void HydrusSim::reset(const mjtNum pos[3], const mjtNum quat[4], const mjtNum lin_vel[3], const mjtNum ang_vel[3]) {
+void SimulationManager::reset(const mjtNum pos[3], const mjtNum quat[4], const mjtNum lin_vel[3], const mjtNum ang_vel[3]) {
     const mjModel* m = model_.model;
     mj_resetData(m, data_);
     clearActuation();
@@ -423,41 +473,41 @@ void HydrusSim::reset(const mjtNum pos[3], const mjtNum quat[4], const mjtNum li
     mj_forward(m, data_);
 }
 
-void HydrusSim::setRandomization(const Randomization& randomization) {
+void SimulationManager::setRandomization(const Randomization& randomization) {
     randomization_ = randomization;
 }
 
-void HydrusSim::setThrusters(const float* values, int count) {
-    for (int i = 0; i < kThrusters; ++i)
+void SimulationManager::setThrusters(const float* values, int count) {
+    for (int i = 0; i < static_cast<int>(cmd_.size()); ++i)
         cmd_[i] = (values != nullptr && i < count) ? values[i] : 0.0;
 }
 
-void HydrusSim::step() {
+void SimulationManager::step() {
     mj_step1(model_.model, data_);
     applyForces();
     mj_step2(model_.model, data_);
 }
 
-const mjtNum* HydrusSim::position() const {
+const mjtNum* SimulationManager::position() const {
     return data_->xpos + 3 * model_.body;
 }
 
-const mjtNum* HydrusSim::quaternion() const {
+const mjtNum* SimulationManager::quaternion() const {
     return data_->xquat + 4 * model_.body;
 }
 
-void HydrusSim::velocity(mjtNum lin[3], mjtNum ang[3]) const {
+void SimulationManager::velocity(mjtNum lin[3], mjtNum ang[3]) const {
     mjtNum vel[6];
     mj_objectVelocity(model_.model, data_, mjOBJ_XBODY, model_.body, vel, 0);
     mju_copy3(ang, vel);
     mju_copy3(lin, vel + 3);
 }
 
-const mjtNum* HydrusSim::gyro() const {
+const mjtNum* SimulationManager::gyro() const {
     return model_.gyro_adr >= 0 ? data_->sensordata + model_.gyro_adr : nullptr;
 }
 
-const mjtNum* HydrusSim::accel() const {
+const mjtNum* SimulationManager::accel() const {
     return model_.accel_adr >= 0 ? data_->sensordata + model_.accel_adr : nullptr;
 }
 
@@ -465,7 +515,7 @@ const mjtNum* HydrusSim::accel() const {
 // center of buoyancy, plus per-face form drag and skin friction on every external part.
 // While crossing the surface Stonefish clips each face against the water; here each part's
 // buoyancy scales with how much of its height is under water, and dry faces get no drag.
-void HydrusSim::computeHydrodynamics() {
+void SimulationManager::computeHydrodynamics() {
     const mjModel* model = model_.model;
     const mjData* data = data_;
     const int body = model_.body;
@@ -618,7 +668,7 @@ void HydrusSim::computeHydrodynamics() {
 }
 
 // Stonefish Thruster::Update with the FDThrust model for a right-handed propeller.
-void HydrusSim::applyThrusters() {
+void SimulationManager::applyThrusters() {
     const mjModel* model = model_.model;
     mjData* data = data_;
     const int body = model_.body;
@@ -627,16 +677,19 @@ void HydrusSim::applyThrusters() {
     mj_objectVelocity(model, data, mjOBJ_BODY, body, vel, 0);
     const mjtNum* ang = vel;
     const mjtNum* lin = vel + 3;
+    const ThrusterSpec& spec = model_.thruster;
+    const double max_omega = spec.max_rpm / 60.0 * 2.0 * kPi;
+    const double omega_limit = 2.0 * max_omega;
     const double rho = model_.water_density;
-    const double d = kDiameter;
+    const double d = spec.diameter;
     const double dt = model->opt.timestep;
-    const double inertia = kRotorInertia * randomization_.rotor_inertia_scale;
+    const double inertia = spec.rotor_inertia * randomization_.rotor_inertia_scale;
     const double gain = randomization_.thrust_scale;
 
-    for (int i = 0; i < kThrusters; ++i) {
+    for (int i = 0; i < static_cast<int>(cmd_.size()); ++i) {
         Rotor& rotor = rotor_[i];
-        const double setpoint = -std::clamp(cmd_[i], -1.0, 1.0) * kMaxOmega;
-        const double omega = updateRotor(rotor, setpoint, inertia, dt);
+        const double setpoint = -std::clamp(cmd_[i], -1.0, 1.0) * max_omega;
+        const double omega = updateRotor(rotor, setpoint, inertia, dt, spec.kp, spec.ki, omega_limit);
         const int site = model_.thruster_site[i];
         if (site < 0)
             continue;
@@ -657,8 +710,8 @@ void HydrusSim::applyThrusters() {
         const double u = mju_dot3(axis, inflow);
 
         const double n = omega / (2.0 * kPi);
-        const double thrust = gain * rho * d * d * d * std::abs(n) * (d * kThrustCoeff * n - kThrustCoeff * u);
-        rotor.torque = -gain * rho * d * d * d * d * std::abs(n) * (d * kTorqueCoeff * n - kTorqueCoeff * u);
+        const double thrust = gain * rho * d * d * d * std::abs(n) * (d * spec.thrust_coeff * n - spec.thrust_coeff * u);
+        rotor.torque = -gain * rho * d * d * d * d * std::abs(n) * (d * spec.torque_coeff * n - spec.torque_coeff * u);
 
         mjtNum force[3];
         mjtNum torque[3];
@@ -671,7 +724,7 @@ void HydrusSim::applyThrusters() {
     }
 }
 
-void HydrusSim::applyForces() {
+void SimulationManager::applyForces() {
     const mjModel* model = model_.model;
     mju_zero(data_->xfrc_applied, 6 * model->nbody);
     const int body = model_.body;
@@ -690,4 +743,4 @@ void HydrusSim::applyForces() {
     applyThrusters();
 }
 
-}  // namespace hydrus
+}  // namespace auv

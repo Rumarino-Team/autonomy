@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-import hydrus_mujoco as hm
+import auv_mujoco as hm
 import pose_env as pe
 
 YAW_GATE = np.pi / 8.0
@@ -80,7 +80,7 @@ def run_episodes(controller, sc: Scenarios, seconds: float, num_threads: int = 0
     """Runs every scenario for `seconds` with a fixed goal. Controllers expose hz, reset(n)
     and act(state, goal) -> thruster commands."""
     n = len(sc.init)
-    batch = hm.HydrusBatch(n, num_threads)
+    batch = hm.AuvBatch(n, num_threads)
     state = batch.reset(None, sc.init, sc.randomization)
     controller.reset(n)
     substeps = pe.PHYSICS_HZ // controller.hz

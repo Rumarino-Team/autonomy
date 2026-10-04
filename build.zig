@@ -265,15 +265,16 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo hydrus plugin and the batched RL library") orelse false;
+    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo AUV plugin, Stonefish view, and batched RL library") orelse false;
     const mujoco_prefix = b.option([]const u8, "MUJOCO_PREFIX", "MuJoCo install prefix or source tree");
     if (mujoco) {
         const prefix = mujoco_prefix orelse @panic("-Dmujoco requires -DMUJOCO_PREFIX");
         cmake_configure.addArg(b.fmt("-DMUJOCO_PREFIX={s}", .{prefix}));
 
         const cmake_targets = [_][]const u8{
-            "auv_hydrus_mujoco",
-            "hydrus_mujoco_rl",
+            "auv_mujoco",
+            "auv_mujoco_view",
+            "auv_mujoco_rl",
         };
         for (cmake_targets) |cmake_target| {
             cmake_build.addArg(cmake_target);

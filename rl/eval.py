@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-import hydrus_mujoco as hm
+import auv_mujoco as hm
 import pose_env as pe
 from export_policy import ExportedPolicy
 from pid_baseline import HostPID, Scenarios, run_episodes, summarize

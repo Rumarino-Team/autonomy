@@ -148,62 +148,67 @@ if(MUJOCO_PREFIX)
   endif()
 
   set(MUJOCO_INCLUDE_DIR "${MUJOCO_PREFIX}/include")
-  if(EXISTS "${MUJOCO_INCLUDE_DIR}/GLFW/glfw3.h")
-    set(GLFW_INCLUDE_DIR "${MUJOCO_INCLUDE_DIR}")
-  elseif(EXISTS "${MUJOCO_PREFIX}/build/_deps/glfw3-src/include/GLFW/glfw3.h")
-    set(GLFW_INCLUDE_DIR "${MUJOCO_PREFIX}/build/_deps/glfw3-src/include")
-  else()
-    set(GLFW_INCLUDE_DIR "/usr/include")
-  endif()
 
-  add_library(auv_hydrus_mujoco SHARED
+  # Physics plugin. It does not link Stonefish: both libraries export TinyXML.
+  # The window is libauv_mujoco_view.so, loaded with RTLD_DEEPBIND.
+  add_library(auv_mujoco SHARED
     auvs/hydrus_mujoco/auv.cpp
-    auvs/hydrus_mujoco/hydrus_core.cpp
+    auvs/hydrus_mujoco/auv_core.cpp
   )
-  target_include_directories(auv_hydrus_mujoco PRIVATE
+  target_include_directories(auv_mujoco PRIVATE
     "${CMAKE_SOURCE_DIR}/include"
     "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
     "${MUJOCO_INCLUDE_DIR}"
-    "${GLFW_INCLUDE_DIR}"
   )
-  target_link_directories(auv_hydrus_mujoco PRIVATE "${MUJOCO_LIB_DIR}")
-  target_link_libraries(auv_hydrus_mujoco PRIVATE mujoco)
-  if(EXISTS "${MUJOCO_LIB_DIR}/libglfw.so" OR
-      EXISTS "/usr/lib/x86_64-linux-gnu/libglfw.so" OR
-      EXISTS "/usr/lib/libglfw.so")
-    target_link_libraries(auv_hydrus_mujoco PRIVATE glfw)
-  elseif(EXISTS "${MUJOCO_LIB_DIR}/libglfw3.a")
-    target_link_libraries(auv_hydrus_mujoco PRIVATE
-      "${MUJOCO_LIB_DIR}/libglfw3.a"
-      X11
-      Xrandr
-      Xi
-      Xinerama
-      Xcursor
-      GL
-      dl
-      m
-    )
-  else()
-    target_link_libraries(auv_hydrus_mujoco PRIVATE glfw)
-  endif()
-  target_link_libraries(auv_hydrus_mujoco PRIVATE pthread)
-  set_target_properties(auv_hydrus_mujoco PROPERTIES
+  target_link_directories(auv_mujoco PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(auv_mujoco PRIVATE mujoco dl pthread)
+  set_target_properties(auv_mujoco PROPERTIES
     BUILD_RPATH "${MUJOCO_LIB_DIR}"
   )
 
-  add_library(hydrus_mujoco_rl SHARED
-    auvs/hydrus_mujoco/hydrus_batch.cpp
-    auvs/hydrus_mujoco/hydrus_camera.cpp
-    auvs/hydrus_mujoco/hydrus_core.cpp
+  add_library(auv_mujoco_view SHARED
+    auvs/hydrus_mujoco/auv_view.cpp
   )
-  target_include_directories(hydrus_mujoco_rl PRIVATE
+  add_dependencies(auv_mujoco_view stonefish)
+  target_include_directories(auv_mujoco_view PRIVATE
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${STONEFISH_INCLUDE_ROOT}"
+    "${STONEFISH_INCLUDE_DIR}"
+  )
+  target_compile_definitions(auv_mujoco_view PRIVATE
+    _GNU_SOURCE
+    BT_EULER_DEFAULT_ZYX
+    BT_USE_DOUBLE_PRECISION
+    ${STONEFISH_EXTRA_DEFS}
+    SHADER_DIR_PATH="${STONEFISH_DIR}/share/${STONEFISH_LIB}/shaders/"
+  )
+  target_compile_options(auv_mujoco_view PRIVATE -fopenmp)
+  target_link_directories(auv_mujoco_view PRIVATE "${STONEFISH_DIR}/lib")
+  target_link_libraries(auv_mujoco_view PRIVATE
+    ${STONEFISH_LIB}
+    SDL2
+    freetype
+    OpenGL
+    GLX
+    GLU
+    gomp
+  )
+  set_target_properties(auv_mujoco_view PROPERTIES
+    BUILD_RPATH "${STONEFISH_DIR}/lib"
+  )
+
+  add_library(auv_mujoco_rl SHARED
+    auvs/hydrus_mujoco/auv_batch.cpp
+    auvs/hydrus_mujoco/auv_camera.cpp
+    auvs/hydrus_mujoco/auv_core.cpp
+  )
+  target_include_directories(auv_mujoco_rl PRIVATE
     "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
     "${MUJOCO_INCLUDE_DIR}"
   )
-  target_link_directories(hydrus_mujoco_rl PRIVATE "${MUJOCO_LIB_DIR}")
-  target_link_libraries(hydrus_mujoco_rl PRIVATE mujoco pthread)
-  set_target_properties(hydrus_mujoco_rl PROPERTIES
+  target_link_directories(auv_mujoco_rl PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(auv_mujoco_rl PRIVATE mujoco pthread)
+  set_target_properties(auv_mujoco_rl PROPERTIES
     BUILD_RPATH "${MUJOCO_LIB_DIR}"
   )
 endif()

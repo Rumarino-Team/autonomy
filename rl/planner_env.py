@@ -11,7 +11,7 @@ import gymnasium as gym
 import numpy as np
 from stable_baselines3.common.vec_env import VecEnv
 
-import hydrus_mujoco as hm
+import auv_mujoco as hm
 import pose_env as pe
 
 PLANNER_HZ = 2
@@ -57,7 +57,7 @@ class PlannerVecEnv(VecEnv):
         self.kp = np.array([0.8, 0.8, 0.8, -8.0, 8.0, 1.2])
         self.ki = np.zeros(6)
         self.kd = np.array([0.4, 0.4, 0.3, -2.0, 2.0, 0.4])
-        self.batch = hm.HydrusBatch(num_envs, num_threads)
+        self.batch = hm.AuvBatch(num_envs, num_threads)
         if self.batch.mocap_count < 2:
             raise RuntimeError("hydrus.xml gate and marker must be mocap bodies")
         self.render_mode = None

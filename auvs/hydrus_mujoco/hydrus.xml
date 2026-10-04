@@ -1,6 +1,6 @@
 <mujoco model="hydrus">
   <!-- NED world: +X north, +Y east, +Z down. Gravity points down. -->
-  <compiler angle="radian" meshdir="../hydrus_sim/data/models"/>
+  <compiler angle="radian" meshdir="../stonefish_sim/data/models"/>
   <option timestep="0.00277777777778" gravity="0 0 9.81" integrator="implicitfast">
     <flag sleep="disable"/>
   </option>
