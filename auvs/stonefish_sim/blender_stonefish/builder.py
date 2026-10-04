@@ -175,6 +175,9 @@ class ScenarioBuilder:
 
         for obj in extracted:
             xyz, rpy = _stonefish_pose(obj.location, obj.rotation)
+            # Blender scale is local. Bake it into the vertices: Stonefish's
+            # mesh scale is one number and cannot express a non-uniform scale.
+            sx, sy, sz = (component * mesh_scale for component in obj.scale)
             known = KNOWN_MESHES.get(obj.name)
             if known is not None and not obj.stonefish_name:
                 entity_name, material, look, cls, _physics, _visual, convex = known
@@ -189,7 +192,7 @@ class ScenarioBuilder:
                 logger.error("mesh %s has no data", obj.name)
                 return -1
             triangles = extractor.read_mesh_triangles(
-                obj.mesh_data_block, scale=mesh_scale, transform_coords=True
+                obj.mesh_data_block, scale=(sx, sy, sz), transform_coords=True
             )
             if triangles is None:
                 logger.error("failed to read %s", obj.name)
@@ -198,7 +201,9 @@ class ScenarioBuilder:
             key = _geometry_key(vertices, faces, face_uvs)
             relative = mesh_cache.get(key)
             if relative is None:
-                relative = Path("models") / "blender" / f"{obj.mesh_name or obj.name}.obj"
+                unit = abs(sx - mesh_scale) < 1e-9 and abs(sy - mesh_scale) < 1e-9 and abs(sz - mesh_scale) < 1e-9
+                stem = (obj.mesh_name or obj.name) if unit else obj.name
+                relative = Path("models") / "blender" / f"{stem}.obj"
                 filename = Path(data_dir) / relative
                 if not extractor.write_mesh_triangles(str(filename), vertices, faces, face_uvs):
                     logger.error("failed to export %s", obj.name)

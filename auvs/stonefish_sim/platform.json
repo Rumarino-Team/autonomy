@@ -1,7 +1,7 @@
 {
   "data_path": "auvs/stonefish_sim/data/",
   "blend_file": "pool_scene.blend",
-  "robot": "proteus",
+  "robot": "hydrus",
   "steps_per_second": 360.0,
   "realtime_factor_cap": 8.0,
   "tracking_ok_seconds": 100.0,

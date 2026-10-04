@@ -17,6 +17,13 @@ from typing import List, Tuple, Optional
 logger = logging.getLogger("blender_stonefish_plugin.mesh_exporter")
 
 
+def _axis_scale(scale: float | Tuple[float, float, float]) -> Tuple[float, float, float]:
+    if isinstance(scale, (int, float)):
+        value = float(scale)
+        return value, value, value
+    return float(scale[0]), float(scale[1]), float(scale[2])
+
+
 class CustomDataLayer:
     """Represents a CustomData layer in Blender"""
 
@@ -125,15 +132,16 @@ class MeshExporter:
     def read_triangles(
         self,
         mesh_block,
-        scale: float = 1.0,
+        scale: float | Tuple[float, float, float] = 1.0,
         transform_coords: bool = True,
     ) -> Optional[Tuple[List[Tuple[float, float, float]], List[List[int]], List[List[Tuple[float, float]]]]]:
         """Read mesh vertices, faces, and per-corner UVs from a Blender mesh data block.
 
+        scale is one factor or a per-axis (x, y, z) scale in Blender local space.
         When transform_coords is set, Z is negated. The checked-in pool meshes
         were exported that way: Blender keeps the basin below zero, and
-        Stonefish keeps it above zero. Face order is reversed with the Z flip
-        so the surface is not turned inside out.
+        Stonefish keeps it above zero. Face order is reversed when the combined
+        scale and Z flip turn the surface inside out.
         """
         if mesh_block is None:
             logger.error(" Could not read mesh data")
@@ -151,13 +159,12 @@ class MeshExporter:
         if len(face_uvs) != len(faces):
             face_uvs = [[] for _ in faces]
 
-        transformed = []
-        for x, y, z in vertices:
-            if transform_coords:
-                transformed.append((x * scale, y * scale, -z * scale))
-            else:
-                transformed.append((x * scale, y * scale, z * scale))
-        if transform_coords:
+        sx, sy, sz = _axis_scale(scale)
+        # Z is flipped into Stonefish. A negative object scale is another flip,
+        # so the winding correction follows the combined sign.
+        flip_z = -1.0 if transform_coords else 1.0
+        transformed = [(x * sx, y * sy, z * sz * flip_z) for x, y, z in vertices]
+        if sx * sy * sz * flip_z < 0:
             faces = [list(reversed(face)) for face in faces]
             face_uvs = [list(reversed(uvs)) for uvs in face_uvs]
         return transformed, faces, face_uvs
