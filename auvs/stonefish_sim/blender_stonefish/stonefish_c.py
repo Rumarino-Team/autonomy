@@ -1,4 +1,4 @@
-"""ctypes layout for stonefish_c/include/stonefish_c.h."""
+"""ctypes layout for auvs/stonefish_sim/stonefish_c/include/stonefish_c.h."""
 
 import ctypes
 from ctypes import CDLL, c_char_p, c_double, c_int, c_void_p

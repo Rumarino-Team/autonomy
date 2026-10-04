@@ -33,7 +33,6 @@ POOL_MESHES = {
 ID_KEYS = (
     "stonefish",
     "stonefish_name",
-    "geometry_type",
     "material",
     "look",
     "cls",
@@ -119,7 +118,6 @@ def _write_id_properties(self, context):
         return
     obj["stonefish"] = "1"
     obj["stonefish_name"] = self.stonefish_name or obj.name
-    obj["geometry_type"] = "mesh"
     obj["material"] = self.material
     obj["look"] = self.look
     if self.cls_name == "none":
@@ -191,7 +189,7 @@ class StonefishSettings(bpy.types.PropertyGroup):
     )
     physics_mesh: bpy.props.StringProperty(
         name="Physics OBJ",
-        description="Path relative to auvs/hydrus_sim/data/. Empty exports the Blender mesh at startup",
+        description="Path relative to auvs/stonefish_sim/data/. Empty exports the Blender mesh at startup",
         update=_write_id_properties,
     )
     visual_mesh: bpy.props.StringProperty(
@@ -254,7 +252,6 @@ class STONEFISH_OT_stamp_pool(bpy.types.Operator):
             stonefish_name, material, look, cls_name, physics, visual, convex = spec
             obj["stonefish"] = "1"
             obj["stonefish_name"] = stonefish_name
-            obj["geometry_type"] = "mesh"
             obj["material"] = material
             obj["look"] = look
             obj["cls"] = cls_name

@@ -1,5 +1,5 @@
 # Materials, looks, friction, and ocean for the Hydrus pool.
-# Geometry comes from the .blend file. Values match auvs/hydrus_sim/data/scenarios/pool.scn.
+# Geometry comes from the .blend file. Values match auvs/stonefish_sim/data/scenarios/pool.scn.
 
 materials:
   acrylic:

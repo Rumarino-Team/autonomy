@@ -3,8 +3,8 @@ zig-out/
 tmp/
 .cache/
 build/
-blender_stonefish/__pycache__/
-blender_stonefish_addon/__pycache__/
+auvs/stonefish_sim/blender_stonefish/__pycache__/
+auvs/stonefish_sim/blender_stonefish_addon/__pycache__/
 rl/runs/
 __pycache__/
 MUJOCO_LOG.TXT

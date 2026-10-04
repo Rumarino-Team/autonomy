@@ -164,7 +164,7 @@ uint32_t clampPixel(double value, unsigned limit) {
     return static_cast<uint32_t>(value);
 }
 
-// Same projection as hydrus_sim: camera +X right, +Y up, +Z forward, then Y
+// Same projection as stonefish_sim: camera +X right, +Y up, +Z forward, then Y
 // is negated so image +Y is down. Corners must sit 0.1 m to 50 m in front.
 bool projectAabb(
     const mjtNum* cam_pos,

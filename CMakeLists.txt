@@ -56,11 +56,11 @@ ExternalProject_Add(stonefish
     "${STONEFISH_DIR}/lib/lib${STONEFISH_LIB}.so"
 )
 
-add_library(stonefish_c STATIC stonefish_c/src/stonefish_c.cpp)
+add_library(stonefish_c STATIC auvs/stonefish_sim/stonefish_c/src/stonefish_c.cpp)
 add_dependencies(stonefish_c stonefish)
 set_target_properties(stonefish_c PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(stonefish_c PUBLIC
-  "${CMAKE_CURRENT_SOURCE_DIR}/stonefish_c/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/auvs/stonefish_sim/stonefish_c/include"
   PRIVATE
     "${STONEFISH_INCLUDE_ROOT}"
     "${STONEFISH_INCLUDE_DIR}"
@@ -77,7 +77,7 @@ check_include_file_cxx(print AUTONOMY_HAS_STD_PRINT)
 unset(CMAKE_REQUIRED_FLAGS)
 
 function(add_auv_sim target platform_config)
-  add_library(${target} SHARED auvs/hydrus_sim/auv.cpp)
+  add_library(${target} SHARED auvs/stonefish_sim/auv.cpp auvs/stonefish_sim/robot.cpp)
   add_dependencies(${target} stonefish)
 
   target_include_directories(${target} PRIVATE
@@ -85,10 +85,10 @@ function(add_auv_sim target platform_config)
     "${STONEFISH_INCLUDE_DIR}"
     ${Python3_INCLUDE_DIRS}
   )
-  # GCC 13 and earlier ship C++23 without <print>. auvs/hydrus_sim/compat fills that gap.
+  # GCC 13 and earlier ship C++23 without <print>. auvs/stonefish_sim/compat fills that gap.
   if(NOT AUTONOMY_HAS_STD_PRINT)
     target_include_directories(${target} BEFORE PRIVATE
-      "${CMAKE_SOURCE_DIR}/auvs/hydrus_sim/compat"
+      "${CMAKE_SOURCE_DIR}/auvs/stonefish_sim/compat"
     )
   endif()
 
@@ -99,8 +99,8 @@ function(add_auv_sim target platform_config)
     ${STONEFISH_EXTRA_DEFS}
     SHADER_DIR_PATH="${STONEFISH_DIR}/share/${STONEFISH_LIB}/shaders/"
     AUV_PLATFORM_CONFIG="${platform_config}"
-    BLENDER_STONEFISH_ROOT="${CMAKE_SOURCE_DIR}"
-    BLENDER_STONEFISH_CONFIG="${CMAKE_SOURCE_DIR}/blender_stonefish/config.yaml"
+    BLENDER_STONEFISH_ROOT="${CMAKE_SOURCE_DIR}/auvs/stonefish_sim"
+    BLENDER_STONEFISH_CONFIG="${CMAKE_SOURCE_DIR}/auvs/stonefish_sim/blender_stonefish/config.yaml"
   )
 
   target_compile_options(${target} PRIVATE
@@ -130,7 +130,7 @@ function(add_auv_sim target platform_config)
   install(TARGETS ${target})
 endfunction()
 
-add_auv_sim(auv_hydrus_sim "auvs/hydrus_sim/platform.json")
+add_auv_sim(auv_stonefish_sim "auvs/stonefish_sim/platform.json")
 
 # MuJoCo prefix is an install tree (include/ and lib/libmujoco.so) or a source
 # tree whose library lives at build/lib/libmujoco.so. Unset, the Stonefish

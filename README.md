@@ -6,15 +6,15 @@ zig build run -- \
     ./auvs/stationary_sim/auv.json
 ```
 
-## Build & Run: libauv_hydrus_sim
+## Build & Run: libauv_stonefish_sim
 
-`auvs/hydrus_sim/platform.json` selects the vehicle with `robot`: `hydrus`, `proteus`, `bluerov2`, or `girona500`. Pass the matching controller file.
+`auvs/stonefish_sim/platform.json` selects the vehicle with `robot`: `hydrus`, `proteus`, `bluerov2`, or `girona500`. Pass the matching controller file.
 
 ```sh
 zig build -Dstonefish run -- \
-    ./zig-out/lib/libauv_hydrus_sim.so  \
+    ./zig-out/lib/libauv_stonefish_sim.so  \
     prequalify \
-    ./auvs/hydrus_sim/hydrus.json
+    ./auvs/stonefish_sim/hydrus.json
 ```
 
 
