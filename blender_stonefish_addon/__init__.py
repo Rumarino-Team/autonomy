@@ -96,16 +96,6 @@ def _look_items(self, context):
     return _enum_items(_catalog_lists()[1])
 
 
-def _shape_items(self, context):
-    return [
-        ("plane", "Plane", "Infinite ground plane"),
-        ("box", "Box", "Box from object dimensions"),
-        ("cylinder", "Cylinder", "Cylinder from object dimensions"),
-        ("sphere", "Sphere", "Sphere from object dimensions"),
-        ("mesh", "Mesh", "Triangle mesh, from an OBJ path or exported at sim startup"),
-    ]
-
-
 def _class_items(self, context):
     return [
         ("none", "None", "Not a tracked detection"),
@@ -129,7 +119,7 @@ def _write_id_properties(self, context):
         return
     obj["stonefish"] = "1"
     obj["stonefish_name"] = self.stonefish_name or obj.name
-    obj["geometry_type"] = self.shape
+    obj["geometry_type"] = "mesh"
     obj["material"] = self.material
     obj["look"] = self.look
     if self.cls_name == "none":
@@ -137,7 +127,7 @@ def _write_id_properties(self, context):
             del obj["cls"]
     else:
         obj["cls"] = self.cls_name
-    if self.shape == "mesh" and self.physics_mesh:
+    if self.physics_mesh:
         obj["physics_mesh"] = self.physics_mesh
         obj["visual_mesh"] = self.visual_mesh
         obj["convex"] = "true" if self.convex else "false"
@@ -157,8 +147,6 @@ def _pull_from_id_properties(obj):
         flag = str(obj.get("stonefish", "")).strip().lower()
         settings.enabled = flag in ("1", "true")
         settings.stonefish_name = str(obj.get("stonefish_name", obj.name))
-        shape = str(obj.get("geometry_type", "mesh")).strip().lower()
-        settings.shape = shape if shape in ("plane", "box", "cylinder", "sphere", "mesh") else "mesh"
         material = str(obj.get("material", materials[0]))
         settings.material = material if material in materials else materials[0]
         look = str(obj.get("look", looks[0]))
@@ -183,12 +171,6 @@ class StonefishSettings(bpy.types.PropertyGroup):
     stonefish_name: bpy.props.StringProperty(
         name="Stonefish name",
         description="Entity name in the simulator. Defaults to the Blender object name",
-        update=_write_id_properties,
-    )
-    shape: bpy.props.EnumProperty(
-        name="Shape",
-        items=_shape_items,
-        default=4,
         update=_write_id_properties,
     )
     material: bpy.props.EnumProperty(
@@ -244,17 +226,15 @@ class STONEFISH_PT_object(bpy.types.Panel):
         col = layout.column()
         col.enabled = settings.enabled
         col.prop(settings, "stonefish_name")
-        col.prop(settings, "shape")
         col.prop(settings, "material")
         col.prop(settings, "look")
         col.prop(settings, "cls_name")
-        if settings.shape == "mesh":
-            col.separator()
-            col.prop(settings, "physics_mesh")
-            col.prop(settings, "visual_mesh")
-            col.prop(settings, "convex")
-            if not settings.physics_mesh:
-                col.label(text="Empty OBJ paths export this mesh at startup")
+        col.separator()
+        col.prop(settings, "physics_mesh")
+        col.prop(settings, "visual_mesh")
+        col.prop(settings, "convex")
+        if not settings.physics_mesh:
+            col.label(text="Empty OBJ paths export this mesh at startup")
         layout.separator()
         layout.operator("stonefish.stamp_pool", icon="MESH_DATA")
 

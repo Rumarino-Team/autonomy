@@ -7,6 +7,7 @@
 #define FRAME_INTERVAL_NS (1000000000ULL / 60)
 
 static uint64_t next_frame;
+static bool seed_goal_pending = true;
 
 void auv_init(void) {
   struct timespec now;
@@ -55,6 +56,14 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
       .quat = {0, 0, 0, 1},
   };
   frame->timestamp = timestamp;
+  frame->tracking_ok = false;
+  frame->pressure_depth_ok = false;
+  if (seed_goal_pending) {
+    frame->error = AUV_ERROR_SEED_GOAL;
+    seed_goal_pending = false;
+  } else {
+    frame->error = AUV_ERROR_NONE;
+  }
 }
 
 void auv_set_thrustor_values(

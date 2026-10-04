@@ -14,7 +14,10 @@ typedef uint8_t AuvObjectCls;
 typedef uint8_t AuvError;
 enum {
   AUV_ERROR_NONE = 0,
+  /** Simulation only error. Currently is triggered when changing the static config of stonefish.*/
   AUV_ERROR_SCENARIO_RESTART = 1,
+  /** First frame only: autonomy should set navigation goal to camera_pose. */
+  AUV_ERROR_SEED_GOAL = 2,
 };
 
 typedef struct {

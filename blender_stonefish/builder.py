@@ -1,6 +1,8 @@
 """Build a Stonefish world from a .blend file through the C ABI."""
 
+import hashlib
 import logging
+import struct
 from pathlib import Path
 
 import yaml
@@ -56,6 +58,25 @@ def _stonefish_pose(location, rotation):
 
 def _identity_pose():
     return stonefish_c.pose((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+
+
+def _geometry_key(vertices, faces, face_uvs) -> bytes:
+    """Hash of the exported triangles. Exact copies share one OBJ."""
+    digest = hashlib.sha256()
+    digest.update(struct.pack("<I", len(vertices)))
+    for x, y, z in vertices:
+        digest.update(struct.pack("<3d", float(x), float(y), float(z)))
+    digest.update(struct.pack("<I", len(faces)))
+    for face in faces:
+        digest.update(struct.pack("<I", len(face)))
+        if face:
+            digest.update(struct.pack(f"<{len(face)}i", *face))
+    digest.update(struct.pack("<I", len(face_uvs)))
+    for uvs in face_uvs:
+        digest.update(struct.pack("<I", len(uvs)))
+        for u, v in uvs:
+            digest.update(struct.pack("<2d", float(u), float(v)))
+    return digest.digest()
 
 
 class ScenarioBuilder:
@@ -147,7 +168,10 @@ class ScenarioBuilder:
         extractor = BlenderExtractor(blend_file, defaults)
         extracted = extractor.extract(also_include_names=KNOWN_MESHES.keys())
         mesh_dir = Path(data_dir) / "models" / "blender"
+        mesh_dir.mkdir(parents=True, exist_ok=True)
         mesh_scale = float(self.config.get("meshes", {}).get("scale", 1.0))
+        # geometry hash -> OBJ path already written this build
+        mesh_cache: dict[bytes, Path] = {}
 
         for obj in extracted:
             xyz, rpy = _stonefish_pose(obj.location, obj.rotation)
@@ -161,44 +185,39 @@ class ScenarioBuilder:
                 cls = obj.cls
                 convex = 1 if obj.convex else 0
             body = _static(entity_name, material, look, cls, xyz, rpy)
-            kind = obj.geometry_type
-            if kind == "PLANE":
-                status = lib.sf_static_plane(world, body, 1.0)
-            elif kind == "BOX":
-                dimensions = stonefish_c._vec3((obj.dimensions[0], obj.dimensions[1], obj.dimensions[2]))
-                status = lib.sf_static_box(world, body, dimensions)
-            elif kind == "CYLINDER":
-                radius = max(obj.dimensions[0], obj.dimensions[1]) / 2.0
-                status = lib.sf_static_cylinder(world, body, radius, obj.dimensions[2])
-            elif kind == "SPHERE":
-                status = lib.sf_static_sphere(world, body, sum(obj.dimensions) / 6.0)
-            elif kind == "MESH":
-                mesh_dir.mkdir(parents=True, exist_ok=True)
+            if obj.mesh_data_block is None:
+                logger.error("mesh %s has no data", obj.name)
+                return -1
+            triangles = extractor.read_mesh_triangles(
+                obj.mesh_data_block, scale=mesh_scale, transform_coords=True
+            )
+            if triangles is None:
+                logger.error("failed to read %s", obj.name)
+                return -1
+            vertices, faces, face_uvs = triangles
+            key = _geometry_key(vertices, faces, face_uvs)
+            relative = mesh_cache.get(key)
+            if relative is None:
                 relative = Path("models") / "blender" / f"{obj.mesh_name or obj.name}.obj"
                 filename = Path(data_dir) / relative
-                if obj.mesh_data_block is None:
-                    logger.error("mesh %s has no data", obj.name)
-                    return -1
-                if not extractor.export_mesh_to_obj(
-                    obj.mesh_data_block, str(filename), scale=mesh_scale, transform_coords=True
-                ):
+                if not extractor.write_mesh_triangles(str(filename), vertices, faces, face_uvs):
                     logger.error("failed to export %s", obj.name)
                     return -1
-                origin = _identity_pose()
-                mesh = stonefish_c.SfMesh(
-                    _bytes(relative.as_posix()),
-                    1.0,
-                    origin,
-                    None,
-                    1.0,
-                    origin,
-                    int(convex),
-                    0,
-                )
-                status = lib.sf_static_mesh(world, body, mesh)
+                mesh_cache[key] = relative
             else:
-                logger.warning("skipping %s geometry %s", obj.name, kind)
-                continue
+                logger.info("reusing %s for %s", relative.as_posix(), entity_name)
+            origin = _identity_pose()
+            mesh = stonefish_c.SfMesh(
+                _bytes(relative.as_posix()),
+                1.0,
+                origin,
+                None,
+                1.0,
+                origin,
+                int(convex),
+                0,
+            )
+            status = lib.sf_static_mesh(world, body, mesh)
             if status != 0:
                 logger.error("static %s failed", entity_name)
                 return -1

@@ -112,7 +112,6 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
 pub fn resetMissionState(ctx: *MissionContext) void {
     ctx.seen_objects_len = 0;
     ctx.seen_objects2d_len = 0;
-    ctx.goal = @splat(0);
     ctx.pid_sum_err = @splat(0);
     ctx.pid_prev_pose_err = @splat(0);
     ctx.pid_prev_timestamp_ns = null;
@@ -128,9 +127,16 @@ pub fn resetMissionState(ctx: *MissionContext) void {
 
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
-    if (ctx.frame.@"error" != .none) {
-        ctx.resetMissionState();
-        return;
+    switch (ctx.frame.@"error") {
+        .seed_goal => {
+            ctx.goal = math.poseTo6f(ctx.frame.camera_pose);
+            ctx.frame.@"error" = .none;
+        },
+        .scenario_restart => {
+            ctx.resetMissionState();
+            return;
+        },
+        .none => {},
     }
     const start = Io.Clock.Timestamp.now(ctx.io, .awake);
 

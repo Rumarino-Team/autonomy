@@ -34,7 +34,7 @@ class BlenderObject:
     Attributes:
         name: Object name
         object_type: Blender object type (MESH, EMPTY, etc.)
-        geometry_type: Derived geometry type (PLANE, CYLINDER, BOX, SPHERE, MESH)
+        geometry_type: Always MESH. The simulator exports the Blender mesh.
         location: World location (x, y, z)
         rotation: World rotation in Euler angles (x, y, z) in radians
         scale: Object scale (x, y, z)
@@ -363,8 +363,7 @@ class BlenderExtractor:
             obj_type = block.get(b"type")
             obj_type_name = self._get_object_type_name(obj_type)
 
-            # Skip non-mesh objects for now (cameras, lights, etc.)
-            if obj_type_name not in ["MESH", "EMPTY", "CURVE"]:
+            if obj_type_name != "MESH":
                 logger.debug(f"Skipping {name} (type: {obj_type_name})")
                 return None
 
@@ -377,19 +376,6 @@ class BlenderExtractor:
             # Read custom properties
             custom_props = self.id_reader.read_properties(block)
             if not self._is_included(name, custom_props):
-                return None
-
-            geometry_type_raw = custom_props.get("geometry_type")
-            if geometry_type_raw:
-                geometry_type = geometry_type_raw.upper()
-            elif name.startswith("SF"):
-                logger.warning(
-                    f"Skipping {name}: missing 'geometry_type' custom property"
-                )
-                return None
-            elif obj_type_name == "MESH":
-                geometry_type = "MESH"
-            else:
                 return None
 
             # Required: material and look
@@ -406,20 +392,16 @@ class BlenderExtractor:
                 if name.startswith("SF"):
                     logger.warning(f"{name}: using default look '{look}'")
 
-            # Get mesh name for custom meshes
-            mesh_name = None
+            mesh_name = self._get_mesh_name(block)
             mesh_data_block = None
-            if geometry_type == "MESH":
-                mesh_name = self._get_mesh_name(block)
-                # Get mesh data block for export
-                data_ptr = block.get(b"data")
-                if data_ptr and data_ptr != 0:
-                    mesh_data_block = self.blend.find_block_from_offset(data_ptr)
+            data_ptr = block.get(b"data")
+            if data_ptr and data_ptr != 0:
+                mesh_data_block = self.blend.find_block_from_offset(data_ptr)
 
             blender_obj = BlenderObject(
                 name=name,
                 object_type=obj_type_name,
-                geometry_type=geometry_type,
+                geometry_type="MESH",
                 location=location,
                 rotation=rotation,
                 scale=scale,
@@ -435,7 +417,7 @@ class BlenderExtractor:
                 mesh_data_block=mesh_data_block,
             )
 
-            logger.info(f"{name} [{geometry_type}] - material:{material}, look:{look}")
+            logger.info(f"{name} [MESH] - material:{material}, look:{look}")
             return blender_obj
 
         except Exception as e:
@@ -564,4 +546,35 @@ class BlenderExtractor:
             import traceback
 
             traceback.print_exc()
+            return False
+
+    def read_mesh_triangles(
+        self,
+        mesh_data_block,
+        scale: float = 1.0,
+        transform_coords: bool = True,
+    ):
+        """Read the triangles that would be written to an OBJ. None on failure."""
+        if not mesh_data_block or not self.blend:
+            logger.error("No mesh data block provided")
+            return None
+        try:
+            exporter = MeshExporter(self.blend)
+            return exporter.read_triangles(
+                mesh_data_block, scale=scale, transform_coords=transform_coords
+            )
+        except Exception as e:
+            logger.error(f"Error reading mesh: {e}")
+            return None
+
+    def write_mesh_triangles(self, output_path: str, vertices, faces, face_uvs) -> bool:
+        """Write triangles already produced by read_mesh_triangles."""
+        if not self.blend:
+            logger.error("Blend file not loaded")
+            return False
+        try:
+            exporter = MeshExporter(self.blend)
+            return exporter._write_obj_file(output_path, vertices, faces, face_uvs)
+        except Exception as e:
+            logger.error(f"Error during mesh export: {e}")
             return False

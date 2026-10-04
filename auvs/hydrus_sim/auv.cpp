@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <iostream>
 #include <math.h>
 
 #include "../../include/auv.h"
@@ -49,7 +50,7 @@
 static constexpr const char* kPlatformConfigPath = AUV_PLATFORM_CONFIG;
 
 volatile std::sig_atomic_t g_stop_requested = 0;
-
+static bool g_seed_goal_pending = true;
 void requestStop(int)
 {
     g_stop_requested = 1;
@@ -240,8 +241,10 @@ bool IsInFrontOfCamera(sf::Camera* camera, sf::Entity* entity)
             (corner & 2) != 0 ? max.y() : min.y(),
             (corner & 4) != 0 ? max.z() : min.z());
         const sf::Vector3 local = world_to_camera * world;
-        if(local.z() > sf::Scalar(0.05))
+        if(local.z() > sf::Scalar(0.05)){
+            std::cout << entity->getName() << std::endl;
             return true;
+        }
     }
     return false;
 }
@@ -1494,6 +1497,7 @@ bool reloadScenario(SimulationContext* ctx)
     sim->RestartScenario();
     if(!sim->StartSimulation())
         std::println(stderr, "[hydrus_sim] scenario restart failed to solve initial conditions");
+    g_seed_goal_pending = true;
     return true;
 }
 
@@ -1541,6 +1545,7 @@ void auv_init(void)
         return;
     }
 
+    g_seed_goal_pending = true;
     g_simulation_context = new SimulationContext();
     g_simulation_context->config = *loadedJson;
     const PlatformConfig& config = g_simulation_context->config;
@@ -1596,7 +1601,13 @@ void auv_yield_until_next_frame(AuvFrame* frame)
         std::exit(0);
     }
     *frame = g_simulation_context->sim->getAuvFrame();
-    frame->error = scenarioRestarted ? AUV_ERROR_SCENARIO_RESTART : AUV_ERROR_NONE;
+    if(g_seed_goal_pending)
+    {
+        g_seed_goal_pending = false;
+        frame->error = AUV_ERROR_SEED_GOAL;
+    }
+    else
+        frame->error = scenarioRestarted ? AUV_ERROR_SCENARIO_RESTART : AUV_ERROR_NONE;
 }
 
 

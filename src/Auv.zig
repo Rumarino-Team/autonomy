@@ -14,6 +14,7 @@ pub const ObjectCls = enum(u8) {
 pub const Error = enum(u8) {
     none,
     scenario_restart,
+    seed_goal,
 };
 pub const Object = extern struct {
     bbox: math.BoundingBox,
