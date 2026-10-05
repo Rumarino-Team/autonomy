@@ -6,12 +6,9 @@ const Auv = @import("../Auv.zig");
 
 pub fn mission(ctx: *MissionContext) void {
     const gate_object = ctx.yieldUntilFirstObjectWithCls(.gate);
-    if (ctx.frame.@"error" != .none) return;
     goThrough(ctx, gate_object);
-    if (ctx.frame.@"error" != .none) return;
 
     const cube_or_rect_object = ctx.yieldUntilFirstObjectWithAnyCls(&.{.cube, .rect});
-    if (ctx.frame.@"error" != .none) return;
     goAround(ctx, cube_or_rect_object);
 }
 
@@ -35,7 +32,6 @@ fn goThrough(ctx: *MissionContext, object: *const Auv.Object) void {
     std.log.info("before {any}", .{before});
 
     ctx.yieldUntilReachGoal(before);
-    if (ctx.frame.@"error" != .none) return;
 
     const overshoot_2d = object_pos_2d + direction_2d * @as(math.Vector2f, @splat(OVERSHOOT));
     const overshoot: math.Vector3f = .{overshoot_2d[0], overshoot_2d[1], object_pos[2]};
@@ -85,7 +81,6 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object) void {
 
     for (0..corner_pluss.len) |i| {
         ctx.yieldUntilReachGoal(corner_pluss[(starting_i + i) % corner_pluss.len]);
-        if (ctx.frame.@"error" != .none) return;
     }
     ctx.yieldUntilReachGoal(initial_sub_pos);
 }
