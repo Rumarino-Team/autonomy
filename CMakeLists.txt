@@ -9,6 +9,11 @@ include(ExternalProject)
 
 find_package(Python3 COMPONENTS Development REQUIRED)
 
+option(AUTONOMY_BLEND_CPP "Build the alternative native C++ Blender importer" OFF)
+if(AUTONOMY_BLEND_CPP)
+  add_subdirectory(auvs/stonefish_sim/blender_stonefish_cpp)
+endif()
+
 # OFF builds the upstream vendor/stonefish submodule; ON builds the vendor/stonefish_rtx
 # fork with the OptiX path tracer and DLSS.
 option(AUTONOMY_STONEFISH_RTX "Build against vendor/stonefish_rtx (StonefishRTX)" OFF)
@@ -38,9 +43,19 @@ endif()
 # through to a system Stonefish under /usr/local/include. Stonefish's own
 # headers include siblings as "StonefishCommon.h" and <version.h>, which
 # need include/Stonefish as well.
+set(AUTONOMY_STONEFISH_PREFIX "" CACHE PATH "Reuse an existing Stonefish install instead of rebuilding it")
+if(AUTONOMY_STONEFISH_PREFIX)
+  set(STONEFISH_DIR "${AUTONOMY_STONEFISH_PREFIX}")
+  if(NOT EXISTS "${STONEFISH_DIR}/lib/lib${STONEFISH_LIB}.so")
+    message(FATAL_ERROR "Requested Stonefish library not found under ${STONEFISH_DIR}/lib")
+  endif()
+endif()
 set(STONEFISH_INCLUDE_ROOT "${STONEFISH_DIR}/include")
 set(STONEFISH_INCLUDE_DIR "${STONEFISH_INCLUDE_ROOT}/${STONEFISH_LIB}")
 
+if(AUTONOMY_STONEFISH_PREFIX)
+  add_custom_target(stonefish)
+else()
 ExternalProject_Add(stonefish
   SOURCE_DIR "${STONEFISH_SOURCE_DIR}"
   BINARY_DIR "${STONEFISH_BUILD_DIR}"
@@ -55,6 +70,7 @@ ExternalProject_Add(stonefish
   BUILD_BYPRODUCTS
     "${STONEFISH_DIR}/lib/lib${STONEFISH_LIB}.so"
 )
+endif()
 
 add_library(stonefish_c STATIC auvs/stonefish_sim/stonefish_c/src/stonefish_c.cpp)
 add_dependencies(stonefish_c stonefish)
@@ -78,12 +94,19 @@ unset(CMAKE_REQUIRED_FLAGS)
 
 function(add_auv_sim target platform_config)
   add_library(${target} SHARED auvs/stonefish_sim/auv.cpp auvs/stonefish_sim/robot.cpp)
+  if(ARGC GREATER 2 AND ARGV2 STREQUAL "NATIVE_BLEND")
+    target_sources(${target} PRIVATE auvs/stonefish_sim/blender_stonefish_cpp/build_scene.cpp)
+    target_compile_definitions(${target} PRIVATE AUTONOMY_NATIVE_BLEND)
+    target_link_libraries(${target} PRIVATE stonefish_blend_reader)
+  else()
+    target_include_directories(${target} PRIVATE ${Python3_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE Python3::Python)
+  endif()
   add_dependencies(${target} stonefish)
 
   target_include_directories(${target} PRIVATE
     "${STONEFISH_INCLUDE_ROOT}"
     "${STONEFISH_INCLUDE_DIR}"
-    ${Python3_INCLUDE_DIRS}
   )
   # GCC 13 and earlier ship C++23 without <print>. auvs/stonefish_sim/compat fills that gap.
   if(NOT AUTONOMY_HAS_STD_PRINT)
@@ -120,7 +143,6 @@ function(add_auv_sim target platform_config)
     GLX
     GLU
     gomp
-    Python3::Python
   )
 
   set_target_properties(${target} PROPERTIES
@@ -131,6 +153,24 @@ function(add_auv_sim target platform_config)
 endfunction()
 
 add_auv_sim(auv_stonefish_sim "auvs/stonefish_sim/platform.json")
+if(AUTONOMY_BLEND_CPP)
+  add_auv_sim(auv_stonefish_cpp_sim "auvs/stonefish_sim/platform.json" NATIVE_BLEND)
+  add_executable(stonefish_blend_smoke
+    auvs/stonefish_sim/blender_stonefish_cpp/smoke.cpp
+    auvs/stonefish_sim/blender_stonefish_cpp/build_scene.cpp
+    auvs/stonefish_sim/robot.cpp
+  )
+  add_dependencies(stonefish_blend_smoke stonefish)
+  target_include_directories(stonefish_blend_smoke PRIVATE "${STONEFISH_INCLUDE_ROOT}" "${STONEFISH_INCLUDE_DIR}")
+  target_compile_definitions(stonefish_blend_smoke PRIVATE BT_EULER_DEFAULT_ZYX BT_USE_DOUBLE_PRECISION
+    SHADER_DIR_PATH="${STONEFISH_DIR}/share/${STONEFISH_LIB}/shaders/" ${STONEFISH_EXTRA_DEFS})
+  target_link_directories(stonefish_blend_smoke PRIVATE "${STONEFISH_DIR}/lib")
+  target_link_libraries(stonefish_blend_smoke PRIVATE stonefish_blend_reader stonefish_c ${STONEFISH_LIB} SDL2 freetype OpenGL GLX GLU gomp)
+  set_target_properties(stonefish_blend_smoke PROPERTIES BUILD_RPATH "${STONEFISH_DIR}/lib")
+  add_executable(stonefish_blend_plugin_smoke auvs/stonefish_sim/blender_stonefish_cpp/tests/plugin_smoke.cpp)
+  target_include_directories(stonefish_blend_plugin_smoke PRIVATE "${CMAKE_SOURCE_DIR}/include")
+  target_link_libraries(stonefish_blend_plugin_smoke PRIVATE dl)
+endif()
 
 # MuJoCo prefix is an install tree (include/ and lib/libmujoco.so) or a source
 # tree whose library lives at build/lib/libmujoco.so. Unset, the Stonefish
@@ -211,4 +251,18 @@ if(MUJOCO_PREFIX)
   set_target_properties(auv_mujoco_rl PROPERTIES
     BUILD_RPATH "${MUJOCO_LIB_DIR}"
   )
+
+  add_executable(hydrus_tune_pid auvs/hydrus_mujoco/tune_pid.cpp)
+  target_include_directories(hydrus_tune_pid PRIVATE
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${MUJOCO_INCLUDE_DIR}"
+    "${CMAKE_SOURCE_DIR}/vendor/nlohmann_json/single_include"
+  )
+  target_link_directories(hydrus_tune_pid PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(hydrus_tune_pid PRIVATE auv_mujoco_rl)
+  set_target_properties(hydrus_tune_pid PROPERTIES
+    BUILD_RPATH "${MUJOCO_LIB_DIR};${CMAKE_BINARY_DIR}"
+    INSTALL_RPATH "$ORIGIN/../lib"
+  )
+  install(TARGETS hydrus_tune_pid)
 endif()

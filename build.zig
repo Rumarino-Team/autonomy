@@ -245,6 +245,8 @@ pub fn build(b: *std.Build) !void {
     });
     cmake_build.step.dependOn(&cmake_configure.step);
 
+    const stonefish_cpp = b.option(bool, "stonefish-cpp", "Build the native C++ Blender Stonefish plugin") orelse false;
+    cmake_configure.addArg(if (stonefish_cpp) "-DAUTONOMY_BLEND_CPP=ON" else "-DAUTONOMY_BLEND_CPP=OFF");
     const stonefish = b.option(bool, "stonefish", "Build the Stonefish AUV plugins") orelse false;
     if (stonefish) {
         const cmake_targets = [_][]const u8{
@@ -265,29 +267,51 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo AUV plugin, Stonefish view, and batched RL library") orelse false;
+    if (stonefish_cpp) {
+        const native_target = "auv_stonefish_cpp_sim";
+        cmake_build.addArg(native_target);
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/stonefish_sim"));
+        const native_library = b.fmt("lib{s}{s}", .{ native_target, target.result.dynamicLibSuffix() });
+        const install_native = b.addInstallFileWithDir(b.path(b.fmt("build/{s}", .{native_library})), .lib, native_library);
+        install_native.step.dependOn(&cmake_build.step);
+        b.getInstallStep().dependOn(&install_native.step);
+    }
+
+    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo AUV plugin, Stonefish view, batched sim, and hydrus_tune_pid") orelse false;
     const mujoco_prefix = b.option([]const u8, "MUJOCO_PREFIX", "MuJoCo install prefix or source tree");
     if (mujoco) {
         const prefix = mujoco_prefix orelse @panic("-Dmujoco requires -DMUJOCO_PREFIX");
         cmake_configure.addArg(b.fmt("-DMUJOCO_PREFIX={s}", .{prefix}));
 
-        const cmake_targets = [_][]const u8{
+        const cmake_dynlib_targets = [_][]const u8{
             "auv_mujoco",
             "auv_mujoco_view",
             "auv_mujoco_rl",
         };
-        for (cmake_targets) |cmake_target| {
+        const cmake_exe_targets = [_][]const u8{
+            "hydrus_tune_pid",
+        };
+        for (cmake_dynlib_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
+        for (cmake_exe_targets) |cmake_target| {
             cmake_build.addArg(cmake_target);
         }
 
         _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/hydrus_mujoco"));
 
-        for (cmake_targets) |cmake_target| {
+        for (cmake_dynlib_targets) |cmake_target| {
             const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
             const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
             const install_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
             install_sim.step.dependOn(&cmake_build.step);
             b.getInstallStep().dependOn(&install_sim.step);
+        }
+        for (cmake_exe_targets) |cmake_target| {
+            const cmake_exe_path = b.path(b.fmt("build/{s}", .{cmake_target}));
+            const install_exe = b.addInstallFileWithDir(cmake_exe_path, .bin, cmake_target);
+            install_exe.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_exe.step);
         }
     }
 

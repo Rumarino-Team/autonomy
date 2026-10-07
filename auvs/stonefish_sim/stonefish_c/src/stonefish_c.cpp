@@ -8,6 +8,7 @@
 #include "Stonefish/core/MaterialManager.h"
 #include "Stonefish/core/Robot.h"
 #include "Stonefish/core/SimulationManager.h"
+#include "Stonefish/core/GraphicalSimulationApp.h"
 #include "Stonefish/entities/forcefields/Atmosphere.h"
 #include "Stonefish/entities/forcefields/Ocean.h"
 #include "Stonefish/entities/forcefields/Uniform.h"
@@ -19,6 +20,8 @@
 #include "Stonefish/entities/statics/Obstacle.h"
 #include "Stonefish/entities/statics/Plane.h"
 #include "Stonefish/graphics/OpenGLDataStructs.h"
+#include "Stonefish/graphics/OpenGLPipeline.h"
+#include "Stonefish/graphics/OpenGLContent.h"
 #include "Stonefish/sensors/scalar/IMU.h"
 #include "Stonefish/sensors/scalar/Odometry.h"
 #include "Stonefish/sensors/vision/ColorCamera.h"
@@ -193,6 +196,11 @@ SfWorld* sf_world_bind(void* simulation_manager)
         return nullptr;
     auto* world = new SfWorld();
     world->sim = static_cast<sf::SimulationManager*>(simulation_manager);
+    // A native scene may already have registered the resources needed by
+    // the existing robot builder. Binding must also work in that case.
+    world->environment_ready = world->sim->getOcean() != nullptr;
+    for(const auto& name : world->sim->getMaterialManager()->GetMaterialsList())
+        world->materials.insert(name);
     return world;
 }
 
@@ -232,6 +240,12 @@ int sf_look(SfWorld* world, const SfLook* look)
         return Fail("look is missing a name");
     if(!world->looks.insert(look->name).second)
         return 0;
+    if(sf::SimulationApp::getApp()->hasGraphics())
+    {
+        auto* app = static_cast<sf::GraphicalSimulationApp*>(sf::SimulationApp::getApp());
+        if(app->getGLPipeline()->getContent()->getLookId(look->name) >= 0)
+            return 0;
+    }
     const sf::Color color(
         static_cast<float>(look->rgb[0]),
         static_cast<float>(look->rgb[1]),

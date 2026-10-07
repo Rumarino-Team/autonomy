@@ -1,4 +1,8 @@
+#ifdef AUTONOMY_NATIVE_BLEND
+#include "blender_stonefish_cpp/build_scene.hpp"
+#else
 #include <Python.h>
+#endif
 
 #include <cmath>
 #include <cstdio>
@@ -323,6 +327,7 @@ bool ProjectObjectBox(
 #define BLENDER_STONEFISH_CONFIG "auvs/stonefish_sim/blender_stonefish/config.yaml"
 #endif
 
+#ifndef AUTONOMY_NATIVE_BLEND
 bool RunBlendBuilder(SfWorld* world, const std::filesystem::path& blend, const std::filesystem::path& data)
 {
     Dl_info info{};
@@ -378,6 +383,8 @@ bool RunBlendBuilder(SfWorld* world, const std::filesystem::path& blend, const s
     return ok;
 }
 
+#endif
+
 class SimManager : public sf::SimulationManager
 {
 public:
@@ -404,6 +411,21 @@ public:
         sf_world_free(sceneWorld);
         sceneWorld = sf_world_bind(this);
         sf_world_set_data_dir(sceneWorld, dataPath.c_str());
+#ifdef AUTONOMY_NATIVE_BLEND
+        const auto nativeClasses = blender_stonefish_cpp::BuildScene(*this, blendPath, BLENDER_STONEFISH_CONFIG, dataPath);
+        sf_world_free(sceneWorld);
+        sceneWorld = sf_world_bind(this);
+        sf_world_set_data_dir(sceneWorld, dataPath.c_str());
+        if(!BuildRobot(sceneWorld, robotName))
+            throw std::runtime_error("[stonefish_sim] failed to build robot " + robotName);
+        for(const auto& [name, cls] : nativeClasses)
+        {
+            const auto mapped = ParseObjectClass(cls.c_str());
+            if(!mapped)
+                throw std::runtime_error("[stonefish_sim] unknown object class " + cls + " for " + name);
+            objectClasses[name] = *mapped;
+        }
+#else
         if(!RunBlendBuilder(sceneWorld, blendPath, dataPath) || !BuildRobot(sceneWorld, robotName))
         {
             std::println(stderr, "[stonefish_sim] failed to build scenario from {}", blendPath.string());
@@ -424,6 +446,7 @@ public:
             }
             objectClasses[name] = *mapped;
         }
+#endif
 
         odometry = nullptr;
         have_odometry = false;
@@ -810,6 +833,19 @@ bool reloadScenario(SimulationContext* ctx)
         loaded->kConsoleApp = ctx->config.kConsoleApp;
     }
 
+#ifdef AUTONOMY_NATIVE_BLEND
+    try
+    {
+        // Check an edited file before RestartScenario destroys the live world.
+        blender_stonefish_cpp::ReadScene(loaded->dataPath / loaded->blendFile, BLENDER_STONEFISH_CONFIG);
+    }
+    catch(const std::exception& ex)
+    {
+        std::println(stderr, "[stonefish_sim] native scene reload rejected; keeping scenario: {}", ex.what());
+        noteWatchedFiles(ctx);
+        return false;
+    }
+#endif
     ctx->config = *loaded;
     SimManager* sim = ctx->sim;
     sim->dataPath = ctx->config.dataPath;
@@ -831,7 +867,17 @@ bool reloadScenario(SimulationContext* ctx)
 
     noteWatchedFiles(ctx);
     std::println(stdout, "[stonefish_sim] reloading scenario robot={} blend={}", sim->robotName, sim->blendPath.string());
+#ifdef AUTONOMY_NATIVE_BLEND
+    try { sim->RestartScenario(); }
+    catch(const std::exception& ex)
+    {
+        std::println(stderr, "[stonefish_sim] native scene restart failed: {}", ex.what());
+        requestStop(0);
+        return false;
+    }
+#else
     sim->RestartScenario();
+#endif
     if(!sim->StartSimulation())
         std::println(stderr, "[stonefish_sim] scenario restart failed to solve initial conditions");
     g_seed_goal_pending = true;
@@ -869,6 +915,10 @@ sf::HelperSettings DefaultHelperSettings()
 
 void auv_init(void)
 {
+#ifdef AUTONOMY_NATIVE_BLEND
+    try
+    {
+#endif
     auv_deinit();
     // SDL otherwise installs its own SIGINT handler and Ctrl+C never returns the terminal.
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -906,6 +956,14 @@ void auv_init(void)
         g_simulation_context->graphical->start(config.kPhysicsDt);
     }
     startScenarioWatcher(g_simulation_context);
+#ifdef AUTONOMY_NATIVE_BLEND
+    }
+    catch(const std::exception& ex)
+    {
+        std::println(stderr, "[stonefish_sim] native initialization failed: {}", ex.what());
+        auv_deinit();
+    }
+#endif
 }
 
 void auv_yield_until_next_frame(AuvFrame* frame)
@@ -919,6 +977,7 @@ void auv_yield_until_next_frame(AuvFrame* frame)
 
     const bool scenarioRestarted =
         g_simulation_context->scenarioReload.exchange(false) && reloadScenario(g_simulation_context);
+    stopIfRequested();
 
     g_simulation_context->sim->StepSimulation(g_simulation_context->config.kPhysicsDt);
     if(g_simulation_context->graphical != nullptr)

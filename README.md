@@ -18,6 +18,14 @@ zig build -Dstonefish run -- \
 ```
 
 
+## Native Blender importer
+
+An alternative C++ Blender importer calls Stonefish directly and is available
+as `libauv_stonefish_cpp_sim.so`. The existing Python importer is retained.
+Build it with `zig build -Dstonefish-cpp` and use the same vehicle settings.
+See [native Blender loader](auvs/stonefish_sim/blender_stonefish_cpp/README.md)
+for the already-built trial command, CMake setup and validation checks.
+
 ## MuJoCo
 
 Requires MuJoCo. `MUJOCO_PREFIX` is an install prefix (`include/` and `lib/`) or a MuJoCo source tree with `build/lib/libmujoco.so`. The window is Stonefish's ocean view, built with the in-tree Stonefish library and loaded from `libauv_mujoco_view.so` beside the plugin.
@@ -29,10 +37,15 @@ zig build -Dmujoco -DMUJOCO_PREFIX=/usr/local
 
 `AUV_MJCF` selects the model. The default is `auvs/hydrus_mujoco/hydrus.xml`. `proteus.xml` and `bluerov.xml` use the same physics. The window loads the matching Stonefish robot: Hydrus from `open_space_env.scn`, Proteus from `open_space_proteus.scn`, and BlueROV2 from `pool_bluerov2.scn`. Set `HYDRUS_MUJOCO_HEADLESS=1` to skip it.
 
-## Hydrus RL
+## Hydrus PID tuning (MuJoCo)
+
+Build with `-Dmujoco` so `libauv_mujoco_rl.so` and `hydrus_tune_pid` are installed, then from the repo root:
 
 ```sh
-pip install -r rl/requirements.txt
-cd rl
-python train_ppo.py --name pose_ppo
+zig build -Dmujoco -DMUJOCO_PREFIX=/usr/local
+./zig-out/bin/hydrus_tune_pid --randomize
 ```
+
+Options: `--episodes`, `--seconds`, `--generations`, `--population`, `--elite`, `--seed`, `--threads`, `--config`, `--xml`, `--randomize`. `AUV_MJCF` overrides the default MJCF.
+
+Prints tuned `kp` / `ki` / `kd` for pasting into `auv.json` (only `"tam"` is read from that file; gains are searched from scratch). Source: `auvs/hydrus_mujoco/tune_pid.cpp`.
