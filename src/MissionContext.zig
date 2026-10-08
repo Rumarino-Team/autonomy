@@ -41,7 +41,7 @@ non_odometry_prev_tracked_id: i32 = -1,
 tracked_id: i32 = -1,
 search_yaw: f32 = 0,
 hold_depth: f32 = 2,
-// 
+//
 
 
 
@@ -334,7 +334,7 @@ fn ControllerStep(ctx: *MissionContext) void {
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
-    
+
     ctx.pid_prev_pose_err = pose_err;
     } else {
         ctx.trackFirstSeenObject2d();
