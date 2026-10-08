@@ -68,6 +68,14 @@ class SfStatic(ctypes.Structure):
     ]
 
 
+class SfViewCamera(ctypes.Structure):
+    _fields_ = [
+        ("name", c_char_p),
+        ("location", c_double * 3),
+        ("rotation", c_double * 3),
+    ]
+
+
 class SfMesh(ctypes.Structure):
     _fields_ = [
         ("physics_path", c_char_p),
@@ -112,4 +120,6 @@ def load(library_path: str):
     lib.sf_static_sphere.restype = c_int
     lib.sf_static_mesh.argtypes = [c_void_p, ctypes.POINTER(SfStatic), ctypes.POINTER(SfMesh)]
     lib.sf_static_mesh.restype = c_int
+    lib.sf_view_camera.argtypes = [c_void_p, ctypes.POINTER(SfViewCamera)]
+    lib.sf_view_camera.restype = c_int
     return lib

@@ -26,6 +26,7 @@
 #include "Stonefish/sensors/scalar/Odometry.h"
 #include "Stonefish/sensors/vision/ColorCamera.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -59,6 +60,13 @@ struct WorldImpl
     std::unordered_set<std::string> materials;
     std::unordered_set<std::string> looks;
     std::vector<std::pair<std::string, std::string>> classes;
+    struct ViewCamera
+    {
+        std::string name;
+        double location[3];
+        double rotation[3];
+    };
+    std::vector<ViewCamera> view_cameras;
     bool environment_ready = false;
     RobotBuild robot;
 };
@@ -587,6 +595,45 @@ int sf_robot_end(SfWorld* world)
     return 0;
 }
 
+int sf_view_camera(SfWorld* world, const SfViewCamera* camera)
+{
+    if(!Ready(world) || camera == nullptr || !Named(camera->name))
+        return Fail("view camera is missing a name");
+    for(double value : camera->location)
+        if(!std::isfinite(value))
+            return Fail("view camera has a non-finite location");
+    for(double value : camera->rotation)
+        if(!std::isfinite(value))
+            return Fail("view camera has a non-finite rotation");
+    WorldImpl::ViewCamera stored;
+    stored.name = camera->name;
+    std::memcpy(stored.location, camera->location, sizeof(stored.location));
+    std::memcpy(stored.rotation, camera->rotation, sizeof(stored.rotation));
+    world->view_cameras.push_back(std::move(stored));
+    return 0;
+}
+
+int sf_world_view_camera_count(const SfWorld* world)
+{
+    if(!Ready(world))
+        return -1;
+    return static_cast<int>(world->view_cameras.size());
+}
+
+int sf_world_view_camera_at(
+    const SfWorld* world, int index, char* name, int name_cap, double location[3], double rotation[3])
+{
+    if(!Ready(world) || index < 0 || static_cast<size_t>(index) >= world->view_cameras.size())
+        return -1;
+    if(name == nullptr || location == nullptr || rotation == nullptr || name_cap <= 0)
+        return -1;
+    const auto& camera = world->view_cameras[static_cast<size_t>(index)];
+    std::snprintf(name, static_cast<size_t>(name_cap), "%s", camera.name.c_str());
+    std::memcpy(location, camera.location, sizeof(camera.location));
+    std::memcpy(rotation, camera.rotation, sizeof(camera.rotation));
+    return 0;
+}
+
 int sf_world_class_count(const SfWorld* world)
 {
     if(world == nullptr)
@@ -635,6 +682,8 @@ static_assert(sizeof(SfPartMesh) == 232, "SfPartMesh");
 static_assert(offsetof(SfThruster, propeller_mesh) == 96, "SfThruster.propeller_mesh");
 static_assert(offsetof(SfThruster, time_constant) == 176, "SfThruster.time_constant");
 static_assert(sizeof(SfThruster) == 184, "SfThruster");
+static_assert(offsetof(SfViewCamera, location) == 8, "SfViewCamera.location");
+static_assert(sizeof(SfViewCamera) == 56, "SfViewCamera");
 static_assert(offsetof(SfSensor, history) == 72, "SfSensor.history");
 static_assert(sizeof(SfSensor) == 80, "SfSensor");
 static_assert(offsetof(SfImu, angular_velocity_range) == 80, "SfImu.angular_velocity_range");

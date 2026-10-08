@@ -69,6 +69,15 @@ class BlenderObject:
     mesh_data_block: Optional[object] = None  # Reference to mesh data block for export
 
 
+@dataclass
+class BlenderCamera:
+    """A Blender camera object. location and rotation are Blender XYZ Euler, radians."""
+
+    name: str
+    location: Tuple[float, float, float]
+    rotation: Tuple[float, float, float]
+
+
 class IDPropertyReader:
     """
     Reads Blender custom properties (IDProperties) from .blend files.
@@ -241,6 +250,7 @@ class BlenderExtractor:
         self.defaults = defaults or {"material": "steel", "look": "gray"}
         self.blend = None
         self.objects = []
+        self.view_cameras = []
         self.id_reader = None
         self.also_include_names = set()
 
@@ -280,12 +290,16 @@ class BlenderExtractor:
             return []
 
         self.also_include_names = set(also_include_names or ())
+        self.view_cameras = []
 
         # Get all object blocks directly
         object_blocks = self.blend.find_blocks_from_code(b"OB")
 
         # Extract each object
         for obj_block in object_blocks:
+            camera = self._extract_camera(obj_block)
+            if camera:
+                self.view_cameras.append(camera)
             blender_obj = self._extract_object(obj_block)
             if blender_obj:
                 self.objects.append(blender_obj)
@@ -338,11 +352,34 @@ class BlenderExtractor:
 
         return scene_objects
 
+    def _object_name(self, block) -> str:
+        name_data = block.get((b"id", b"name"))
+        if isinstance(name_data, bytes):
+            return name_data.decode("utf-8").rstrip("\x00")[2:]
+        return str(name_data).rstrip("\x00")[2:]
+
+    def _extract_camera(self, block) -> Optional[BlenderCamera]:
+        """Cameras are viewpoints, not statics. They must be unparented XYZ Euler objects."""
+        try:
+            if self._get_object_type_name(block.get(b"type")) != "CAMERA":
+                return None
+            name = self._object_name(block)
+            if block.get(b"parent"):
+                logger.warning("%s: skipping camera; apply the parent transform first", name)
+                return None
+            if block.get(b"rotmode") != 1:
+                logger.warning("%s: skipping camera; use XYZ Euler rotation", name)
+                return None
+            return BlenderCamera(name, tuple(block.get(b"loc")), tuple(block.get(b"rot")))
+        except Exception as e:
+            logger.error(f"Error extracting camera: {e}")
+            return None
+
     def _extract_object(self, block) -> Optional[BlenderObject]:
         """
         Extract data from a single Blender object block.
 
-        Only processes objects with names starting with "SF".
+        Every mesh is imported. stonefish set to 0 or false leaves an object out.
         Reads geometry type, material, and look from custom properties.
 
         Args:
@@ -353,11 +390,7 @@ class BlenderExtractor:
         """
         try:
             # Get object name - using the same pattern as simple_get_objects.py
-            name_data = block.get((b"id", b"name"))
-            if isinstance(name_data, bytes):
-                name = name_data.decode("utf-8").rstrip("\x00")[2:]  # Remove OB prefix
-            else:
-                name = str(name_data).rstrip("\x00")[2:]
+            name = self._object_name(block)
 
             # Get object type
             obj_type = block.get(b"type")
@@ -424,16 +457,10 @@ class BlenderExtractor:
             logger.error(f"Error extracting object: {e}")
             return None
 
-    def _is_included(self, name: str, custom_props: Dict[str, str]) -> bool:
-        """Include objects opted in by the addon, legacy SF_ names, or the pool fallback set."""
+    def _is_included(self, _name: str, custom_props: Dict[str, str]) -> bool:
+        """Import every mesh. stonefish set to 0 or false is an explicit opt-out."""
         flag = str(custom_props.get("stonefish") or "").strip().lower()
-        if flag in ("0", "false"):
-            return False
-        if flag in ("1", "true"):
-            return True
-        if name.startswith("SF"):
-            return True
-        return name in self.also_include_names
+        return flag not in ("0", "false")
 
     def _get_object_type_name(self, obj_type: int) -> str:
         """Convert object type integer to name"""

@@ -231,6 +231,19 @@ SF_API int sf_robot_imu(SfWorld* world, const SfImu* imu);
 SF_API int sf_robot_camera(SfWorld* world, const SfCamera* camera);
 SF_API int sf_robot_end(SfWorld* world);
 
+/* A Blender camera. location and rotation are the Blender object, XYZ Euler in radians. */
+typedef struct SfViewCamera
+{
+    const char* name;
+    double location[3];
+    double rotation[3];
+} SfViewCamera;
+
+SF_API int sf_view_camera(SfWorld* world, const SfViewCamera* camera);
+SF_API int sf_world_view_camera_count(const SfWorld* world);
+SF_API int sf_world_view_camera_at(
+    const SfWorld* world, int index, char* name, int name_cap, double location[3], double rotation[3]);
+
 SF_API int sf_world_class_count(const SfWorld* world);
 SF_API int sf_world_class_at(const SfWorld* world, int index, char* name, int name_cap, char* cls, int cls_cap);
 

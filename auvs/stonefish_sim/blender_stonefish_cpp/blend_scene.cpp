@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -212,7 +213,9 @@ bool Truth(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
     return value == "true" || value == "1";
 }
-std::string MeshKey(const Mesh& mesh) {
+} // namespace
+
+std::string MeshFingerprint(const Mesh& mesh) {
     std::string key;
     auto append = [&](const auto& value) { key.append(reinterpret_cast<const char*>(&value), sizeof(value)); };
     append(mesh.vertices.size());
@@ -222,7 +225,6 @@ std::string MeshKey(const Mesh& mesh) {
     for (const auto& face : mesh.face_uvs) { append(face.size()); for (auto uv : face) append(uv); }
     return key;
 }
-} // namespace
 
 Scene ReadScene(const std::filesystem::path& filename, const std::filesystem::path& config_path) {
     auto config = YAML::LoadFile(config_path.string());
@@ -251,16 +253,32 @@ Scene ReadScene(const std::filesystem::path& filename, const std::filesystem::pa
     const double mesh_scale = config["meshes"]["scale"].as<double>(1.0);
     if (!std::isfinite(mesh_scale) || mesh_scale <= 0) Fail("meshes.scale must be finite and positive");
     for (const auto& block : blend->GetBlocks(cblend::BLOCK_CODE_OB)) {
-        auto type = blend->GetBlockType(block);
-        if (!type) Fail("invalid Object block type");
-        Node node{*type, block.body};
-        if (node.Value<int16_t>("type") != 1) continue;
+        auto block_type = blend->GetBlockType(block);
+        if (!block_type) Fail("invalid Object block type");
+        Node node{*block_type, block.body};
+        const auto type = node.Value<int16_t>("type");
         auto name = node.Field("id").Text("name").substr(2);
+        if (type == 11) {
+            if (node.Value<uint64_t>("parent") != 0 || node.Value<int16_t>("rotmode") != 1) {
+                std::cerr << "[blender_cpp] skipping camera " << name
+                          << ": unparent it and use XYZ Euler rotation\n";
+                continue;
+            }
+            ViewCamera camera;
+            camera.name = name;
+            auto loc = Scalar<std::array<float, 3>>(node.Field("loc").bytes);
+            auto rot = Scalar<std::array<float, 3>>(node.Field("rot").bytes);
+            camera.location = {loc[0], loc[1], loc[2]};
+            camera.rotation = {rot[0], rot[1], rot[2]};
+            scene.cameras.push_back(std::move(camera));
+            continue;
+        }
+        if (type != 1) continue;
         auto props = reader.Properties(node);
         auto flag = props["stonefish"];
         std::transform(flag.begin(), flag.end(), flag.begin(), [](unsigned char c) { return std::tolower(c); });
+        // Every mesh is a static. stonefish set to 0 or false leaves an object out.
         if (flag == "0" || flag == "false") continue;
-        if (!Truth(flag) && !name.starts_with("SF") && !known.contains(name)) continue;
         if (node.Value<uint64_t>("parent") != 0) Fail(name + ": apply the parent transform before importing");
         if (node.Value<int16_t>("rotmode") != 1) Fail(name + ": use XYZ Euler rotation for this importer");
         if (node.Field("modifiers").Value<uint64_t>("first")) Fail(name + ": apply modifiers before importing stored mesh data");
@@ -292,7 +310,7 @@ Scene ReadScene(const std::filesystem::path& filename, const std::filesystem::pa
         auto it = meshes.find(key);
         if (it == meshes.end()) {
             auto candidate = std::make_shared<Mesh>(reader.ReadMesh(address, object.scale));
-            auto [shared, inserted] = geometry.emplace(MeshKey(*candidate), candidate);
+            auto [shared, inserted] = geometry.emplace(MeshFingerprint(*candidate), candidate);
             it = meshes.emplace(key, shared->second).first;
         }
         object.mesh = it->second;

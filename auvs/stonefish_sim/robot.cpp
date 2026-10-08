@@ -1,6 +1,6 @@
 #include "stonefish_c/include/stonefish_c.h"
 
-#include <print>
+#include <iostream>
 #include <string>
 
 SfPose PoseAt(double x, double y, double z, double roll, double pitch, double yaw)
@@ -12,6 +12,18 @@ SfPose PoseAt(double x, double y, double z, double roll, double pitch, double ya
     pose.rpy[0] = roll;
     pose.rpy[1] = pitch;
     pose.rpy[2] = yaw;
+    return pose;
+}
+
+// The controller drives body +Y as forward. BlueROV's nose is +X, so yaw the
+// body contents a quarter turn and the nose lies on +Y.
+SfPose YawQuarter(SfPose pose)
+{
+    constexpr double kQuarterTurn = 1.5707963267948966;
+    const double x = pose.xyz[0];
+    pose.xyz[0] = -pose.xyz[1];
+    pose.xyz[1] = x;
+    pose.rpy[2] += kQuarterTurn;
     return pose;
 }
 
@@ -203,7 +215,7 @@ bool CallOk(int status, const char* what)
 {
     if(status == 0)
         return true;
-    std::println(stderr, "[stonefish_sim] {} failed", what);
+    std::cerr << "[stonefish_sim] " << what << " failed" << std::endl;
     return false;
 }
 
@@ -469,18 +481,31 @@ bool BuildBluerov2Robot(SfWorld* world)
     if(!CallOk(sf_robot_begin(world, &robot), "bluerov2 robot"))
         return false;
     if(!AddMesh(
-           world, "HullBottom", "Fiberglass", "br2", "bluerov2/bluerov2_phy.obj", 1.0, identity, "bluerov2/bluerov2.obj",
-           1.0, identity, 0.005, 0, identity)
+           world, "HullBottom", "Fiberglass", "br2", "bluerov2/bluerov2_phy.obj", 1.0, YawQuarter(identity),
+           "bluerov2/bluerov2.obj", 1.0, YawQuarter(identity), 0.005, 0, identity)
        || !AddMesh(
-           world, "HeavyFit", "Fiberglass", "black", "bluerov2/bluerov2_ring.obj", 1.0, PoseAt(0.0, 0.0, 0.03, 0.0, 0.0, 0.0),
-           "bluerov2/bluerov2_wings.obj", 1.0, identity, 0.005, 0, identity)
-       || !AddBox(world, "BackLeft", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1, PoseAt(-0.1, -0.1, 0.0, 0.0, 0.0, 0.0))
-       || !AddBox(world, "BackRight", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1, PoseAt(-0.1, 0.1, 0.0, 0.0, 0.0, 0.0))
-       || !AddBox(world, "FrontLeft", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1, PoseAt(0.09, -0.1, 0.0, 0.0, 0.0, 0.0))
-       || !AddBox(world, "FrontRight", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1, PoseAt(0.09, 0.1, 0.0, 0.0, 0.0, 0.0))
-       || !AddSphere(world, "WeightCenter", "Steel", "black", 0.01, 2.0, 0, 1, PoseAt(0.0, 0.0, 0.1, 0.0, 0.0, 0.0))
-       || !AddSphere(world, "WeightLeft", "Steel", "black", 0.01, 1.0, 0, 1, PoseAt(0.0, -0.075, 0.1, 0.0, 0.0, 0.0))
-       || !AddSphere(world, "WeightRight", "Steel", "black", 0.01, 1.0, 0, 1, PoseAt(0.0, 0.075, 0.1, 0.0, 0.0, 0.0)))
+           world, "HeavyFit", "Fiberglass", "black", "bluerov2/bluerov2_ring.obj", 1.0,
+           YawQuarter(PoseAt(0.0, 0.0, 0.03, 0.0, 0.0, 0.0)), "bluerov2/bluerov2_wings.obj", 1.0, YawQuarter(identity),
+           0.005, 0, identity)
+       || !AddBox(
+           world, "BackLeft", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1,
+           YawQuarter(PoseAt(-0.1, -0.1, 0.0, 0.0, 0.0, 0.0)))
+       || !AddBox(
+           world, "BackRight", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1,
+           YawQuarter(PoseAt(-0.1, 0.1, 0.0, 0.0, 0.0, 0.0)))
+       || !AddBox(
+           world, "FrontLeft", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1,
+           YawQuarter(PoseAt(0.09, -0.1, 0.0, 0.0, 0.0, 0.0)))
+       || !AddBox(
+           world, "FrontRight", "Neutral", "None", 0.2, 0.15, 0.091, 0.025, 1, 1,
+           YawQuarter(PoseAt(0.09, 0.1, 0.0, 0.0, 0.0, 0.0)))
+       || !AddSphere(
+           world, "WeightCenter", "Steel", "black", 0.01, 2.0, 0, 1, YawQuarter(PoseAt(0.0, 0.0, 0.1, 0.0, 0.0, 0.0)))
+       || !AddSphere(
+           world, "WeightLeft", "Steel", "black", 0.01, 1.0, 0, 1, YawQuarter(PoseAt(0.0, -0.075, 0.1, 0.0, 0.0, 0.0)))
+       || !AddSphere(
+           world, "WeightRight", "Steel", "black", 0.01, 1.0, 0, 1,
+           YawQuarter(PoseAt(0.0, 0.075, 0.1, 0.0, 0.0, 0.0))))
         return false;
 
     const double max_setpoint = 4000.0 / 60.0 * 2.0 * 3.14159265358979323846;
@@ -493,14 +518,14 @@ bool BuildBluerov2Robot(SfWorld* world)
         const char* propeller;
     };
     const Mount mounts[] = {
-        {"FrontRight", PoseAt(0.1355, 0.1, 0.0725, 0.0, 0.0, -0.7853981634), 1, 1, "bluerov2/ccw.obj"},
-        {"FrontLeft", PoseAt(0.1355, -0.1, 0.0725, 0.0, 0.0, 0.7853981634), 1, 1, "bluerov2/ccw.obj"},
-        {"BackRight", PoseAt(-0.1475, 0.1, 0.0725, 0.0, 0.0, -2.3561944902), 0, 0, "bluerov2/cw.obj"},
-        {"BackLeft", PoseAt(-0.1475, -0.1, 0.0725, 0.0, 0.0, 2.3561944902), 0, 0, "bluerov2/cw.obj"},
-        {"DiveFrontRight", PoseAt(0.12, 0.218, 0.0, 0.0, -1.5707963268, 0.0), 1, 0, "bluerov2/cw.obj"},
-        {"DiveFrontLeft", PoseAt(0.12, -0.218, 0.0, 0.0, -1.5707963268, 0.0), 0, 1, "bluerov2/ccw.obj"},
-        {"DiveBackRight", PoseAt(-0.12, 0.218, 0.0, 0.0, -1.5707963268, 0.0), 0, 1, "bluerov2/ccw.obj"},
-        {"DiveBackLeft", PoseAt(-0.12, -0.218, 0.0, 0.0, -1.5707963268, 0.0), 1, 0, "bluerov2/cw.obj"},
+        {"FrontRight", YawQuarter(PoseAt(0.1355, 0.1, 0.0725, 0.0, 0.0, -0.7853981634)), 1, 1, "bluerov2/ccw.obj"},
+        {"FrontLeft", YawQuarter(PoseAt(0.1355, -0.1, 0.0725, 0.0, 0.0, 0.7853981634)), 1, 1, "bluerov2/ccw.obj"},
+        {"BackRight", YawQuarter(PoseAt(-0.1475, 0.1, 0.0725, 0.0, 0.0, -2.3561944902)), 0, 0, "bluerov2/cw.obj"},
+        {"BackLeft", YawQuarter(PoseAt(-0.1475, -0.1, 0.0725, 0.0, 0.0, 2.3561944902)), 0, 0, "bluerov2/cw.obj"},
+        {"DiveFrontRight", YawQuarter(PoseAt(0.12, 0.218, 0.0, 0.0, -1.5707963268, 0.0)), 1, 0, "bluerov2/cw.obj"},
+        {"DiveFrontLeft", YawQuarter(PoseAt(0.12, -0.218, 0.0, 0.0, -1.5707963268, 0.0)), 0, 1, "bluerov2/ccw.obj"},
+        {"DiveBackRight", YawQuarter(PoseAt(-0.12, 0.218, 0.0, 0.0, -1.5707963268, 0.0)), 0, 1, "bluerov2/ccw.obj"},
+        {"DiveBackLeft", YawQuarter(PoseAt(-0.12, -0.218, 0.0, 0.0, -1.5707963268, 0.0)), 1, 0, "bluerov2/cw.obj"},
     };
     for(const Mount& mount : mounts)
     {
@@ -533,7 +558,7 @@ bool BuildBluerov2Robot(SfWorld* world)
     SfCamera left{};
     left.sensor.name = "camera_left";
     left.sensor.link = "base_link";
-    left.sensor.origin = PoseAt(0.16, -0.0725, 0.15, 1.571, 0.0, 1.571);
+    left.sensor.origin = YawQuarter(PoseAt(0.16, -0.0725, 0.15, 1.571, 0.0, 1.571));
     left.sensor.rate = 30.0;
     left.sensor.history = -1;
     left.resolution_x = 640;
@@ -542,7 +567,7 @@ bool BuildBluerov2Robot(SfWorld* world)
     SfCamera right{};
     right.sensor.name = "camera_right";
     right.sensor.link = "base_link";
-    right.sensor.origin = PoseAt(0.16, 0.0725, 0.15, 1.571, 0.0, 1.571);
+    right.sensor.origin = YawQuarter(PoseAt(0.16, 0.0725, 0.15, 1.571, 0.0, 1.571));
     right.sensor.rate = 30.0;
     right.sensor.history = -1;
     right.resolution_x = 640;
@@ -663,6 +688,6 @@ bool BuildRobot(SfWorld* world, const std::string& robot)
         return BuildBluerov2Robot(world);
     if(robot == "girona500")
         return BuildGirona500Robot(world);
-    std::println(stderr, "[stonefish_sim] unknown robot '{}'", robot);
+    std::cerr << "[stonefish_sim] unknown robot '" << robot << "'" << std::endl;
     return false;
 }

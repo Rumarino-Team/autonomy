@@ -1,5 +1,6 @@
-// Evolution-strategy search over odometry PID gains on batched Hydrus MuJoCo physics.
-// Mirrors the former rl/tune_pid.py harness; prints gains for auv.json (does not write it).
+// Odometry PID gains on batched MuJoCo physics. The default heuristic pulses each
+// axis, then sets a critically damped kp/kd from that acceleration. --es keeps the
+// old 18-gain evolution search. Prints gains (does not write the json).
 //
 // Build: zig build -Dmujoco -DMUJOCO_PREFIX=...  →  zig-out/bin/hydrus_tune_pid
 
@@ -29,7 +30,7 @@ constexpr int kNGains = 18;
 constexpr int kPhysicsHz = 360;
 constexpr double kCloseEnough = 1.0;
 constexpr double kThrustorSaturate = 5.0;
-constexpr double kThrustorOutputScale = 1.0;
+constexpr double kThrustorOutputScale = 5.0;
 constexpr double kSurfaceLimit = 0.2;
 constexpr double kTiltLimit = 0.3;
 constexpr double kYawGate = M_PI / 8.0;
@@ -102,6 +103,7 @@ struct Options {
     uint64_t seed = 1234;
     int threads = 0;
     bool randomize = false;
+    bool evolution = false;
     std::string xml = "auvs/hydrus_mujoco/hydrus.xml";
     std::string config = "auvs/hydrus_mujoco/auv.json";
 };
@@ -201,7 +203,7 @@ void unpackGains(const std::array<double, kNGains>& g, VehicleConfig& cfg) {
     }
 }
 
-VehicleConfig loadTam(const std::string& path) {
+VehicleConfig loadConfig(const std::string& path) {
     std::ifstream in(path);
     if (!in)
         throw std::runtime_error("cannot open " + path);
@@ -209,6 +211,12 @@ VehicleConfig loadTam(const std::string& path) {
     VehicleConfig cfg;
     for (const auto& row : j.at("tam"))
         cfg.tam.push_back(row.get<std::array<double, 6>>());
+    if (j.contains("odometry")) {
+        const auto& odom = j.at("odometry");
+        cfg.kp = odom.at("kp").get<std::array<double, 6>>();
+        cfg.ki = odom.at("ki").get<std::array<double, 6>>();
+        cfg.kd = odom.at("kd").get<std::array<double, 6>>();
+    }
     return cfg;
 }
 
@@ -558,6 +566,157 @@ void clipGains(std::array<double, kNGains>& g, const std::array<double, kNGains>
         g[static_cast<size_t>(i)] = std::clamp(g[static_cast<size_t>(i)], lo[static_cast<size_t>(i)], hi[static_cast<size_t>(i)]);
 }
 
+void mixCommand(const VehicleConfig& cfg, const double tam_in[6], int nthr, float* cmd) {
+    for (int t = 0; t < nthr; ++t) {
+        double v = 0;
+        if (t < static_cast<int>(cfg.tam.size())) {
+            for (int k = 0; k < 6; ++k)
+                v += cfg.tam[static_cast<size_t>(t)][k] * tam_in[k];
+        }
+        cmd[t] = static_cast<float>(std::clamp(v, -kThrustorSaturate, kThrustorSaturate) / kThrustorOutputScale);
+    }
+}
+
+// Wrench at which the loudest thruster on this axis hits the saturate limit.
+double axisAuthority(const VehicleConfig& cfg, int axis) {
+    double peak = 0;
+    for (const auto& row : cfg.tam)
+        peak = std::max(peak, std::abs(row[static_cast<size_t>(axis)]));
+    if (peak < 1e-6)
+        return kThrustorSaturate;
+    return kThrustorSaturate / peak;
+}
+
+// Acceleration of each controlled channel per unit of TAM input, from a coast
+// and one open-loop pulse per axis. Identity attitude, so body axes match world.
+void identifyAlpha(const VehicleConfig& cfg, AuvBatch* batch, std::array<double, 6>& alpha) {
+    const int n = auv_batch_num_envs(batch);
+    const int nthr = auv_batch_num_thrusters(batch);
+    const double dt = auv_batch_timestep(batch);
+    std::vector<double> init(static_cast<size_t>(n) * AUV_BATCH_INIT_SIZE, 0.0);
+    for (int i = 0; i < n; ++i) {
+        double* pose = init.data() + i * AUV_BATCH_INIT_SIZE;
+        pose[2] = 1.0;
+        pose[6] = 1.0;
+    }
+    std::vector<double> state(static_cast<size_t>(n) * AUV_BATCH_STATE_SIZE);
+    std::vector<float> cmd(static_cast<size_t>(n) * static_cast<size_t>(nthr), 0.f);
+
+    auto runPulse = [&](const double tam_in[6]) {
+        auv_batch_reset(batch, nullptr, init.data(), nullptr);
+        const int ncmd = nthr;
+        std::vector<float> one(static_cast<size_t>(ncmd));
+        mixCommand(cfg, tam_in, ncmd, one.data());
+        for (int i = 0; i < n; ++i)
+            std::copy(one.begin(), one.end(), cmd.begin() + static_cast<std::ptrdiff_t>(i * nthr));
+        const int skip = static_cast<int>(std::lround(0.35 / dt));
+        const int span = static_cast<int>(std::lround(0.15 / dt));
+        for (int k = 0; k < skip; ++k)
+            auv_batch_step(batch, cmd.data(), 1, state.data());
+        auto worldRate = [](const double* s) {
+            std::array<double, 6> rate{};
+            for (int k = 0; k < 3; ++k) {
+                rate[static_cast<size_t>(k)] = s[7 + k];
+                rate[static_cast<size_t>(3 + k)] = s[10 + k];
+            }
+            return rate;
+        };
+        const std::array<double, 6> early = worldRate(state.data());
+        for (int k = 0; k < span; ++k)
+            auv_batch_step(batch, cmd.data(), 1, state.data());
+        const std::array<double, 6> late = worldRate(state.data());
+        std::array<double, 6> accel{};
+        const double elapsed = span * dt;
+        for (int k = 0; k < 6; ++k)
+            accel[static_cast<size_t>(k)] = (late[static_cast<size_t>(k)] - early[static_cast<size_t>(k)]) / elapsed;
+        return accel;
+    };
+
+    const double coast_in[6] = {};
+    const std::array<double, 6> coast = runPulse(coast_in);
+    constexpr double kPulse = 1.0;
+    const char* names[] = {"x", "y", "z", "roll", "pitch", "yaw"};
+    std::printf("open-loop accel per unit wrench\n");
+    for (int axis = 0; axis < 6; ++axis) {
+        double tam_in[6] = {};
+        tam_in[axis] = kPulse;
+        const std::array<double, 6> pulsed = runPulse(tam_in);
+        alpha[static_cast<size_t>(axis)] = (pulsed[static_cast<size_t>(axis)] - coast[static_cast<size_t>(axis)]) / kPulse;
+        std::printf("  %-5s %+.4f\n", names[axis], alpha[static_cast<size_t>(axis)]);
+    }
+}
+
+// kp uses a fraction of the thrust that saturates that axis at the design error.
+// kd is the critical-damping partner of the measured acceleration. ki stays 0:
+// the integrator wound up and pinned the thrusters in the evolution search.
+std::array<double, kNGains> dampingSeed(const VehicleConfig& cfg, const std::array<double, 6>& alpha) {
+    constexpr double kZeta = 1.15;
+    constexpr double kFraction = 0.25;
+    constexpr double kPosError = 1.0;
+    constexpr double kAngError = 0.40;
+    std::array<double, kNGains> g{};
+    std::array<double, kNGains> lo, hi;
+    gainBounds(lo, hi);
+    for (int axis = 0; axis < 6; ++axis) {
+        const double e_sat = axis < 3 ? kPosError : kAngError;
+        const double auth = axisAuthority(cfg, axis);
+        const double a = alpha[static_cast<size_t>(axis)];
+        // Roll is negated once more on the way into the mixer.
+        const double sign = (axis == 3 ? -1.0 : 1.0) * (a >= 0 ? 1.0 : -1.0);
+        const double kp = sign * kFraction * auth / e_sat;
+        const double alpha_abs = std::max(std::abs(a), 1e-4);
+        const double kd = sign * 2.0 * kZeta * std::sqrt(std::abs(kp) / alpha_abs);
+        g[static_cast<size_t>(axis)] = kp;
+        g[static_cast<size_t>(12 + axis)] = kd;
+    }
+    clipGains(g, lo, hi);
+    return g;
+}
+
+std::array<double, kNGains> scaleGains(const std::array<double, kNGains>& seed, double scale) {
+    std::array<double, kNGains> g = seed;
+    std::array<double, kNGains> lo, hi;
+    gainBounds(lo, hi);
+    for (int i = 0; i < 6; ++i) {
+        g[static_cast<size_t>(i)] *= scale;
+        g[static_cast<size_t>(12 + i)] *= scale;
+    }
+    clipGains(g, lo, hi);
+    return g;
+}
+
+std::array<double, kNGains> heuristicSearch(
+    VehicleConfig cfg,
+    const Scenarios& train,
+    double seconds,
+    AuvBatch* batch) {
+    std::array<double, 6> alpha{};
+    identifyAlpha(cfg, batch, alpha);
+    const std::array<double, kNGains> seed = dampingSeed(cfg, alpha);
+    std::printf("damping seed\n");
+    printGains(seed);
+
+    const double scales[] = {0.50, 0.75, 1.00, 1.25, 1.50};
+    double best_cost = std::numeric_limits<double>::infinity();
+    std::array<double, kNGains> best = seed;
+    for (double scale : scales) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::array<double, kNGains> gains = scaleGains(seed, scale);
+        unpackGains(gains, cfg);
+        HostPid trial(cfg);
+        const double c = cost(runEpisodes(trial, train, seconds, batch), seconds);
+        const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("scale %.2f  cost %.3f  %.1fs\n", scale, c, dt);
+        std::fflush(stdout);
+        if (c < best_cost) {
+            best_cost = c;
+            best = gains;
+        }
+    }
+    std::printf("best heuristic cost %.3f\n", best_cost);
+    return best;
+}
+
 std::array<double, kNGains> search(
     VehicleConfig base_cfg,
     const Scenarios& train,
@@ -669,6 +828,8 @@ Options parseArgs(int argc, char** argv) {
             opt.xml = need(a);
         else if (std::strcmp(a, "--randomize") == 0)
             opt.randomize = true;
+        else if (std::strcmp(a, "--es") == 0)
+            opt.evolution = true;
         else if (std::strcmp(a, "-h") == 0 || std::strcmp(a, "--help") == 0) {
             std::printf(
                 "Usage: hydrus_tune_pid [options]\n"
@@ -680,7 +841,8 @@ Options parseArgs(int argc, char** argv) {
                 "  --seed N           RNG seed (default 1234)\n"
                 "  --threads N        worker threads (0 = hardware concurrency)\n"
                 "  --randomize        domain randomization + current\n"
-                "  --config PATH      auv.json (tam only; default auvs/hydrus_mujoco/auv.json)\n"
+                "  --es               evolution search instead of the damping heuristic\n"
+                "  --config PATH      auv.json (tam, and odometry for the held-out baseline)\n"
                 "  --xml PATH         MJCF (default hydrus.xml; AUV_MJCF overrides)\n");
             std::exit(0);
         } else {
@@ -703,11 +865,16 @@ Options parseArgs(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         const Options opt = parseArgs(argc, argv);
-        VehicleConfig base_cfg = loadTam(opt.config);
-        initDefaultGains(base_cfg);
+        VehicleConfig file_cfg = loadConfig(opt.config);
+        VehicleConfig base_cfg = file_cfg;
+        if (opt.evolution)
+            initDefaultGains(base_cfg);
 
         TaskConfig task;
         task.randomize = opt.randomize;
+        // BlueROV's pool floor is at 2.1 m. The default box reaches 2.4 m.
+        if (opt.xml.find("bluerov") != std::string::npos)
+            task.z_max = 1.85;
         std::mt19937_64 rng_train(opt.seed);
         std::mt19937_64 rng_hold(opt.seed + 1);
         const Scenarios train = sampleScenarios(rng_train, opt.episodes, task);
@@ -717,24 +884,25 @@ int main(int argc, char** argv) {
         if (batch == nullptr)
             return 1;
 
-        const std::array<double, kNGains> best = search(
-            base_cfg, train, opt.seconds, batch, opt.generations, opt.population, opt.elite, rng_train);
+        const std::array<double, kNGains> best = opt.evolution
+            ? search(base_cfg, train, opt.seconds, batch, opt.generations, opt.population, opt.elite, rng_train)
+            : heuristicSearch(base_cfg, train, opt.seconds, batch);
 
         std::printf("\nbest gains\n");
         printGains(best);
 
         VehicleConfig tuned = base_cfg;
         unpackGains(best, tuned);
-        HostPid pid_base(base_cfg);
+        HostPid pid_base(file_cfg);
         HostPid pid_tuned(tuned);
         const RolloutStats base_stats = runEpisodes(pid_base, held, opt.seconds, batch);
         const RolloutStats tuned_stats = runEpisodes(pid_tuned, held, opt.seconds, batch);
         std::printf("\nheld-out\n");
         std::printf(
-            "baseline cost %.3f  tuned %.3f\n",
+            "json cost %.3f  tuned %.3f\n",
             cost(base_stats, opt.seconds),
             cost(tuned_stats, opt.seconds));
-        printSummary("baseline", base_stats);
+        printSummary("json", base_stats);
         printSummary("tuned", tuned_stats);
 
         auv_batch_destroy(batch);

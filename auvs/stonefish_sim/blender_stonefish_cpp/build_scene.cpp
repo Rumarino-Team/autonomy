@@ -215,12 +215,25 @@ sf::Mesh* StonefishMesh(const Mesh& mesh) {
     sf::OpenGLContent::CheckAndRepairFaceVertexOrder(out);
     return out;
 }
+// Converted meshes survive scenario restarts. A full restart still uploads new
+// GPU buffers; this skips the triangulation work for geometry that did not change.
+std::unordered_map<std::string, std::unique_ptr<sf::Mesh>>& StonefishMeshCache() {
+    static std::unordered_map<std::string, std::unique_ptr<sf::Mesh>> cache;
+    return cache;
+}
+const sf::Mesh* CachedStonefishMesh(const Mesh& mesh) {
+    auto& cache = StonefishMeshCache();
+    const std::string key = MeshFingerprint(mesh);
+    auto it = cache.find(key);
+    if (it == cache.end())
+        it = cache.emplace(key, std::unique_ptr<sf::Mesh>(StonefishMesh(mesh))).first;
+    return it->second.get();
+}
 } // namespace
 std::unordered_map<std::string, std::string> BuildScene(
-    sf::SimulationManager& manager, const std::filesystem::path& blend,
-    const std::filesystem::path& config_path, const std::filesystem::path& data) {
-    // Decode and validate every selected mesh before changing the simulation.
-    auto scene = ReadScene(blend, config_path);
+    sf::SimulationManager& manager, const Scene& scene,
+    const std::filesystem::path& config_path, const std::filesystem::path& data,
+    const std::filesystem::path& blend) {
     auto config = YAML::LoadFile(config_path.string());
     for (const auto& object : scene.objects) {
         if (!config["materials"][object.material] || !config["looks"][object.look])
@@ -266,12 +279,17 @@ std::unordered_map<std::string, std::string> BuildScene(
     }
     manager.EnableAtmosphere();
     manager.getAtmosphere()->SetSunPosition(sun["azimuth"].as<double>(), sun["elevation"].as<double>());
-    std::map<const Mesh*, std::unique_ptr<sf::Mesh>> meshes;
+    std::map<const Mesh*, const sf::Mesh*> meshes;
+    size_t reused = 0;
     for (const auto& object : scene.objects) {
         auto it = meshes.find(object.mesh.get());
-        if (it == meshes.end())
-            it = meshes.emplace(object.mesh.get(), std::unique_ptr<sf::Mesh>(StonefishMesh(*object.mesh))).first;
-        auto* obstacle = new sf::Obstacle(object.name, CloneStonefishMesh(it->second.get()),
+        if (it == meshes.end()) {
+            const std::string key = MeshFingerprint(*object.mesh);
+            const bool hit = StonefishMeshCache().contains(key);
+            it = meshes.emplace(object.mesh.get(), CachedStonefishMesh(*object.mesh)).first;
+            if (hit) ++reused;
+        }
+        auto* obstacle = new sf::Obstacle(object.name, CloneStonefishMesh(it->second),
                                           object.convex, materials.at(object.material), looks.at(object.look));
         const auto& p = object.position;
         const auto& r = object.rotation;
@@ -279,7 +297,13 @@ std::unordered_map<std::string, std::string> BuildScene(
         if (!object.cls.empty() && object.cls != "scenery") classes.emplace(obstacle->getName(), object.cls);
     }
     std::cout << "[blender_cpp] built " << scene.objects.size() << " static entities, " << meshes.size()
-              << " unique meshes, " << classes.size() << " tracked objects from " << blend << '\n';
+              << " unique meshes (" << reused << " from cache), " << classes.size()
+              << " tracked objects from " << blend << '\n';
     return classes;
+}
+std::unordered_map<std::string, std::string> BuildScene(
+    sf::SimulationManager& manager, const std::filesystem::path& blend,
+    const std::filesystem::path& config_path, const std::filesystem::path& data) {
+    return BuildScene(manager, ReadScene(blend, config_path), config_path, data, blend);
 }
 }

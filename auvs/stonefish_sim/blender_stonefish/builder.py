@@ -226,5 +226,15 @@ class ScenarioBuilder:
             if status != 0:
                 logger.error("static %s failed", entity_name)
                 return -1
-        logger.info("built %d statics from %s", len(extracted), blend_file)
+        for camera in extractor.view_cameras:
+            view = stonefish_c.SfViewCamera()
+            view.name = _bytes(camera.name)
+            view.location = stonefish_c._vec3(camera.location)
+            view.rotation = stonefish_c._vec3(camera.rotation)
+            if lib.sf_view_camera(world, view) != 0:
+                logger.error("view camera %s failed", camera.name)
+                return -1
+        logger.info(
+            "built %d statics and %d view cameras from %s", len(extracted), len(extractor.view_cameras), blend_file
+        )
         return 0
