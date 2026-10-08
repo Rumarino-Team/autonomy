@@ -1,4 +1,5 @@
 const std = @import("std");
+const math = @import("math.zig");
 const MissionContext = @import("MissionContext.zig");
 const MissionArgs = @import("MissionArgs.zig");
 
@@ -10,14 +11,26 @@ pub fn main(init: std.process.Init) !void {
 
     var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
 
-    while (true) {
-        ctx.yieldUntilNextFrameAndUpdate();
-        if (ctx.frame.@"error" != .none) continue;
+    const mission = switch (args.mission_id) {
+        .prequalify => @import("missions/prequalify.zig").mission,
+    };
 
-        switch (args.mission_id) {
-            .prequalify => @import("missions/prequalify.zig").mission(&ctx),
-        }
+    while (true) {
+        try ctx.yieldUntilNextFrameAndUpdate();
         if (ctx.frame.@"error" != .none) continue;
+        ctx.goal = math.poseTo6f(ctx.frame.camera_pose);
+
+        mission(&ctx) catch |err| switch (err) {
+            error.RestartMission => {
+                std.log.info("restarting mission context", .{});
+                ctx.resetMissionState();
+                std.log.info("restarting mission", .{});
+                continue;
+            },
+        };
+
+        if (ctx.frame.@"error" != .none) continue;
+        std.log.info("succesfully completed mission", .{});
         break;
     }
 }

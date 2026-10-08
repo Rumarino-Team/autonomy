@@ -125,7 +125,7 @@ pub fn resetMissionState(ctx: *MissionContext) void {
     ctx.log_counter = 0;
 }
 
-pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
+pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
     switch (ctx.frame.@"error") {
         .seed_goal => {
@@ -202,13 +202,15 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) void {
             std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
             std.log.debug("{any}", .{auv});
             ctx.auv = auv;
+            ctx.auv.init();
             std.log.debug("restarted auv loop", .{});
+            return error.RestartMission;
         } else |err| {
             std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
             std.log.err("{s}", .{@errorName(err)});
             std.log.info("kept previous auv", .{});
+            ctx.auv.init();
         }
-        ctx.auv.init();
     }
 
     const elapsed = start.untilNow(ctx.io);
@@ -242,15 +244,18 @@ fn controllerStep(ctx: *MissionContext) void {
         const pose = ctx.frame.camera_pose;
         const timestamp_ns = ctx.frame.timestamp;
         const dt: ?f32 = if (ctx.pid_prev_timestamp_ns) |previous| blk: {
-            const elapsed_ns = timestamp_ns - previous;
-            if (elapsed_ns > 0) {
-                break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
+            // A scenario reload restarts the sim clock. Subtracting first panics.
+            if (timestamp_ns <= previous) {
+                std.log.warn(
+                    "odometry stamp not increasing (prev={} ns, now={} ns); skipping I/D",
+                    .{ previous, timestamp_ns },
+                );
+                ctx.pid_sum_err = @splat(0);
+                ctx.pid_prev_pose_err = @splat(0);
+                break :blk null;
             }
-            std.log.warn(
-                "odometry stamp not increasing (prev={} ns, now={} ns); skipping I/D",
-                .{ previous, timestamp_ns },
-            );
-            break :blk null;
+            const elapsed_ns = timestamp_ns - previous;
+            break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
         } else null;
         ctx.pid_prev_timestamp_ns = timestamp_ns;
 
@@ -331,15 +336,17 @@ fn controllerStep(ctx: *MissionContext) void {
 
         const timestamp_ns = ctx.frame.timestamp;
         const dt: ?f32 = if (ctx.non_odometrypid_prev_timestamp_ns) |previous| blk: {
-            const elapsed_ns = timestamp_ns - previous;
-            if (elapsed_ns > 0) {
-                break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
+            if (timestamp_ns <= previous) {
+                std.log.warn(
+                    "reactive stamp not increasing (prev={} ns, now={} ns); skipping I/D",
+                    .{ previous, timestamp_ns },
+                );
+                ctx.non_odometrypid_sum_err = @splat(0);
+                ctx.non_odometrypid_prev_pose_err = @splat(0);
+                break :blk null;
             }
-            std.log.warn(
-                "reactive stamp not increasing (prev={} ns, now={} ns); skipping I/D",
-                .{ previous, timestamp_ns },
-            );
-            break :blk null;
+            const elapsed_ns = timestamp_ns - previous;
+            break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
         } else null;
         ctx.non_odometrypid_prev_timestamp_ns = timestamp_ns;
         const reactive = ctx.config.non_odometry;
@@ -488,7 +495,7 @@ fn trackFirstSeenObject2d(ctx: *MissionContext) void {
     ctx.trackObject2d(ctx.seen_objects2d[0].id);
 }
 
-fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const Auv.ObjectCls, start: usize) *const Auv.Object {
+fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const Auv.ObjectCls, start: usize) !*const Auv.Object {
     var seen = start;
 
     while (true) {
@@ -501,32 +508,32 @@ fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const Auv.ObjectCls, st
             seen += 1;
         }
 
-        ctx.yieldUntilNextFrameAndUpdate();
+        try ctx.yieldUntilNextFrameAndUpdate();
     }
 }
 
 /// yield until getting first object with any of the `cls` in `clss`
-pub fn yieldUntilFirstObjectWithAnyCls(ctx: *MissionContext, clss: []const Auv.ObjectCls) *const Auv.Object {
-    return yieldUntilObjectWithCls(ctx, clss, 0);
+pub fn yieldUntilFirstObjectWithAnyCls(ctx: *MissionContext, clss: []const Auv.ObjectCls) !*const Auv.Object {
+    return try yieldUntilObjectWithCls(ctx, clss, 0);
 }
 
 /// yield until getting first object wit `cls`
-pub fn yieldUntilFirstObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
-    return yieldUntilFirstObjectWithAnyCls(ctx, &.{cls});
+pub fn yieldUntilFirstObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) !*const Auv.Object {
+    return try yieldUntilFirstObjectWithAnyCls(ctx, &.{cls});
 }
 
 /// yield until getting next object with any of the `cls` in `clss` (ignoring any seen before)
-pub fn yieldUntilNewObjectWithAnyCls(ctx: *MissionContext, clss: []const Auv.ObjectCls) *const Auv.Object {
-    return yieldUntilObjectWithCls(ctx, clss, ctx.seen_objects_len);
+pub fn yieldUntilNewObjectWithAnyCls(ctx: *MissionContext, clss: []const Auv.ObjectCls) !*const Auv.Object {
+    return try yieldUntilObjectWithCls(ctx, clss, ctx.seen_objects_len);
 }
 
 /// yield until getting next object wit `cls` (ignoring any seen before)
-pub fn yieldUntilNewObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) *const Auv.Object {
-    return yieldUntilNewObjectWithAnyCls(ctx, &.{cls});
+pub fn yieldUntilNewObjectWithCls(ctx: *MissionContext, cls: Auv.ObjectCls) !*const Auv.Object {
+    return try yieldUntilNewObjectWithAnyCls(ctx, &.{cls});
 }
 
 /// yield until at `ctx.frame.camera_pose.pos` is at `goal_threshold` distance from `goal_pos`
-pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) void {
+pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) !void {
     ctx.goal[0] = goal_pos[0];
     ctx.goal[1] = goal_pos[1];
     ctx.goal[2] = goal_pos[2];
@@ -538,6 +545,6 @@ pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) void {
             break;
         }
 
-        ctx.yieldUntilNextFrameAndUpdate();
+        try ctx.yieldUntilNextFrameAndUpdate();
     }
 }
