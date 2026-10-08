@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
             for (int j = 0; j < 3; ++j)
                 if (!std::isfinite(min[j]) || !std::isfinite(max[j])) throw std::runtime_error("invalid entity bounds");
         }
-        if (statics != 20 || manager.classes.size() != 2 || !manager.getRobot(0u)) throw std::runtime_error("unexpected pool scene contents");
+        if (statics != 20 || manager.classes.size() != 1 || !manager.getRobot(0u)) throw std::runtime_error("unexpected pool scene contents");
         if (!manager.StartSimulation()) throw std::runtime_error("failed to solve initial conditions");
         for (int i = 0; i < 36; ++i) manager.StepSimulation(1.0 / 360);
         if (!(manager.getSimulationTime() > 0)) throw std::runtime_error("simulation did not advance");
@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
         statics = 0;
         for (unsigned i = 0; auto* entity = manager.getEntity(i); ++i)
             if (entity->getType() == sf::EntityType::STATIC) ++statics;
-        if (statics != 20 || manager.classes.size() != 2 || !manager.getRobot(0u)) throw std::runtime_error("restart did not rebuild the pool and robot");
+        if (statics != 20 || manager.classes.size() != 1 || !manager.getRobot(0u)) throw std::runtime_error("restart did not rebuild the pool and robot");
         std::cout << "PASS: " << statics << " static entities, " << manager.classes.size()
                   << " tracked classes, robot " << manager.getRobot(0u)->getName() << ", physics advanced to "
                   << manager.getSimulationTime() << " seconds; restart also passed\n";

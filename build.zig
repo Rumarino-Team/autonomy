@@ -313,6 +313,10 @@ pub fn build(b: *std.Build) !void {
             install_exe.step.dependOn(&cmake_build.step);
             b.getInstallStep().dependOn(&install_exe.step);
         }
+    } else {
+        // A cached prefix survives in build/CMakeCache.txt. Clear it so a
+        // Stonefish-only configure does not fail looking for libmujoco.so.
+        cmake_configure.addArg("-DMUJOCO_PREFIX=");
     }
 
     cmake_build.step.dependOn(&cmake_configure.step);

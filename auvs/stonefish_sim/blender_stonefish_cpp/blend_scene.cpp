@@ -172,11 +172,7 @@ const std::unordered_map<std::string, Known> known = {
 std::vector<uint8_t> ReadBytes(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
 
-    if (!file || file.tellg() <= 0)
-     std::cout << "cannot read " + path.string() << std::endl;
-     return std::vector<uint8_t>();
-     }
-     
+    if (!file || file.tellg() <= 0) Fail("cannot read " + path.string());
     std::vector<uint8_t> raw(static_cast<size_t>(file.tellg()));
     file.seekg(0);
     if (!file.read(reinterpret_cast<char*>(raw.data()), raw.size())) Fail("cannot read complete blend file");
@@ -240,16 +236,10 @@ Scene ReadScene(const std::filesystem::path& filename, const std::filesystem::pa
     // 16-19: footer size
     // 20-23: total size
     // 24-27: data offset
-    if (String(Bytes(bytes).first(7)) != "BLENDER"){
-        std::cout << "Not a blender file" << std::endl;
-        return Scene();
-    }
+    if (bytes.size() < 12 || String(Bytes(bytes).first(7)) != "BLENDER") Fail("not a blender file");
     const std::string version(reinterpret_cast<const char*>(bytes.data() + 9), 3);
-
     if (version[0] != '4')
-     std::cout << "this importer currently supports Blender 4.x mesh layouts; file version is " + version << std::endl;
-     return Scene();
-    }
+        Fail("this importer currently supports Blender 4.x mesh layouts; file version is " + version);
 
     auto blend = cblend::Blend::Read(bytes);
     if (!blend) Fail("CBlend could not parse the file (error category " + std::to_string(blend.error().index()) + ")");

@@ -12,9 +12,9 @@ still use their existing C++ helper through its C wrapper; that helper is shared
 by both plugins. Blender scene construction calls the Stonefish C++ API directly.
 
 `blend_scene.cpp` reads mesh data, tags and transforms; `build_scene.cpp` creates
-materials, looks, ocean, current, atmosphere and static obstacles. Generated OBJ
-files retain normals and UVs and go to `../data/models/blender_cpp/`. Identical
-geometry shares one OBJ. The Python importer's output directory is preserved.
+materials, looks, ocean, current, atmosphere and static obstacles. Vertices, faces
+and UVs are passed to Stonefish in memory. Identical geometry is built once and
+copied per obstacle. `inspect` can still write OBJ files for comparison.
 
 ## Try the built plugin
 
