@@ -1,5 +1,3 @@
-## Build & Run: libauv_hydrus_sim
-
 
 ## Build & Run: libauv_stationary_sim
 ```sh
@@ -8,7 +6,7 @@ zig build run -- \
     prequalify \
     ./auvs/stationary_sim/auv.json
 ```
-
+## Build & Run: libauv_hydrus_sim
 
 ```sh
 zig build -Dstonefish run -- \
