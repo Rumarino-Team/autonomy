@@ -18,6 +18,8 @@ struct Mesh {
 };
 struct Object {
     std::string blender_name, name, material, look, cls;
+    // Optional Blender custom property stonefish_id, otherwise the entity name.
+    std::string id;
     Vec3 position{}, rotation{}, scale{};
     bool convex = false;
     std::shared_ptr<const Mesh> mesh;

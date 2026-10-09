@@ -3,10 +3,45 @@
   "blend_file": "pool_scene.blend",
   "robot": "proteus",
   "steps_per_second": 360.0,
-  "realtime_factor_cap": 8.0,
+  "realtime_factor_cap": 1.0,
   "tracking_ok_seconds": 100000.0,
   "min_render_interval_ms": 16,
   "console": false,
   "bbox_only_in_front_of_camera": false,
-  "view_camera": "PoolInside_South"
+  "view_camera": "PoolInside_South",
+  "graphics": {
+    "sun": {
+      "azimuth_deg": -63.69,
+      "elevation_deg": 6.62
+    },
+    "ocean": {
+      "render_enabled": true,
+      "jerlov": 0.20,
+      "particles": true,
+      "wave_height": 0.0
+    },
+    "viewer_exposure_ev": 0.0,
+    "camera_exposure_ev": 0.0,
+    "raster": {
+      "anti_aliasing": true,
+      "ambient_occlusion": true,
+      "screen_space_reflections": true
+    },
+    "rtx": {
+      "enabled": false,
+      "samples_per_pixel": 4,
+      "max_bounces": 1,
+      "dlss": true,
+      "dlss_quality": "quality",
+      "debug_albedo": false
+    },
+    "looks": {
+      "pool_tile": {
+        "color": null,
+        "roughness": null,
+        "metalness": null,
+        "reflectivity": null
+      }
+    }
+  }
 }

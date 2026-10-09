@@ -61,7 +61,8 @@ ExternalProject_Add(stonefish
     -DCMAKE_BUILD_TYPE=Release
     ${STONEFISH_EXTRA_ARGS}
 
-  BUILD_ALWAYS ${AUTONOMY_STONEFISH_RTX}
+  # Local engine edits must rebuild in both raster and RTX configurations.
+  BUILD_ALWAYS TRUE
 
   BUILD_BYPRODUCTS
     "${STONEFISH_DIR}/lib/lib${STONEFISH_LIB}.so"

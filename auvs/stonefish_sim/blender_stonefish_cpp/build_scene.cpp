@@ -2,6 +2,9 @@
 #include <Stonefish/core/SimulationManager.h>
 #include <Stonefish/core/MaterialManager.h>
 #include <Stonefish/core/NED.h>
+#include <Stonefish/core/GraphicalSimulationApp.h>
+#include <Stonefish/graphics/OpenGLPipeline.h>
+#include <Stonefish/entities/StaticEntity.h>
 #include <Stonefish/entities/statics/Obstacle.h>
 #include <Stonefish/entities/forcefields/Ocean.h>
 #include <Stonefish/entities/forcefields/Atmosphere.h>
@@ -14,6 +17,7 @@
 #include <cmath>
 #include <iostream>
 #include <map>
+#include <set>
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
@@ -229,11 +233,233 @@ const sf::Mesh* CachedStonefishMesh(const Mesh& mesh) {
         it = cache.emplace(key, std::unique_ptr<sf::Mesh>(StonefishMesh(mesh))).first;
     return it->second.get();
 }
+
+sf::Transform Pose(const Object& object) {
+    return sf::Transform(sf::Quaternion(object.rotation[2], object.rotation[1], object.rotation[0]),
+                         sf::Vector3(object.position[0], object.position[1], object.position[2]));
+}
+std::string Identity(const Object& object) { return object.id.empty() ? object.name : object.id; }
+sf::OpenGLContent* Content() {
+    auto* app = sf::SimulationApp::getApp();
+    return app->hasGraphics() ? static_cast<sf::GraphicalSimulationApp*>(app)->getGLPipeline()->getContent() : nullptr;
+}
+struct DetachedObstacleDeleter {
+    void operator()(sf::Obstacle* obstacle) const {
+        if(obstacle != nullptr) { obstacle->ReleasePhysics(); delete obstacle; }
+    }
+};
+using DetachedObstacle = std::unique_ptr<sf::Obstacle, DetachedObstacleDeleter>;
+struct PreparedLook {
+    sf::Look value;
+    ~PreparedLook() {
+        if(value.albedoTexture) glDeleteTextures(1, &value.albedoTexture);
+        if(value.normalMap) glDeleteTextures(1, &value.normalMap);
+    }
+};
+void ApplyEnvironment(sf::SimulationManager& manager, const EnvironmentSettings& env) {
+    manager.getNED()->Init(env.latitude, env.longitude, 0);
+    if(env.enabled) {
+        sf::Fluid fluid;
+        fluid.name = "Water"; fluid.density = env.density; fluid.viscosity = 1.308e-3; fluid.IOR = 1.55;
+        manager.UpdateOcean(env.waves, fluid);
+        auto* ocean = manager.getOcean();
+        ocean->setWaterType(env.jerlov);
+        ocean->SetConditions(env.temperature);
+        ocean->setParticles(env.particles);
+        auto* current = dynamic_cast<sf::Uniform*>(ocean->getVelocityField(0));
+        const sf::Vector3 velocity(env.current[0], env.current[1], env.current[2]);
+        if(current) current->setVelocity(velocity);
+        else ocean->AddVelocityField(new sf::Uniform(velocity));
+        ocean->EnableCurrents();
+        manager.getDynamicsWorld()->updateSingleAabb(ocean->getGhost());
+    } else manager.DisableOcean();
+    manager.getAtmosphere()->SetSunPosition(env.azimuth, env.elevation);
+}
 } // namespace
+
+SceneSettings ReadSceneSettings(const std::filesystem::path& path, const std::filesystem::path& data) {
+    const auto config = YAML::LoadFile(path.string());
+    SceneSettings out;
+    auto number = [](const YAML::Node& node, const std::string& name, double lo, double hi) {
+        const double v = node.as<double>();
+        if(!std::isfinite(v) || v < lo || v > hi)
+            throw std::runtime_error("[blender_cpp] invalid " + name);
+        return v;
+    };
+    auto texture = [&](const YAML::Node& node) {
+        const auto value = node.as<std::string>("");
+        if(!value.empty() && !std::filesystem::is_regular_file(data / value))
+            throw std::runtime_error("[blender_cpp] texture missing: " + (data / value).string());
+        return value;
+    };
+    if(!config["materials"].IsMap() || !config["looks"].IsMap())
+        throw std::runtime_error("[blender_cpp] materials and looks must be maps");
+    for(const auto& entry : config["materials"]) {
+        const auto name = entry.first.as<std::string>(); const auto v = entry.second;
+        if(name.empty()) throw std::runtime_error("[blender_cpp] empty material name");
+        out.materials.emplace(name, MaterialSettings{
+            number(v["density"], "density", 1e-9, 1e12), number(v["restitution"], "restitution", 0, 1),
+            number(v["magnetic"] ? v["magnetic"] : YAML::Node(0), "magnetic", -1e12, 1e12)});
+    }
+    for(const auto& entry : config["looks"]) {
+        const auto name = entry.first.as<std::string>(); const auto v = entry.second;
+        if(name.empty() || name == "__Default__") throw std::runtime_error("[blender_cpp] reserved/empty look name");
+        if(!v["color"].IsSequence() || v["color"].size() != 3)
+            throw std::runtime_error("[blender_cpp] color must have three components");
+        LookSettings look;
+        for(size_t i = 0; i < 3; ++i) look.color[i] = number(v["color"][i], "color", 0, 1);
+        look.roughness = number(v["roughness"] ? v["roughness"] : YAML::Node(0.5), "roughness", 0, 1);
+        look.metalness = number(v["metalness"] ? v["metalness"] : YAML::Node(0), "metalness", 0, 1);
+        look.reflectivity = number(v["reflectivity"] ? v["reflectivity"] : YAML::Node(0.5), "reflectivity", 0, 1);
+        look.texture = texture(v["texture"]); look.normal_map = texture(v["normal_map"]);
+        out.looks.emplace(name, std::move(look));
+    }
+    if(out.materials.empty() || out.looks.empty()) throw std::runtime_error("[blender_cpp] empty materials/looks");
+    std::set<std::pair<std::string, std::string>> pairs;
+    for(const auto& pair : config["friction"]["pairs"]) {
+        if(!pair.IsSequence() || pair.size() != 4) throw std::runtime_error("[blender_cpp] invalid friction pair");
+        auto a = pair[0].as<std::string>(), b = pair[1].as<std::string>();
+        if(!out.materials.contains(a) || !out.materials.contains(b) || !pairs.emplace(std::min(a,b), std::max(a,b)).second)
+            throw std::runtime_error("[blender_cpp] unknown/duplicate friction pair: " + a + "/" + b);
+        out.friction.push_back({a, b, number(pair[2], "static friction", 0, 1e6), number(pair[3], "dynamic friction", 0, 1e6)});
+    }
+    const auto env = config["environment"], ocean = env["ocean"], sun = env["sun"], ned = env["ned"];
+    auto& e = out.environment;
+    e.enabled = ocean["enabled"].as<bool>(true); e.particles = ocean["particles"].as<bool>(true);
+    e.density = number(ocean["water_density"], "water_density", 1e-9, 1e9);
+    e.jerlov = number(ocean["jerlov"], "jerlov", 0, 1);
+    e.waves = number(ocean["wave_height"], "wave_height", 0, 2);
+    e.temperature = number(env["atmosphere"]["temperature"], "temperature", -100, 200);
+    e.azimuth = number(sun["azimuth"], "sun azimuth", -1e9, 1e9);
+    e.elevation = number(sun["elevation"], "sun elevation", -90, 90);
+    e.latitude = number(ned["latitude"], "latitude", -90, 90);
+    e.longitude = number(ned["longitude"], "longitude", -180, 180);
+    const auto current = ocean["current"]["velocity"];
+    if(!current.IsSequence() || current.size() != 3) throw std::runtime_error("[blender_cpp] current velocity must have three components");
+    for(size_t i = 0; i < 3; ++i) e.current[i] = number(current[i], "current velocity", -1e6, 1e6);
+    return out;
+}
+
+void UpdateScene(sf::SimulationManager& manager, const Scene& previous, const Scene& next,
+                 const SceneSettings& previous_settings, const SceneSettings& settings,
+                 const std::filesystem::path& data, bool reload_textures) {
+    std::unordered_map<std::string, const Object*> old;
+    std::unordered_map<std::string, sf::StaticEntity*> live;
+    std::unordered_set<std::string> old_names, next_ids, next_names;
+    for(const auto& object : previous.objects) {
+        auto* entity = dynamic_cast<sf::StaticEntity*>(manager.getEntity(object.name));
+        if(!entity || !old.emplace(Identity(object), &object).second)
+            throw std::runtime_error("[blender_cpp] missing/duplicate live static: " + object.name);
+        live.emplace(Identity(object), entity); old_names.insert(object.name);
+    }
+    for(const auto& object : next.objects) {
+        if(object.name.empty() || object.name.starts_with("__hot_reload_"))
+            throw std::runtime_error("[blender_cpp] empty/reserved entity name: " + object.name);
+        if(!object.mesh || !next_ids.insert(Identity(object)).second || !next_names.insert(object.name).second)
+            throw std::runtime_error("[blender_cpp] missing mesh or duplicate identity/name");
+        if(!settings.materials.contains(object.material) || !settings.looks.contains(object.look))
+            throw std::runtime_error("[blender_cpp] unknown material/look for " + object.name);
+        if(manager.getNameManager()->HasName(object.name) && !old_names.contains(object.name))
+            throw std::runtime_error("[blender_cpp] name conflicts with a robot/sensor/entity: " + object.name);
+    }
+
+    // Stage every fallible decode/upload before detaching or moving live bodies.
+    std::vector<std::unique_ptr<PreparedLook>> prepared_looks;
+    auto* content = Content();
+    if(content) for(const auto& [name, spec] : settings.looks) {
+        const auto prior = previous_settings.looks.find(name);
+        if(!reload_textures && prior != previous_settings.looks.end() && prior->second == spec) continue;
+        auto prepared = std::make_unique<PreparedLook>(); auto& look = prepared->value;
+        look.name = name; look.type = sf::LookType::PHYSICAL;
+        look.color = sf::Color(spec.color[0], spec.color[1], spec.color[2]);
+        look.reflectivity = spec.reflectivity; look.params = {float(spec.roughness), float(spec.metalness)};
+        if(!spec.texture.empty()) {
+            look.albedoTexture = content->LoadTexture((data / spec.texture).string(), true);
+            if(!look.albedoTexture) throw std::runtime_error("[blender_cpp] cannot decode texture: " + spec.texture);
+        }
+        if(!spec.normal_map.empty()) {
+            look.normalMap = content->LoadTexture((data / spec.normal_map).string(), false);
+            if(!look.normalMap) throw std::runtime_error("[blender_cpp] cannot decode normal map: " + spec.normal_map);
+        }
+        prepared_looks.push_back(std::move(prepared));
+    }
+    std::unordered_map<std::string, DetachedObstacle> replacements;
+    const auto placeholder_material = manager.getMaterialManager()->GetMaterialsList().front();
+    for(const auto& object : next.objects) {
+        auto prior = old.find(Identity(object));
+        if(prior != old.end() && prior->second->convex == object.convex
+           && MeshFingerprint(*prior->second->mesh) == MeshFingerprint(*object.mesh)) continue;
+        replacements.emplace(Identity(object), DetachedObstacle(new sf::Obstacle(
+            "__hot_reload_staged__", CloneStonefishMesh(CachedStonefishMesh(*object.mesh)), object.convex,
+            placeholder_material, "")));
+    }
+
+    auto* materials = manager.getMaterialManager();
+    for(const auto& [name, spec] : settings.materials) {
+        sf::Material value{name, spec.density, spec.restitution, spec.magnetic};
+        if(!materials->UpdateMaterial(value)) materials->CreateMaterial(name, spec.density, spec.restitution, spec.magnetic);
+    }
+    for(const auto& pair : previous_settings.friction)
+        materials->SetMaterialsInteraction(pair.a, pair.b, 1, 1);
+    for(const auto& pair : settings.friction)
+        materials->SetMaterialsInteraction(pair.a, pair.b, pair.stat, pair.dynamic);
+    if(content) for(auto& prepared : prepared_looks) {
+        content->SetLook(std::move(prepared->value));
+        prepared->value.albedoTexture = prepared->value.normalMap = 0; // ownership transferred
+    }
+    // Vacate the old names first, allowing swaps/renames in one Blender save.
+    for(auto& [id, entity] : live)
+        if(!next_ids.contains(id) || replacements.contains(id)) {
+            manager.RemoveStaticEntity(entity); delete entity; entity = nullptr;
+        } else entity->Rename("__hot_reload_live__");
+    size_t added = 0, replaced = 0, removed = 0, moved = 0;
+    for(const auto& [id, prior] : old) if(!next_ids.contains(id)) ++removed;
+    for(const auto& object : next.objects) {
+        const auto id = Identity(object);
+        auto replacement = replacements.find(id);
+        sf::StaticEntity* entity = nullptr;
+        if(replacement != replacements.end()) {
+            entity = replacement->second.get(); entity->Rename(object.name);
+            manager.AddStaticEntity(entity, Pose(object)); replacement->second.release();
+            old.contains(id) ? ++replaced : ++added;
+        } else {
+            entity = live.at(id); entity->Rename(object.name);
+            const auto* prior = old.at(id);
+            if(prior->position != object.position || prior->rotation != object.rotation) {
+                entity->setTransform(Pose(object));
+                manager.getDynamicsWorld()->updateSingleAabb(entity->getRigidBody());
+                ++moved;
+            }
+        }
+        entity->setSurface(materials->getMaterial(object.material), content ? content->getLookId(object.look) : -1);
+    }
+    if(previous_settings.environment != settings.environment) ApplyEnvironment(manager, settings.environment);
+    if(content) {
+        // A frame may already be queued when a save arrives. Replace it before
+        // the renderer can read deleted/reused object IDs.
+        auto* pipeline = static_cast<sf::GraphicalSimulationApp*>(sf::SimulationApp::getApp())->getGLPipeline();
+        SDL_LockMutex(pipeline->getDrawingQueueMutex());
+        pipeline->PurgeDrawingQueue();
+        pipeline->PurgeSelectedDrawingQueue();
+        manager.UpdateDrawingQueue();
+        SDL_UnlockMutex(pipeline->getDrawingQueueMutex());
+        content->NotifySceneChanged();
+    }
+    // Drop converted meshes no longer in the scene to bound memory during editing.
+    std::unordered_set<std::string> used;
+    for(const auto& object : next.objects) used.insert(MeshFingerprint(*object.mesh));
+    auto& cache = StonefishMeshCache();
+    for(auto it = cache.begin(); it != cache.end();) it = used.contains(it->first) ? std::next(it) : cache.erase(it);
+    std::cout << "[blender_cpp] live scene: " << added << " added, " << replaced << " replaced, " << removed
+              << " removed, " << moved << " moved, " << prepared_looks.size() << " looks updated; clock="
+              << manager.getSimulationTime() << " (world/robot preserved)\n";
+}
+
 std::unordered_map<std::string, std::string> BuildScene(
     sf::SimulationManager& manager, const Scene& scene,
     const std::filesystem::path& config_path, const std::filesystem::path& data,
     const std::filesystem::path& blend) {
+    const auto validated = ReadSceneSettings(config_path, data);
     auto config = YAML::LoadFile(config_path.string());
     for (const auto& object : scene.objects) {
         if (!config["materials"][object.material] || !config["looks"][object.look])
@@ -276,6 +502,7 @@ std::unordered_map<std::string, std::string> BuildScene(
         medium->setParticles(ocean["particles"].as<bool>(true));
         auto current = ocean["current"]["velocity"];
         medium->AddVelocityField(new sf::Uniform(sf::Vector3(current[0].as<double>(), current[1].as<double>(), current[2].as<double>())));
+        medium->EnableCurrents();
     }
     manager.EnableAtmosphere();
     manager.getAtmosphere()->SetSunPosition(sun["azimuth"].as<double>(), sun["elevation"].as<double>());

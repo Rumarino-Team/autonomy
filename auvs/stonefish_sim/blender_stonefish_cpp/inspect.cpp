@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
             for (auto v : object.mesh->vertices) for (size_t i = 0; i < 3; ++i) { min[i] = std::min(min[i], v[i]); max[i] = std::max(max[i], v[i]); }
             size_t uv_corners = 0;
             for (const auto& face : object.mesh->face_uvs) uv_corners += face.size();
-            result.push_back({{"blender_name", object.blender_name}, {"name", object.name}, {"material", object.material},
+            result.push_back({{"blender_name", object.blender_name}, {"name", object.name}, {"id", object.id}, {"material", object.material},
                 {"look", object.look}, {"cls", object.cls}, {"position", object.position}, {"rotation", object.rotation},
                 {"scale", object.scale}, {"convex", object.convex}, {"vertices", object.mesh->vertices.size()},
                 {"faces", object.mesh->faces.size()}, {"uv_corners", uv_corners}, {"min", min}, {"max", max}});

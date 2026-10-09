@@ -248,6 +248,7 @@ Scene ReadScene(const std::filesystem::path& filename, const std::filesystem::pa
     Reader reader(*blend);
     Scene scene;
     std::set<std::string> entity_names;
+    std::set<std::string> entity_ids;
     std::map<std::tuple<uint64_t, double, double, double>, std::shared_ptr<const Mesh>> meshes;
     std::unordered_map<std::string, std::shared_ptr<const Mesh>> geometry;
     const double mesh_scale = config["meshes"]["scale"].as<double>(1.0);
@@ -294,7 +295,10 @@ Scene ReadScene(const std::filesystem::path& filename, const std::filesystem::pa
             const auto& fallback = known.at(name);
             object.name = fallback.name; object.material = fallback.material; object.look = fallback.look; object.cls = "scenery";
         }
+        if (object.name.starts_with("__hot_reload_")) Fail("reserved entity name: " + object.name);
         if (!entity_names.insert(object.name).second) Fail("duplicate entity name: " + object.name);
+        object.id = get("stonefish_id", object.name);
+        if (!entity_ids.insert(object.id).second) Fail("duplicate stonefish_id: " + object.id);
         auto loc = Scalar<std::array<float, 3>>(node.Field("loc").bytes);
         auto rot = Scalar<std::array<float, 3>>(node.Field("rot").bytes);
         auto size = Scalar<std::array<float, 3>>(node.Field("size").bytes);
@@ -316,7 +320,6 @@ Scene ReadScene(const std::filesystem::path& filename, const std::filesystem::pa
         object.mesh = it->second;
         scene.objects.push_back(std::move(object));
     }
-    if (scene.objects.empty()) Fail("no opted-in Stonefish meshes found");
     return scene;
 }
 
