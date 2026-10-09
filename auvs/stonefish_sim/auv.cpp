@@ -1,8 +1,5 @@
-#ifdef AUTONOMY_NATIVE_BLEND
 #include "blender_stonefish_cpp/build_scene.hpp"
-#else
-#include <Python.h>
-#endif
+#include "robot.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -10,7 +7,6 @@
 #include <math.h>
 
 #include "../../include/auv.h"
-#include "stonefish_c/include/stonefish_c.h"
 
 #include "Stonefish/actuators/Actuator.h"
 #include "Stonefish/actuators/Thruster.h"
@@ -159,8 +155,6 @@ std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& pa
     config.kPhysicsDt = sf::Scalar(1) / config.kStepsPerSecond;
     return config;
 }
-
-bool BuildRobot(SfWorld* world, const std::string& robot);
 
 namespace
 {
@@ -338,69 +332,8 @@ bool ProjectObjectBox(
     return box.bottom_right.x > box.top_left.x && box.bottom_right.y > box.top_left.y;
 }
 
-#ifndef BLENDER_STONEFISH_ROOT
-#define BLENDER_STONEFISH_ROOT "auvs/stonefish_sim"
-#endif
 #ifndef BLENDER_STONEFISH_CONFIG
-#define BLENDER_STONEFISH_CONFIG "auvs/stonefish_sim/blender_stonefish/config.yaml"
-#endif
-
-#ifndef AUTONOMY_NATIVE_BLEND
-bool RunBlendBuilder(SfWorld* world, const std::filesystem::path& blend, const std::filesystem::path& data)
-{
-    Dl_info info{};
-    if(dladdr(reinterpret_cast<void*>(&sf_world_bind), &info) == 0 || info.dli_fname == nullptr)
-    {
-        std::cerr << "[stonefish_sim] cannot locate the auv library for ctypes" << std::endl;
-        return false;
-    }
-    if(!Py_IsInitialized())
-    {
-        // The AUV library is dlopened RTLD_LOCAL, so Python extension modules
-        // cannot see libpython unless it is also on the global namespace.
-        Dl_info python_info{};
-        if(dladdr(reinterpret_cast<void*>(&Py_Initialize), &python_info) != 0 && python_info.dli_fname != nullptr)
-            dlopen(python_info.dli_fname, RTLD_NOW | RTLD_GLOBAL);
-        Py_Initialize();
-    }
-    const PyGILState_STATE gil = PyGILState_Ensure();
-    const std::string bootstrap = std::string("import sys\nsys.path.insert(0, \"") + BLENDER_STONEFISH_ROOT + "\")\n";
-    if(PyRun_SimpleString(bootstrap.c_str()) != 0)
-    {
-        PyErr_Print();
-        PyGILState_Release(gil);
-        std::cerr << "[stonefish_sim] failed to add blender_stonefish to sys.path" << std::endl;
-        return false;
-    }
-    PyObject* module = PyImport_ImportModule("blender_stonefish");
-    if(module == nullptr)
-    {
-        PyErr_Print();
-        PyGILState_Release(gil);
-        std::cerr << "[stonefish_sim] failed to import blender_stonefish" << std::endl;
-        return false;
-    }
-    PyObject* build = PyObject_GetAttrString(module, "build");
-    PyObject* result = PyObject_CallFunction(
-        build,
-        "Kssss",
-        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(world)),
-        info.dli_fname,
-        blend.c_str(),
-        BLENDER_STONEFISH_CONFIG,
-        data.c_str());
-    const bool ok = result != nullptr && PyLong_Check(result) && PyLong_AsLong(result) == 0;
-    if(!ok)
-        PyErr_Print();
-    Py_XDECREF(result);
-    Py_XDECREF(build);
-    Py_DECREF(module);
-    PyGILState_Release(gil);
-    if(!ok)
-        std::cerr << "[stonefish_sim] blend builder failed for " << blend.string() << std::endl;
-    return ok;
-}
-
+#define BLENDER_STONEFISH_CONFIG "auvs/stonefish_sim/stonefish_config.yaml"
 #endif
 
 glm::mat3 RotationAbout(const glm::vec3& axis, float angle)
@@ -451,18 +384,11 @@ public:
     {
     }
 
-    ~SimManager() override
-    {
-        sf_world_free(sceneWorld);
-    }
+    ~SimManager() override = default;
 
     void BuildScenario() override
     {
         std::unordered_map<std::string, ObjectCls> objectClasses;
-        sf_world_free(sceneWorld);
-        sceneWorld = sf_world_bind(this);
-        sf_world_set_data_dir(sceneWorld, dataPath.c_str());
-#ifdef AUTONOMY_NATIVE_BLEND
         blender_stonefish_cpp::Scene scene;
         if(pendingScene)
         {
@@ -478,10 +404,7 @@ public:
             RememberViewCamera(camera.name, camera.location.data(), camera.rotation.data());
         builtScene = std::move(scene);
         hasBuiltScene = true;
-        sf_world_free(sceneWorld);
-        sceneWorld = sf_world_bind(this);
-        sf_world_set_data_dir(sceneWorld, dataPath.c_str());
-        if(!BuildRobot(sceneWorld, robotName))
+        if(!BuildRobot(*this, dataPath, robotName))
             throw std::runtime_error("[stonefish_sim] failed to build robot " + robotName);
         for(const auto& [name, cls] : nativeClasses)
         {
@@ -490,39 +413,6 @@ public:
                 throw std::runtime_error("[stonefish_sim] unknown object class " + cls + " for " + name);
             objectClasses[name] = *mapped;
         }
-#else
-        if(!RunBlendBuilder(sceneWorld, blendPath, dataPath) || !BuildRobot(sceneWorld, robotName))
-        {
-            std::cerr << "[stonefish_sim] failed to build scenario from " << blendPath.string() << std::endl;
-            return;
-        }
-        viewCameras.clear();
-        const int camera_count = sf_world_view_camera_count(sceneWorld);
-        for(int i = 0; i < camera_count; ++i)
-        {
-            char name[256];
-            double location[3];
-            double rotation[3];
-            if(sf_world_view_camera_at(sceneWorld, i, name, sizeof(name), location, rotation) != 0)
-                continue;
-            RememberViewCamera(name, location, rotation);
-        }
-        const int count = sf_world_class_count(sceneWorld);
-        for(int i = 0; i < count; ++i)
-        {
-            char name[256];
-            char cls[64];
-            if(sf_world_class_at(sceneWorld, i, name, sizeof(name), cls, sizeof(cls)) != 0)
-                continue;
-            const auto mapped = ParseObjectClass(cls);
-            if(!mapped)
-            {
-                std::cerr << "[stonefish_sim] static object '" << name << "' has unknown cls '" << cls << "'" << std::endl;
-                continue;
-            }
-            objectClasses[name] = *mapped;
-        }
-#endif
 
         odometry = nullptr;
         have_odometry = false;
@@ -658,7 +548,6 @@ public:
     std::filesystem::path dataPath;
     std::filesystem::path blendPath;
     std::string robotName;
-    SfWorld* sceneWorld = nullptr;
     sf::Scalar trackingOkSeconds = std::numeric_limits<uint32_t>::max();;
     bool bboxOnlyInFrontOfCamera = false;
     bool have_odometry = false;
@@ -698,12 +587,10 @@ public:
         }
         viewCameras.push_back(std::move(camera));
     }
-#ifdef AUTONOMY_NATIVE_BLEND
     // Set by a reload before RestartScenario so BuildScenario does not parse the blend again.
     std::optional<blender_stonefish_cpp::Scene> pendingScene;
     blender_stonefish_cpp::Scene builtScene;
     bool hasBuiltScene = false;
-#endif
 };
 
 class SimApp : public sf::GraphicalSimulationApp
@@ -1142,7 +1029,6 @@ void ApplyRuntimeParams(SimulationContext* ctx, const PlatformConfig& loaded)
         ApplyViewCamera(ctx);
 }
 
-#ifdef AUTONOMY_NATIVE_BLEND
 bool SameVec(const blender_stonefish_cpp::Vec3& a, const blender_stonefish_cpp::Vec3& b)
 {
     for(size_t i = 0; i < a.size(); ++i)
@@ -1219,7 +1105,6 @@ std::optional<size_t> ApplyStaticPoses(
         update.entity->setTransform(update.transform);
     return updates.size();
 }
-#endif
 
 bool reloadScenario(SimulationContext* ctx)
 {
@@ -1251,7 +1136,6 @@ bool reloadScenario(SimulationContext* ctx)
     }
 
     const bool identity_changed = SceneIdentityChanged(ctx->config, *loaded);
-#ifdef AUTONOMY_NATIVE_BLEND
     const bool structural = identity_changed || (reasons & (kReloadYaml | kReloadTextures)) != 0;
     std::optional<blender_stonefish_cpp::Scene> decoded;
     if((reasons & (kReloadBlend | kReloadYaml)) != 0 || identity_changed)
@@ -1299,7 +1183,6 @@ bool reloadScenario(SimulationContext* ctx)
         ctx->sim->pendingScene = std::move(decoded);
     else if(ctx->sim->hasBuiltScene)
         ctx->sim->pendingScene = ctx->sim->builtScene;
-#endif
 
     ctx->config = *loaded;
     SimManager* sim = ctx->sim;
@@ -1328,7 +1211,6 @@ bool reloadScenario(SimulationContext* ctx)
     const bool keepTrackball = ctx->graphical != nullptr && sim->getTrackball() != nullptr;
     if(keepTrackball)
         sim->getTrackball()->getOrbit(savedCenter, savedRotation, savedRadius);
-#ifdef AUTONOMY_NATIVE_BLEND
     try { sim->RestartScenario(); }
     catch(const std::exception& ex)
     {
@@ -1336,9 +1218,6 @@ bool reloadScenario(SimulationContext* ctx)
         requestStop(0);
         return false;
     }
-#else
-    sim->RestartScenario();
-#endif
     if(keepTrackball && sim->getTrackball() != nullptr)
         sim->getTrackball()->setOrbit(savedCenter, savedRotation, savedRadius);
     if(!ctx->config.viewCamera.empty())
@@ -1380,10 +1259,8 @@ sf::HelperSettings DefaultHelperSettings()
 
 void auv_init(void)
 {
-#ifdef AUTONOMY_NATIVE_BLEND
     try
     {
-#endif
     auv_deinit();
     // SDL otherwise installs its own SIGINT handler and Ctrl+C never returns the terminal.
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -1422,14 +1299,12 @@ void auv_init(void)
         ApplyViewCamera(g_simulation_context);
     }
     startScenarioWatcher(g_simulation_context);
-#ifdef AUTONOMY_NATIVE_BLEND
     }
     catch(const std::exception& ex)
     {
         std::cerr << "[stonefish_sim] native initialization failed: " << ex.what() << std::endl;
         auv_deinit();
     }
-#endif
 }
 
 void auv_yield_until_next_frame(AuvFrame* frame)

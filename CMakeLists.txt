@@ -7,12 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(ExternalProject)
 
-find_package(Python3 COMPONENTS Development REQUIRED)
-
-option(AUTONOMY_BLEND_CPP "Build the alternative native C++ Blender importer" OFF)
-if(AUTONOMY_BLEND_CPP)
-  add_subdirectory(auvs/stonefish_sim/blender_stonefish_cpp)
-endif()
+add_subdirectory(auvs/stonefish_sim/blender_stonefish_cpp)
+option(AUTONOMY_BLEND_CPP "Also build the alternate native Blender target" OFF)
 
 # OFF builds the upstream vendor/stonefish submodule; ON builds the vendor/stonefish_rtx
 # fork with the OptiX path tracer and DLSS.
@@ -72,21 +68,6 @@ ExternalProject_Add(stonefish
 )
 endif()
 
-add_library(stonefish_c STATIC auvs/stonefish_sim/stonefish_c/src/stonefish_c.cpp)
-add_dependencies(stonefish_c stonefish)
-set_target_properties(stonefish_c PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(stonefish_c PUBLIC
-  "${CMAKE_CURRENT_SOURCE_DIR}/auvs/stonefish_sim/stonefish_c/include"
-  PRIVATE
-    "${STONEFISH_INCLUDE_ROOT}"
-    "${STONEFISH_INCLUDE_DIR}"
-)
-target_compile_definitions(stonefish_c PRIVATE
-  BT_EULER_DEFAULT_ZYX
-  BT_USE_DOUBLE_PRECISION
-  ${STONEFISH_EXTRA_DEFS}
-)
-
 include(CheckIncludeFileCXX)
 set(CMAKE_REQUIRED_FLAGS "-std=c++23")
 check_include_file_cxx(print AUTONOMY_HAS_STD_PRINT)
@@ -94,14 +75,8 @@ unset(CMAKE_REQUIRED_FLAGS)
 
 function(add_auv_sim target platform_config)
   add_library(${target} SHARED auvs/stonefish_sim/auv.cpp auvs/stonefish_sim/robot.cpp)
-  if(ARGC GREATER 2 AND ARGV2 STREQUAL "NATIVE_BLEND")
-    target_sources(${target} PRIVATE auvs/stonefish_sim/blender_stonefish_cpp/build_scene.cpp)
-    target_compile_definitions(${target} PRIVATE AUTONOMY_NATIVE_BLEND)
-    target_link_libraries(${target} PRIVATE stonefish_blend_reader)
-  else()
-    target_include_directories(${target} PRIVATE ${Python3_INCLUDE_DIRS})
-    target_link_libraries(${target} PRIVATE Python3::Python)
-  endif()
+  target_sources(${target} PRIVATE auvs/stonefish_sim/blender_stonefish_cpp/build_scene.cpp)
+  target_link_libraries(${target} PRIVATE stonefish_blend_reader)
   add_dependencies(${target} stonefish)
 
   target_include_directories(${target} PRIVATE
@@ -122,8 +97,7 @@ function(add_auv_sim target platform_config)
     ${STONEFISH_EXTRA_DEFS}
     SHADER_DIR_PATH="${STONEFISH_DIR}/share/${STONEFISH_LIB}/shaders/"
     AUV_PLATFORM_CONFIG="${platform_config}"
-    BLENDER_STONEFISH_ROOT="${CMAKE_SOURCE_DIR}/auvs/stonefish_sim"
-    BLENDER_STONEFISH_CONFIG="${CMAKE_SOURCE_DIR}/auvs/stonefish_sim/blender_stonefish/config.yaml"
+    BLENDER_STONEFISH_CONFIG="${CMAKE_SOURCE_DIR}/auvs/stonefish_sim/stonefish_config.yaml"
   )
 
   target_compile_options(${target} PRIVATE
@@ -135,7 +109,6 @@ function(add_auv_sim target platform_config)
   )
 
   target_link_libraries(${target} PRIVATE
-    stonefish_c
     ${STONEFISH_LIB}
     SDL2
     freetype
@@ -154,7 +127,7 @@ endfunction()
 
 add_auv_sim(auv_stonefish_sim "auvs/stonefish_sim/platform.json")
 if(AUTONOMY_BLEND_CPP)
-  add_auv_sim(auv_stonefish_cpp_sim "auvs/stonefish_sim/platform.json" NATIVE_BLEND)
+  add_auv_sim(auv_stonefish_cpp_sim "auvs/stonefish_sim/platform.json")
   add_executable(stonefish_blend_smoke
     auvs/stonefish_sim/blender_stonefish_cpp/smoke.cpp
     auvs/stonefish_sim/blender_stonefish_cpp/build_scene.cpp
@@ -165,7 +138,7 @@ if(AUTONOMY_BLEND_CPP)
   target_compile_definitions(stonefish_blend_smoke PRIVATE BT_EULER_DEFAULT_ZYX BT_USE_DOUBLE_PRECISION
     SHADER_DIR_PATH="${STONEFISH_DIR}/share/${STONEFISH_LIB}/shaders/" ${STONEFISH_EXTRA_DEFS})
   target_link_directories(stonefish_blend_smoke PRIVATE "${STONEFISH_DIR}/lib")
-  target_link_libraries(stonefish_blend_smoke PRIVATE stonefish_blend_reader stonefish_c ${STONEFISH_LIB} SDL2 freetype OpenGL GLX GLU gomp)
+  target_link_libraries(stonefish_blend_smoke PRIVATE stonefish_blend_reader ${STONEFISH_LIB} SDL2 freetype OpenGL GLX GLU gomp)
   set_target_properties(stonefish_blend_smoke PROPERTIES BUILD_RPATH "${STONEFISH_DIR}/lib")
   add_executable(stonefish_blend_plugin_smoke auvs/stonefish_sim/blender_stonefish_cpp/tests/plugin_smoke.cpp)
   target_include_directories(stonefish_blend_plugin_smoke PRIVATE "${CMAKE_SOURCE_DIR}/include")

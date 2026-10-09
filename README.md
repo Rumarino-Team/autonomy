@@ -18,13 +18,12 @@ zig build -Dstonefish run -- \
 ```
 
 
-## Native Blender importer
+## Blender scene loading
 
-An alternative C++ Blender importer calls Stonefish directly and is available
-as `libauv_stonefish_cpp_sim.so`. The existing Python importer is retained.
-Build it with `zig build -Dstonefish-cpp` and use the same vehicle settings.
-See [native Blender loader](auvs/stonefish_sim/blender_stonefish_cpp/README.md)
-for the already-built trial command, CMake setup and validation checks.
+The Stonefish simulator reads Blender scenes with CBlend and builds the
+environment through Stonefish's C++ API. Build it with `zig build -Dstonefish`
+and use the same vehicle settings. See [native Blender loader](auvs/stonefish_sim/blender_stonefish_cpp/README.md)
+for CMake setup and validation checks.
 
 ## MuJoCo
 

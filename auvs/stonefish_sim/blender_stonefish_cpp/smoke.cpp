@@ -1,5 +1,5 @@
 #include "build_scene.hpp"
-#include "../stonefish_c/include/stonefish_c.h"
+#include "../robot.hpp"
 #include <Stonefish/core/GraphicalSimulationApp.h>
 #include <Stonefish/core/SimulationManager.h>
 #include <Stonefish/core/Robot.h>
@@ -9,23 +9,16 @@
 #include <iostream>
 #include <stdexcept>
 
-bool BuildRobot(SfWorld*, const std::string&);
 class Manager : public sf::SimulationManager {
 public:
     Manager(const char* data, const char* config, const char* robot)
         : SimulationManager(360), data(data), config(config), robot(robot) {}
-    ~Manager() override { sf_world_free(world); }
     void BuildScenario() override {
-        sf_world_free(world);
-        world = nullptr;
         classes = blender_stonefish_cpp::BuildScene(*this, data / "pool_scene.blend", config, data);
-        world = sf_world_bind(this);
-        sf_world_set_data_dir(world, data.c_str());
-        if (!BuildRobot(world, robot)) throw std::runtime_error("robot construction failed");
+        if (!BuildRobot(*this, data, robot)) throw std::runtime_error("robot construction failed");
     }
     std::filesystem::path data, config;
     std::string robot;
-    SfWorld* world = nullptr;
     std::unordered_map<std::string, std::string> classes;
 };
 sf::RenderSettings Settings() {

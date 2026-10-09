@@ -19,7 +19,7 @@ FILES = {
     "proteus": REPO / "auvs/stonefish_sim/proteus.json",
     "bluerov2": REPO / "auvs/stonefish_sim/bluerov2.json",
     "girona500": REPO / "auvs/stonefish_sim/girona500.json",
-    "ocean": REPO / "auvs/stonefish_sim/blender_stonefish/config.yaml",
+    "ocean": REPO / "auvs/stonefish_sim/stonefish_config.yaml",
 }
 
 ROBOTS = ("hydrus", "proteus", "bluerov2", "girona500")

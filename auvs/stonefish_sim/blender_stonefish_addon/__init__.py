@@ -17,7 +17,7 @@ bl_info = {
     "category": "Object",
 }
 
-# Same mapping as blender_stonefish/builder.py KNOWN_MESHES.
+# Fallback metadata for pool meshes not stamped with custom properties.
 # (stonefish name, material, look, class, physics obj, visual obj, convex)
 POOL_MESHES = {
     "pool_tile": ("PoolShell", "ceramic", "pool_tile", "scenery", "models/pool_tile.obj", "models/pool_tile.obj", False),
@@ -46,7 +46,7 @@ _catalog = None
 
 
 def _config_path():
-    return Path(__file__).resolve().parent.parent / "blender_stonefish" / "config.yaml"
+    return Path(__file__).resolve().parent.parent / "stonefish_config.yaml"
 
 
 def _catalog_lists():
