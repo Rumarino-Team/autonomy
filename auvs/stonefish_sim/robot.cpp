@@ -178,6 +178,29 @@ public:
         return addPart(spec.part, solid);
     }
 
+    // Detailed photo geometry is independent of the unmeasured mass budget.
+    // Internal, massless parts contribute neither collision nor fluid forces.
+    int addAppearance(const char* name, const char* material, const char* look, const char* mesh)
+    {
+        if(robot_ == nullptr || compound_ == nullptr || linksReady_)
+            return Fail("appearance requires an unfinished compound body");
+        const auto visual = FullPath(mesh);
+        const auto proxy = FullPath("models/proteus_photo/appearance_proxy.obj");
+        if(!std::filesystem::is_regular_file(visual) || !std::filesystem::is_regular_file(proxy))
+            return Fail("Proteus appearance asset is missing; run create_proteus_model.py in Blender");
+        sf::PhysicsSettings physics;
+        physics.mode = sf::PhysicsMode::SUBMERGED;
+        physics.buoyancy = false;
+        physics.collisions = false;
+        auto* solid = new sf::Polyhedron(PartName(name), physics,
+            visual, 1.0, sf::I4(), proxy, 1.0, sf::I4(), material, look);
+        solid->ScalePhysicalPropertiesToArbitraryMass(0.0);
+        compound_->AddInternalPart(solid, sf::I4());
+        return 0;
+    }
+
+    void showAppearance() { compound_->setDisplayInternalParts(true); }
+
     int addThruster(const ThrusterSpec& spec)
     {
         if(FinalizeLinks() != 0)
@@ -691,6 +714,8 @@ bool BuildHydrusRobot(RobotBuilder& world)
     return true;
 }
 
+#include "proteus_appearance.inc"
+
 bool BuildProteusRobot(RobotBuilder& world)
 {
     const Pose identity = PoseAt(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -717,10 +742,15 @@ bool BuildProteusRobot(RobotBuilder& world)
            PoseAt(0.0, -0.135, -0.012, 1.5708, 0.0, 0.0)))
         return false;
 
+    if(!AddProteusAppearance(world))
+        return false;
+
     const double max_setpoint = 1000.0 / 60.0 * 2.0 * 3.14159265358979323846;
     const Pose mounts[] = {
-        PoseAt(0.246, 0.0, -0.03, 0.0, 0.0, 4.7123),
-        PoseAt(-0.246, 0.0, -0.03, 0.0, 0.0, 4.7123),
+        // Side pods sit below the blue rails in the photographs. Positions
+        // are provisional photo estimates; retain the existing thrust curve.
+        PoseAt(0.205, 0.0, 0.13, 0.0, 0.0, 4.7123),
+        PoseAt(-0.205, 0.0, 0.13, 0.0, 0.0, 4.7123),
         PoseAt(0.165, 0.265, 0.0, 0.0, -1.571, 0.0),
         PoseAt(-0.165, 0.265, 0.0, 0.0, -1.571, 0.0),
         PoseAt(0.165, -0.265, 0.0, 0.0, -1.571, 0.0),
@@ -737,8 +767,8 @@ bool BuildProteusRobot(RobotBuilder& world)
     for(int i = 0; i < 6; ++i)
     {
         if(!AddThruster(
-               world, names[i], "Proteus", mounts[i], 0.18, max_setpoint, 1, 1, "models/propeller.obj", 0.5, "pvc",
-               "propeller", 0.0, 0.0, 0.0, 0.48, 0.48, 0.05, 0.2))
+               world, names[i], "Proteus", mounts[i], 0.18, max_setpoint, 1, 1, "models/proteus_photo/propeller.obj", 1.0, "pvc",
+               "proteus_thrusters", 0.0, 0.0, 0.0, 0.48, 0.48, 0.05, 0.2))
             return false;
     }
 

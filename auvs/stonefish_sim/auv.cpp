@@ -1004,6 +1004,12 @@ public:
         }
     }
 
+    void stop()
+    {
+        StopSimulation();
+        Quit();
+    }
+
     void shutdown()
     {
         if(cleaned)
@@ -1040,6 +1046,12 @@ public:
         timeStep_ = timeStep;
         Init();
         StartSimulation();
+    }
+
+    void stop()
+    {
+        StopSimulation();
+        Quit();
     }
 
     void shutdown()
@@ -1636,7 +1648,19 @@ void auv_deinit(void)
 
     if(g_simulation_context->graphical != nullptr)
     {
+        g_simulation_context->graphical->stop();
         g_simulation_context->sim->destroyCameraPreview();
+    }
+    if(g_simulation_context->console != nullptr)
+    {
+        g_simulation_context->console->stop();
+    }
+    // Bodies now release their graphics objects during destruction. Keep the
+    // app, content manager and GL context alive until the scenario is gone.
+    delete g_simulation_context->sim;
+    g_simulation_context->sim = nullptr;
+    if(g_simulation_context->graphical != nullptr)
+    {
         g_simulation_context->graphical->shutdown();
         delete g_simulation_context->graphical;
     }
@@ -1645,7 +1669,6 @@ void auv_deinit(void)
         g_simulation_context->console->shutdown();
         delete g_simulation_context->console;
     }
-    delete g_simulation_context->sim;
 
     delete g_simulation_context;
     g_simulation_context = nullptr;
