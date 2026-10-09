@@ -13,6 +13,7 @@
 #include "Stonefish/core/ConsoleSimulationApp.h"
 #include "Stonefish/core/GraphicalSimulationApp.h"
 #include "Stonefish/core/Robot.h"
+#include "Stonefish/core/SimulationApp.h"
 #include "Stonefish/core/SimulationManager.h"
 #include "Stonefish/entities/Entity.h"
 #include "Stonefish/entities/MovingEntity.h"
@@ -24,6 +25,7 @@
 #include "Stonefish/sensors/Sensor.h"
 #include "Stonefish/sensors/ScalarSensor.h"
 #include "Stonefish/sensors/vision/Camera.h"
+#include "Stonefish/sensors/vision/ColorCamera.h"
 
 
 #include <algorithm>
@@ -384,7 +386,47 @@ public:
     {
     }
 
-    ~SimManager() override = default;
+    ~SimManager() override
+    {
+        destroyCameraPreview();
+    }
+
+    void destroyCameraPreview()
+    {
+        if(cameraPreviewEventWatchInstalled)
+        {
+            SDL_DelEventWatch(WatchCameraPreviewEvent, this);
+            cameraPreviewEventWatchInstalled = false;
+        }
+        if(cameraPreviewContext != nullptr)
+        {
+            if(cameraPreviewWindow != nullptr)
+                SDL_GL_MakeCurrent(cameraPreviewWindow, cameraPreviewContext);
+            if(cameraPreviewTexture != 0)
+                glDeleteTextures(1, &cameraPreviewTexture);
+            if(cameraPreviewBuffer != 0)
+                glDeleteBuffers(1, &cameraPreviewBuffer);
+            if(cameraPreviewVao != 0)
+                glDeleteVertexArrays(1, &cameraPreviewVao);
+            if(cameraPreviewProgram != 0)
+                glDeleteProgram(cameraPreviewProgram);
+            if(mainGLWindow != nullptr && mainGLContext != nullptr)
+                SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_GL_DeleteContext(cameraPreviewContext);
+            cameraPreviewContext = nullptr;
+        }
+        if(cameraPreviewWindow != nullptr)
+        {
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+        }
+        cameraPreviewTexture = 0;
+        cameraPreviewBuffer = 0;
+        cameraPreviewVao = 0;
+        cameraPreviewProgram = 0;
+        mainGLWindow = nullptr;
+        mainGLContext = nullptr;
+    }
 
     void BuildScenario() override
     {
@@ -447,6 +489,33 @@ public:
             }
         }
 
+        if(auto* colorCamera = dynamic_cast<sf::ColorCamera*>(camera))
+        {
+            colorCamera->InstallNewDataHandler([this](sf::ColorCamera* source) {
+                const auto* pixels = static_cast<const uint8_t*>(source->getImageDataPointer());
+                unsigned int width = 0;
+                unsigned int height = 0;
+                source->getResolution(width, height);
+                if(pixels == nullptr || width == 0 || height == 0)
+                    return;
+
+                std::lock_guard<std::mutex> lock(cameraPreviewFrameMutex);
+                cameraPreviewWidth = width;
+                cameraPreviewHeight = height;
+                const size_t rowBytes = static_cast<size_t>(width) * 3;
+                const size_t sourceStride = (rowBytes + 3u) & ~size_t(3u);
+                cameraPreviewFrame.resize(rowBytes * height);
+                for(unsigned int row = 0; row < height; ++row)
+                    std::memcpy(
+                        cameraPreviewFrame.data() + static_cast<size_t>(row) * rowBytes,
+                        pixels + static_cast<size_t>(row) * sourceStride,
+                        rowBytes);
+                cameraPreviewFrameDirty.store(true);
+            });
+            if(sf::SimulationApp::getApp() != nullptr && sf::SimulationApp::getApp()->hasGraphics())
+                createCameraPreviewWindow();
+        }
+
         tracked_objects.clear();
         for(unsigned int i = 0; sf::Entity* entity = getEntity(i); ++i)
         {
@@ -478,6 +547,46 @@ public:
         const uint8_t count = std::min(thrustor_values_len, static_cast<uint8_t>(thrusters.size()));
         for(uint8_t i = 0; i < count; ++i)
             thrusters[i]->setSetpoint(thrustor_values[i]);
+    }
+
+    void presentCameraPreview()
+    {
+        if(cameraPreviewCloseRequested.exchange(false))
+        {
+            destroyCameraPreview();
+            return;
+        }
+        if(cameraPreviewWindow == nullptr)
+            return;
+        if(!cameraPreviewFrameDirty.exchange(false))
+            return;
+
+        std::lock_guard<std::mutex> lock(cameraPreviewFrameMutex);
+        if(cameraPreviewFrame.empty() || cameraPreviewWidth == 0 || cameraPreviewHeight == 0)
+            return;
+
+        if(SDL_GL_MakeCurrent(cameraPreviewWindow, cameraPreviewContext) != 0)
+            return;
+        glViewport(0, 0, static_cast<GLsizei>(cameraPreviewWidth), static_cast<GLsizei>(cameraPreviewHeight));
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(cameraPreviewProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, cameraPreviewTexture);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGB8,
+            static_cast<GLsizei>(cameraPreviewWidth),
+            static_cast<GLsizei>(cameraPreviewHeight),
+            0,
+            GL_RGB,
+            GL_UNSIGNED_BYTE,
+            cameraPreviewFrame.data());
+        glBindVertexArray(cameraPreviewVao);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        SDL_GL_SwapWindow(cameraPreviewWindow);
+        SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
     }
 
     AuvFrame getAuvFrame()
@@ -559,6 +668,21 @@ public:
     bool logged_tracking_loss = false;
     std::vector<TrackedObject> tracked_objects;
     std::vector<sf::Thruster*> thrusters;
+    SDL_Window* cameraPreviewWindow = nullptr;
+    SDL_Window* mainGLWindow = nullptr;
+    SDL_GLContext mainGLContext = nullptr;
+    SDL_GLContext cameraPreviewContext = nullptr;
+    GLuint cameraPreviewTexture = 0;
+    GLuint cameraPreviewBuffer = 0;
+    GLuint cameraPreviewVao = 0;
+    GLuint cameraPreviewProgram = 0;
+    std::atomic<bool> cameraPreviewCloseRequested{false};
+    std::atomic<bool> cameraPreviewFrameDirty{false};
+    bool cameraPreviewEventWatchInstalled = false;
+    std::mutex cameraPreviewFrameMutex;
+    std::vector<uint8_t> cameraPreviewFrame;
+    unsigned int cameraPreviewWidth = 0;
+    unsigned int cameraPreviewHeight = 0;
     struct ViewCamera
     {
         std::string name;
@@ -567,6 +691,135 @@ public:
         glm::quat rotation{1.f, 0.f, 0.f, 0.f};
     };
     std::vector<ViewCamera> viewCameras;
+
+    static int WatchCameraPreviewEvent(void* userdata, SDL_Event* event)
+    {
+        auto* self = static_cast<SimManager*>(userdata);
+        if(self != nullptr && self->cameraPreviewWindow != nullptr
+           && event->type == SDL_WINDOWEVENT
+           && event->window.event == SDL_WINDOWEVENT_CLOSE
+           && event->window.windowID == SDL_GetWindowID(self->cameraPreviewWindow))
+            self->cameraPreviewCloseRequested.store(true);
+        return 1;
+    }
+
+    void createCameraPreviewWindow()
+    {
+        if(cameraPreviewWindow != nullptr)
+            return;
+        mainGLWindow = SDL_GL_GetCurrentWindow();
+        mainGLContext = SDL_GL_GetCurrentContext();
+        const std::string title = robotName + " Camera";
+        cameraPreviewWindow = SDL_CreateWindow(
+            title.c_str(),
+            SDL_WINDOWPOS_UNDEFINED,
+            SDL_WINDOWPOS_UNDEFINED,
+            static_cast<int>(image_width),
+            static_cast<int>(image_height),
+            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+        if(cameraPreviewWindow == nullptr)
+        {
+            std::cerr << "[stonefish_sim] could not create camera preview window: " << SDL_GetError() << std::endl;
+            return;
+        }
+        cameraPreviewContext = SDL_GL_CreateContext(cameraPreviewWindow);
+        if(cameraPreviewContext == nullptr)
+        {
+            std::cerr << "[stonefish_sim] could not create camera preview context: " << SDL_GetError() << std::endl;
+            SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+            return;
+        }
+        static constexpr char vertexShaderSource[] =
+            "#version 430 core\n"
+            "layout(location=0) in vec2 position;\n"
+            "layout(location=1) in vec2 texCoordIn;\n"
+            "out vec2 texCoord;\n"
+            "void main(){ gl_Position=vec4(position,0.0,1.0); texCoord=texCoordIn; }\n";
+        static constexpr char fragmentShaderSource[] =
+            "#version 430 core\n"
+            "in vec2 texCoord;\n"
+            "uniform sampler2D cameraImage;\n"
+            "out vec4 color;\n"
+            "void main(){ color=vec4(texture(cameraImage,texCoord).rgb,1.0); }\n";
+        auto compileShader = [](GLenum type, const char* source) -> GLuint {
+            const GLuint shader = glCreateShader(type);
+            glShaderSource(shader, 1, &source, nullptr);
+            glCompileShader(shader);
+            GLint compiled = GL_FALSE;
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+            if(compiled == GL_FALSE)
+            {
+                glDeleteShader(shader);
+                return 0;
+            }
+            return shader;
+        };
+        const GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexShaderSource);
+        const GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
+        if(vertexShader == 0 || fragmentShader == 0)
+        {
+            std::cerr << "[stonefish_sim] could not compile camera preview shaders" << std::endl;
+            if(vertexShader != 0)
+                glDeleteShader(vertexShader);
+            if(fragmentShader != 0)
+                glDeleteShader(fragmentShader);
+            SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_GL_DeleteContext(cameraPreviewContext);
+            cameraPreviewContext = nullptr;
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+            return;
+        }
+        cameraPreviewProgram = glCreateProgram();
+        glAttachShader(cameraPreviewProgram, vertexShader);
+        glAttachShader(cameraPreviewProgram, fragmentShader);
+        glLinkProgram(cameraPreviewProgram);
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(cameraPreviewProgram, GL_LINK_STATUS, &linked);
+        if(linked == GL_FALSE)
+        {
+            std::cerr << "[stonefish_sim] could not link camera preview shader program" << std::endl;
+            glDeleteProgram(cameraPreviewProgram);
+            cameraPreviewProgram = 0;
+            SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_GL_DeleteContext(cameraPreviewContext);
+            cameraPreviewContext = nullptr;
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+            return;
+        }
+        static constexpr GLfloat vertices[] = {
+            -1.f, -1.f, 0.f, 1.f,
+             1.f, -1.f, 1.f, 1.f,
+             1.f,  1.f, 1.f, 0.f,
+            -1.f, -1.f, 0.f, 1.f,
+             1.f,  1.f, 1.f, 0.f,
+            -1.f,  1.f, 0.f, 0.f,
+        };
+        glGenVertexArrays(1, &cameraPreviewVao);
+        glBindVertexArray(cameraPreviewVao);
+        glGenBuffers(1, &cameraPreviewBuffer);
+        glBindBuffer(GL_ARRAY_BUFFER, cameraPreviewBuffer);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), nullptr);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), reinterpret_cast<void*>(2 * sizeof(GLfloat)));
+        glGenTextures(1, &cameraPreviewTexture);
+        glBindTexture(GL_TEXTURE_2D, cameraPreviewTexture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glUseProgram(cameraPreviewProgram);
+        glUniform1i(glGetUniformLocation(cameraPreviewProgram, "cameraImage"), 0);
+        SDL_GL_SetSwapInterval(0);
+        SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+        SDL_AddEventWatch(WatchCameraPreviewEvent, this);
+        cameraPreviewEventWatchInstalled = true;
+    }
 
     void RememberViewCamera(const std::string& name, const double location[3], const double rotation[3])
     {
@@ -1322,7 +1575,10 @@ void auv_yield_until_next_frame(AuvFrame* frame)
 
     g_simulation_context->sim->StepSimulation(g_simulation_context->config.kPhysicsDt);
     if(g_simulation_context->graphical != nullptr)
+    {
         g_simulation_context->graphical->updateGraphics();
+        g_simulation_context->sim->presentCameraPreview();
+    }
     g_simulation_context->realtime.wait(g_simulation_context->sim->getSimulationTime());
 
     const bool finished =
@@ -1369,6 +1625,7 @@ void auv_deinit(void)
 
     if(g_simulation_context->graphical != nullptr)
     {
+        g_simulation_context->sim->destroyCameraPreview();
         g_simulation_context->graphical->shutdown();
         delete g_simulation_context->graphical;
     }
