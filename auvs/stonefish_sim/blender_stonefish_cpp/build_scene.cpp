@@ -410,7 +410,7 @@ void UpdateScene(sf::SimulationManager& manager, const Scene& previous, const Sc
     // Vacate the old names first, allowing swaps/renames in one Blender save.
     for(auto& [id, entity] : live)
         if(!next_ids.contains(id) || replacements.contains(id)) {
-            manager.RemoveStaticEntity(entity); delete entity; entity = nullptr;
+            manager.RemoveStaticEntity(entity); entity->ReleasePhysics(); delete entity; entity = nullptr;
         } else entity->Rename("__hot_reload_live__");
     size_t added = 0, replaced = 0, removed = 0, moved = 0;
     for(const auto& [id, prior] : old) if(!next_ids.contains(id)) ++removed;
@@ -443,7 +443,6 @@ void UpdateScene(sf::SimulationManager& manager, const Scene& previous, const Sc
         pipeline->PurgeSelectedDrawingQueue();
         manager.UpdateDrawingQueue();
         SDL_UnlockMutex(pipeline->getDrawingQueueMutex());
-        content->NotifySceneChanged();
     }
     // Drop converted meshes no longer in the scene to bound memory during editing.
     std::unordered_set<std::string> used;

@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (ctx.frame.@"error" != .none) continue;
         std.log.info("succesfully completed mission", .{});
-        break;
+        // break;
+        try std.Io.sleep(init.io, .fromSeconds(10), .awake);
     }
 }

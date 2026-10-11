@@ -121,6 +121,9 @@ function(add_auv_sim target platform_config)
 
   set_target_properties(${target} PROPERTIES
     BUILD_RPATH "${STONEFISH_DIR}/lib"
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "${STONEFISH_DIR}/lib"
+    INSTALL_RPATH_USE_LINK_PATH FALSE
   )
 
   install(TARGETS ${target})
