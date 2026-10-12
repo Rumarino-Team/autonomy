@@ -30,6 +30,18 @@ typedef struct {
 } AuvObject;
 
 #define AUV_FRAME_MAX_OBJECTS 128
+#define AUV_ABI_VERSION 2
+// Optional geometry extension; it does not change AuvFrame or ABI version 2.
+#define AUV_MAX_THRUSTERS 8
+typedef struct {
+  MathVector3f position;
+  MathVector3f direction;
+} AuvThrusterMount;
+typedef struct {
+  MathVector3f center_of_mass;
+  AuvThrusterMount mounts[AUV_MAX_THRUSTERS];
+  uint8_t len;
+} AuvThrusterGeometry;
 typedef struct {
   AuvObject objects[AUV_FRAME_MAX_OBJECTS];
   uint8_t objects_len;
@@ -45,12 +57,26 @@ typedef struct {
   uint32_t image_height;
   float pressure_depth;
   bool pressure_depth_ok;
+  // Sensor timestamps share the frame timestamp's clock. Zero means absent.
+  uint64_t position_timestamp;
+  uint64_t imu_timestamp;
+  uint64_t pressure_timestamp;
+  uint64_t observations_timestamp;
+  bool imu_ok;
+  bool gyro_ok;
+  // Increment whenever the localization coordinate frame is reset.
+  uint32_t localization_epoch;
 } AuvFrame;
 
+uint32_t auv_abi_version(void);
 void auv_init(void);
 void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
 void auv_deinit(void);
+// Optional export. Geometry is in the same body frame as camera_pose, ordered
+// exactly like auv_set_thrustor_values. Direction denotes positive physical
+// thrust, not positive motor command. Query after auv_init.
+bool auv_get_thruster_geometry(AuvThrusterGeometry *geometry);
 
 #ifdef __cplusplus
 

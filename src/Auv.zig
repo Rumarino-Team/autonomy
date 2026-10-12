@@ -45,8 +45,27 @@ pub const Frame = extern struct {
     image_height: u32,
     pressure_depth: f32,
     pressure_depth_ok: bool,
+    position_timestamp: u64,
+    imu_timestamp: u64,
+    pressure_timestamp: u64,
+    observations_timestamp: u64,
+    imu_ok: bool,
+    gyro_ok: bool,
+    localization_epoch: u32,
 };
 
+pub const abi_version = c.AUV_ABI_VERSION;
+pub const ThrusterMount = extern struct {
+    position: math.Vector3f,
+    direction: math.Vector3f,
+};
+pub const ThrusterGeometry = extern struct {
+    center_of_mass: math.Vector3f,
+    mounts: [math.max_thrusters]ThrusterMount,
+    len: u8,
+};
+pub const ThrusterGeometryFunc = fn (geometry: *ThrusterGeometry) callconv(.c) bool;
+pub const AbiVersionFunc = fn () callconv(.c) u32;
 pub const InitFunc = fn () callconv(.c) void;
 pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
@@ -58,6 +77,7 @@ init: *const InitFunc,
 yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
 setThrustorValues: *const SetThrustorValuesFunc,
 deinit: *const DeinitFunc,
+getThrusterGeometry: ?*const ThrusterGeometryFunc = null,
 
 // below I'm double checking the ABI matches
 fn assertSameLayout(comptime Zig: type, comptime C: type) void {
@@ -145,6 +165,8 @@ comptime {
     assertSameLayout(Point2u, c.AuvPoint2u);
     assertSameLayout(Object2d, c.AuvObject2d);
     assertSameLayout(Frame, c.AuvFrame);
+    assertSameLayout(ThrusterMount, c.AuvThrusterMount);
+    assertSameLayout(ThrusterGeometry, c.AuvThrusterGeometry);
 
     assertSameFunctionLayout(InitFunc, c.AuvInitFunc);
     assertSameFunctionLayout(YieldUntilNextFrameFunc, c.AuvYieldUntilNextFrameFunc);

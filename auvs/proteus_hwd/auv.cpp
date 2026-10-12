@@ -54,6 +54,7 @@ static bool detection_enabled = false;
 static uint64_t last_timestamp = 0;
 static float surface_pressure_hpa = 0.f;
 static bool surface_pressure_set = false;
+static uint32_t localization_epoch = 0;
 static constexpr float kWaterDensity = 997.0f;
 static constexpr float kGravity = 9.80665f;
 
@@ -66,19 +67,14 @@ static int map_class(const Config &config, int label);
   std::exit(EXIT_FAILURE);
 }
 
-static uint64_t now_ns() {
-  timespec now{};
-  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-    fail("monotonic clock failed");
-  return static_cast<uint64_t>(now.tv_sec) * 1000000000ULL + now.tv_nsec;
-}
-
 static void check(sl::ERROR_CODE error, const char *operation) {
   if (error != sl::ERROR_CODE::SUCCESS) {
     std::fprintf(stderr, "[zed] %s: %s\n", operation, sl::toString(error).c_str());
     fail("SDK operation failed");
   }
 }
+
+uint32_t auv_abi_version(void) { return AUV_ABI_VERSION; }
 
 void auv_init(void) {
   try {
@@ -98,6 +94,7 @@ void auv_init(void) {
     sl::PositionalTrackingParameters tracking;
     tracking.enable_area_memory = true;
     check(zed.enablePositionalTracking(tracking), "enable positional tracking");
+    ++localization_epoch;
 
     if (*config.onnx) {
       sl::ObjectDetectionParameters detection;
@@ -129,6 +126,8 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     std::fprintf(stderr, "Error Zed has not been initialized yet and we dont have our first grabbed frame\n");
     return;
   }
+  *frame = {};
+  frame->localization_epoch = localization_epoch;
 
   sl::RuntimeParameters runtime;
   runtime.measure3D_reference_frame = sl::REFERENCE_FRAME::WORLD;
@@ -153,6 +152,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     tracking = zed.getPosition(pose, sl::REFERENCE_FRAME::WORLD);
     frame->timestamp = zed.getTimestamp(sl::TIME_REFERENCE::IMAGE).getNanoseconds();
     frame->tracking_ok = (tracking == sl::POSITIONAL_TRACKING_STATE::OK);
+    frame->position_timestamp = frame->tracking_ok ? pose.timestamp.getNanoseconds() : 0;
     translation = pose.getTranslation();
     orientation = pose.getOrientation();
     frame->camera_pose.pos.buf[0] = pose_flip[0] * translation.tx;
@@ -175,11 +175,13 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
 
     if (zed.getSensorsData(sensors_data, sl::TIME_REFERENCE::IMAGE) == sl::ERROR_CODE::SUCCESS) {
       frame->accel.buf[0] = sensors_data.imu.linear_acceleration.x;
-      frame->accel.buf[1] = sensors_data.imu.linear_acceleration.y;
-      frame->accel.buf[2] = sensors_data.imu.linear_acceleration.z;
-      frame->gyro.buf[0] = sensors_data.imu.angular_velocity.x;
-      frame->gyro.buf[1] = sensors_data.imu.angular_velocity.y;
-      frame->gyro.buf[2] = sensors_data.imu.angular_velocity.z;
+      frame->accel.buf[1] = -sensors_data.imu.linear_acceleration.y;
+      frame->accel.buf[2] = -sensors_data.imu.linear_acceleration.z;
+      // SDK angular velocity is degrees/s. Match the mission frame's axis flip.
+      constexpr float radians = 3.14159265358979323846f / 180.0f;
+      frame->gyro.buf[0] = sensors_data.imu.angular_velocity.x * radians;
+      frame->gyro.buf[1] = -sensors_data.imu.angular_velocity.y * radians;
+      frame->gyro.buf[2] = -sensors_data.imu.angular_velocity.z * radians;
 
       imu_orientation = sensors_data.imu.pose.getOrientation();
       imu_quat_length = std::sqrt(imu_orientation.ox * imu_orientation.ox +
@@ -187,9 +189,13 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
                                   imu_orientation.oz * imu_orientation.oz +
                                   imu_orientation.ow * imu_orientation.ow);
       frame->imu_quat.buf[0] = static_cast<float>(imu_orientation.ox / imu_quat_length);
-      frame->imu_quat.buf[1] = static_cast<float>(imu_orientation.oy / imu_quat_length);
-      frame->imu_quat.buf[2] = static_cast<float>(imu_orientation.oz / imu_quat_length);
+      frame->imu_quat.buf[1] = static_cast<float>(-imu_orientation.oy / imu_quat_length);
+      frame->imu_quat.buf[2] = static_cast<float>(-imu_orientation.oz / imu_quat_length);
       frame->imu_quat.buf[3] = static_cast<float>(imu_orientation.ow / imu_quat_length);
+      frame->imu_ok = sensors_data.imu.is_available && imu_quat_length > 1e-6;
+      frame->gyro_ok = sensors_data.imu.is_available &&
+          std::isfinite(frame->gyro.buf[0]) && std::isfinite(frame->gyro.buf[1]) && std::isfinite(frame->gyro.buf[2]);
+      frame->imu_timestamp = frame->imu_ok ? sensors_data.imu.timestamp.getNanoseconds() : 0;
 
       frame->pressure_depth_ok = false;
       if (sensors_data.barometer.is_available) {
@@ -202,6 +208,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
         if (delta_pa > 0.0f) {
           frame->pressure_depth = delta_pa / (kWaterDensity * kGravity);
           frame->pressure_depth_ok = true;
+          frame->pressure_timestamp = sensors_data.barometer.timestamp.getNanoseconds();
         }
       }
     }
@@ -211,7 +218,10 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     if (detection_enabled)
       customObjectError = zed.retrieveCustomObjects(objects, object_params);
     if (detection_enabled && customObjectError == sl::ERROR_CODE::SUCCESS) {
+      frame->observations_timestamp = objects.timestamp.getNanoseconds();
       for (const auto &object : objects.object_list) {
+        const int cls = map_class(config, object.raw_label);
+        if (cls < 0 || object.id < 0) continue;
         if (frame->objects_len < AUV_FRAME_MAX_OBJECTS) {
           double low[3] = {INFINITY, INFINITY, INFINITY};
           double high[3] = {-INFINITY, -INFINITY, -INFINITY};
@@ -225,7 +235,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
 
           const uint8_t i = frame->objects_len;
           frame->objects[i].id = static_cast<uint32_t>(object.id);
-          frame->objects[i].cls = static_cast<AuvObjectCls>(object.raw_label);
+          frame->objects[i].cls = static_cast<AuvObjectCls>(cls);
           frame->objects[i].bbox = {};
           frame->objects[i].bbox.pose.quat.buf[3] = 1;
           const float flip[] = {1, -1, -1};
@@ -247,7 +257,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
           frame->objects2d[j].bottom_right.x = bbox[2].x;
           frame->objects2d[j].bottom_right.y = bbox[2].y;
           frame->objects2d[j].id = static_cast<uint32_t>(object.id);
-          frame->objects2d[j].cls = static_cast<AuvObjectCls>(object.raw_label);
+          frame->objects2d[j].cls = static_cast<AuvObjectCls>(cls);
           frame->objects2d_len++;
         }
       }

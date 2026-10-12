@@ -5,51 +5,6 @@ pub const Vector3f = @Vector(3, f32);
 pub const Vector6f = @Vector(6, f32);
 pub const Quaternionf = @Vector(4, f32);
 
-/// Preserve the current heading while the XY goal is changing or still far
-/// away. Once reached, use the latest goal yaw until another XY goal arrives.
-pub fn targetYaw(
-    last_xy_goal: ?Vector2f,
-    held_yaw: ?f32,
-    xy_reached: bool,
-    goal: Vector6f,
-    xy_distance: f32,
-    current_yaw: f32,
-    arrival_radius: f32,
-) struct {
-    yaw: f32,
-    last_xy_goal: ?Vector2f,
-    held_yaw: ?f32,
-    xy_reached: bool,
-} {
-    const xy_goal: Vector2f = .{ goal[0], goal[1] };
-    const changed = if (last_xy_goal) |last|
-        xy_goal[0] != last[0] or xy_goal[1] != last[1]
-    else
-        false;
-    var next_held_yaw = held_yaw;
-    var next_xy_reached = xy_reached;
-
-    if (changed) {
-        if (next_xy_reached) next_held_yaw = current_yaw;
-        next_xy_reached = false;
-    }
-    if (!next_xy_reached and xy_distance <= arrival_radius) {
-        next_xy_reached = true;
-        next_held_yaw = null;
-    }
-    const target_yaw = if (next_xy_reached) goal[5] else blk: {
-        if (next_held_yaw == null) next_held_yaw = current_yaw;
-        break :blk next_held_yaw.?;
-    };
-
-    return .{
-        .yaw = target_yaw,
-        .last_xy_goal = xy_goal,
-        .held_yaw = next_held_yaw,
-        .xy_reached = next_xy_reached,
-    };
-}
-
 pub const Pose = extern struct {
     pos: Vector3f,
     quat: Quaternionf,
@@ -109,12 +64,12 @@ pub inline fn quaternionConjugate(q: Quaternionf) Quaternionf {
 }
 
 pub inline fn quaternionMul(a: Quaternionf, b: Quaternionf) Quaternionf {
-    const av: Vector3f = a[0..3].*;
-    const bv: Vector3f = b[0..3].*;
+    const av: Vector3f = .{ a[0], a[1], a[2] };
+    const bv: Vector3f = .{ b[0], b[1], b[2] };
 
     const xyz =
-        a[3] * bv +
-        b[3] * av +
+        @as(Vector3f, @splat(a[3])) * bv +
+        @as(Vector3f, @splat(b[3])) * av +
         cross3f(av, bv);
 
     const w = a[3] * b[3] - dot3f(av, bv);
@@ -147,6 +102,30 @@ pub inline fn quaternionToEuler(q: Quaternionf) Vector3f {
     const yaw: f32 = std.math.atan2(siny_cosp, cosy_cosp);
 
     return .{ roll, pitch, yaw };
+}
+
+pub fn quaternionFromEuler(angles: Vector3f) Quaternionf {
+    const roll = angles[0] * 0.5;
+    const pitch = angles[1] * 0.5;
+    const yaw = angles[2] * 0.5;
+    const sr = @sin(roll);
+    const cr = @cos(roll);
+    const sp = @sin(pitch);
+    const cp = @cos(pitch);
+    const sy = @sin(yaw);
+    const cy = @cos(yaw);
+    return .{ sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy };
+}
+
+/// Shortest rotation vector, expressed in the current body frame. q and -q
+/// describe the same attitude; canonicalizing the sign prevents unwinding.
+pub fn quaternionError(current: Quaternionf, desired: Quaternionf) Vector3f {
+    var error_q = normalize4f(quaternionMul(quaternionConjugate(normalize4f(current)), normalize4f(desired)));
+    if (error_q[3] < 0) error_q = -error_q;
+    const vector: Vector3f = .{ error_q[0], error_q[1], error_q[2] };
+    const length = length3f(vector);
+    if (length < 0.00001) return vector * @as(Vector3f, @splat(2));
+    return vector * @as(Vector3f, @splat(2 * std.math.atan2(length, error_q[3]) / length));
 }
 
 pub inline fn wrapAngle(angle: f32) f32 {
@@ -291,28 +270,27 @@ pub fn pidWrench(
 ///   f_body = R(rot)⁻¹ · f_world = R(conjugate(rot)) · f_world
 ///
 /// Angular part of `wrench` is not re-rotated here; roll gets a sign fix for TAM.
-/// `yaw_error` is err[5] (heading error); if |yaw_error| > gate, body X/Y force is
-/// zeroed so the vehicle turns before surging.
+/// The caller supplies horizontal translation_scale in [0, 1], independently
+/// of yaw torque. This permits strafing and rotating at the same time.
 ///
-/// Returns TAM input: [Fx_body, Fy_body, Fz, Mx, My, Mz].
+/// Legacy helper returning TAM input with all force components in body axes:
+/// [Fx_body, Fy_body, Fz_body, Mx, My, Mz]. The new controller/allocator uses a
+/// physical body wrench directly; the legacy roll sign belongs only to TAM.
 pub fn wrenchToThrusterInput(
     wrench: Vector6f,
     orientation: Quaternionf,
-    yaw_error: f32,
-    close_enough_yaw_gate: f32,
+    translation_scale: f32,
 ) Vector6f {
     const rot = normalize4f(orientation);
     const world_force: Vector3f = .{ wrench[0], wrench[1], wrench[2] };
     const rotated = quaternionRotate(quaternionConjugate(rot), world_force);
     var body_force = rotated;
-    if (@abs(yaw_error) > close_enough_yaw_gate) {
-        body_force[0] = 0.0;
-        body_force[1] = 0.0;
-    }
+    body_force[0] *= std.math.clamp(translation_scale, 0, 1);
+    body_force[1] *= std.math.clamp(translation_scale, 0, 1);
     return .{
         body_force[0],
         body_force[1],
-        wrench[2],
+        body_force[2],
         -wrench[3],
         wrench[4],
         wrench[5],
@@ -329,4 +307,19 @@ pub fn debug6f(comptime s: []const u8, v: Vector6f) void {
     std.log.debug(s ++ " {{ {d:5.2} {d:5.2} {d:5.2} {d:5.2} {d:5.2} {d:5.2} }}", .{
         v[0], v[1], v[2], v[3], v[4], v[5],
     });
+}
+
+test "world translation rotates into body axes while yaw torque remains independent" {
+    const half = @as(f32, std.math.pi / 4.0);
+    const q: Quaternionf = .{ 0, 0, @sin(half), @cos(half) };
+    const wrench: Vector6f = .{ 2, 0, 3, 0, 0, 1 };
+    const simultaneous = wrenchToThrusterInput(wrench, q, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), simultaneous[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -2), simultaneous[1], 1e-5);
+    try std.testing.expectEqual(@as(f32, 1), simultaneous[5]);
+    const gated = wrenchToThrusterInput(wrench, q, 0);
+    try std.testing.expectEqual(@as(f32, 0), gated[0]);
+    try std.testing.expectEqual(@as(f32, 0), gated[1]);
+    try std.testing.expectEqual(@as(f32, 3), gated[2]);
+    try std.testing.expectEqual(@as(f32, 1), gated[5]);
 }

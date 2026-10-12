@@ -19,6 +19,7 @@
 #include "Stonefish/graphics/OpenGLPipeline.h"
 #include "Stonefish/sensors/Sensor.h"
 #include "Stonefish/sensors/ScalarSensor.h"
+#include "Stonefish/sensors/Sample.h"
 #include "Stonefish/sensors/vision/Camera.h"
 
 
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -41,6 +43,9 @@ static constexpr sf::Scalar kStepsPerSecond = 360.0;
 static constexpr sf::Scalar kPhysicsDt = sf::Scalar(1) / kStepsPerSecond;
 static constexpr sf::Scalar kRealtimeFactorCap = 1.0;
 static constexpr sf::Scalar kTrackingOkSeconds = 1000.0;
+static sf::Scalar trackingLossStart = kTrackingOkSeconds;
+static sf::Scalar trackingLossDuration = std::numeric_limits<sf::Scalar>::infinity();
+static uint32_t localizationEpoch = 0;
 static constexpr auto kMinRenderInterval = std::chrono::milliseconds(16);
 static constexpr bool kConsoleApp = false;
 static sf::Scalar realtimeFactorCap = kRealtimeFactorCap;
@@ -278,6 +283,7 @@ public:
         const auto objectClasses = std::move(parser.objectClasses);
 
         odometry = nullptr;
+        imu = nullptr;
         have_odometry = false;
         camera = nullptr;
         image_width = 0;
@@ -307,6 +313,10 @@ public:
             {
                 odometry = scalar;
                 have_odometry = odometry->getNumOfChannels() >= 10;
+            }
+            else if(scalar->getScalarSensorType() == sf::ScalarSensorType::IMU && scalar->getNumOfChannels() >= 9)
+            {
+                imu = scalar;
             }
         }
 
@@ -342,9 +352,37 @@ public:
             thrusters[i]->setSetpoint(thrustor_values[i]);
     }
 
+    bool getThrusterGeometry(AuvThrusterGeometry& geometry)
+    {
+        auto* robot = getRobot(0);
+        auto* body = robot != nullptr ? robot->getLink(size_t(0)) : nullptr;
+        if(body == nullptr || odometry == nullptr || thrusters.empty() || thrusters.size() > AUV_MAX_THRUSTERS)
+            return false;
+        geometry = {};
+        // Odometry reports this frame, so geometry and control use identical
+        // body axes even when the compound body's principal-inertia frame differs.
+        const auto bodyFromWorld = odometry->getSensorFrame().inverse();
+        const auto center = bodyFromWorld * body->getCGTransform().getOrigin();
+        for(int axis = 0; axis < 3; ++axis)
+            geometry.center_of_mass.buf[axis] = static_cast<float>(center[axis]);
+        geometry.len = static_cast<uint8_t>(thrusters.size());
+        for(size_t i = 0; i < thrusters.size(); ++i)
+        {
+            const auto mount = bodyFromWorld * thrusters[i]->getActuatorFrame();
+            const auto direction = mount.getBasis().getColumn(0);
+            for(int axis = 0; axis < 3; ++axis)
+            {
+                geometry.mounts[i].position.buf[axis] = static_cast<float>(mount.getOrigin()[axis]);
+                geometry.mounts[i].direction.buf[axis] = static_cast<float>(direction[axis]);
+            }
+        }
+        return true;
+    }
+
     AuvFrame getAuvFrame()
     {
         AuvFrame frame{};
+        frame.localization_epoch = localizationEpoch;
         frame.camera_pose = IdentityPose();
         frame.timestamp = static_cast<uint64_t>(getSimulationTime() * sf::Scalar(1e9));
 
@@ -357,6 +395,27 @@ public:
             frame.camera_pose.quat.buf[1] = static_cast<float>(odometry->getLastValue(7));
             frame.camera_pose.quat.buf[2] = static_cast<float>(odometry->getLastValue(8));
             frame.camera_pose.quat.buf[3] = static_cast<float>(odometry->getLastValue(9));
+        }
+        if(imu != nullptr)
+        {
+            const auto sample = imu->getLastSample();
+            if(sample.getNumOfDimensions() >= 9 && sample.getTimestamp() > 0)
+            {
+                sf::Quaternion q;
+                q.setEulerZYX(sample.getValue(2), sample.getValue(1), sample.getValue(0));
+                frame.imu_quat.buf[0] = static_cast<float>(q.x());
+                frame.imu_quat.buf[1] = static_cast<float>(q.y());
+                frame.imu_quat.buf[2] = static_cast<float>(q.z());
+                frame.imu_quat.buf[3] = static_cast<float>(q.w());
+                frame.imu_ok = true;
+                frame.gyro_ok = true;
+                frame.imu_timestamp = static_cast<uint64_t>(sample.getTimestamp() * sf::Scalar(1e9));
+                for(unsigned int axis = 0; axis < 3; ++axis)
+                {
+                    frame.gyro.buf[axis] = static_cast<float>(sample.getValue(axis + 3));
+                    frame.accel.buf[axis] = static_cast<float>(sample.getValue(axis + 6));
+                }
+            }
         }
 
         for(const TrackedObject& tracked : tracked_objects)
@@ -380,17 +439,29 @@ public:
 
         frame.image_width = image_width;
         frame.image_height = image_height;
-        frame.tracking_ok = getSimulationTime() < kTrackingOkSeconds;
+        frame.observations_timestamp = frame.timestamp;
+        const auto now = getSimulationTime();
+        const bool trackingLoss = now >= trackingLossStart && now - trackingLossStart < trackingLossDuration;
+        frame.tracking_ok = have_odometry && !trackingLoss;
+        const uint64_t odometryTimestamp = have_odometry
+            ? static_cast<uint64_t>(odometry->getLastSample().getTimestamp() * sf::Scalar(1e9)) : 0;
+        frame.position_timestamp = frame.tracking_ok ? odometryTimestamp : 0;
         if(!frame.tracking_ok && !logged_tracking_loss)
         {
             logged_tracking_loss = true;
-            std::cout << "[stonefish_sim] tracking_ok false after " << kTrackingOkSeconds << " s\n";
+            std::cout << "[stonefish_sim] tracking_ok false after " << trackingLossStart << " s\n";
         }
         if(have_odometry)
         {
             // Scenario is NED, so odometry Z is depth, positive down.
             frame.pressure_depth = static_cast<float>(odometry->getLastValue(2));
             frame.pressure_depth_ok = true;
+            frame.pressure_timestamp = odometryTimestamp;
+        }
+        if(!frame.tracking_ok)
+        {
+            frame.camera_pose = IdentityPose();
+            frame.objects_len = 0;
         }
 
         return frame;
@@ -407,6 +478,7 @@ public:
     std::filesystem::path scenarioPath;
     bool have_odometry = false;
     sf::ScalarSensor* odometry = nullptr;
+    sf::ScalarSensor* imu = nullptr;
     sf::Camera* camera = nullptr;
     unsigned int image_width = 0;
     unsigned int image_height = 0;
@@ -580,6 +652,17 @@ void auv_init(void)
     g_stop_requested = 0;
     std::signal(SIGINT, requestStop);
     auv_deinit();
+    ++localizationEpoch;
+    const auto readDuration = [](const char* name, sf::Scalar fallback) {
+        const char* value = std::getenv(name);
+        if(value == nullptr) return fallback;
+        char* end = nullptr;
+        const double parsed = std::strtod(value, &end);
+        return end != value && *end == '\0' && std::isfinite(parsed) && parsed >= 0
+            ? static_cast<sf::Scalar>(parsed) : fallback;
+    };
+    trackingLossStart = readDuration("AUV_SIM_TRACKING_LOSS_START", kTrackingOkSeconds);
+    trackingLossDuration = readDuration("AUV_SIM_TRACKING_LOSS_DURATION", std::numeric_limits<sf::Scalar>::infinity());
 
     g_simulation_context = new SimulationContext();
     g_simulation_context->sim = new SimManager(kStepsPerSecond, dataPath / scenario_file);
@@ -596,6 +679,14 @@ void auv_init(void)
             dataPath.string(), DefaultRenderSettings(), DefaultHelperSettings(), g_simulation_context->sim);
         g_simulation_context->graphical->start(kPhysicsDt);
     }
+}
+
+uint32_t auv_abi_version(void) { return AUV_ABI_VERSION; }
+
+bool auv_get_thruster_geometry(AuvThrusterGeometry* geometry)
+{
+    return geometry != nullptr && g_simulation_context != nullptr &&
+        g_simulation_context->sim->getThrusterGeometry(*geometry);
 }
 
 void auv_yield_until_next_frame(AuvFrame* frame)

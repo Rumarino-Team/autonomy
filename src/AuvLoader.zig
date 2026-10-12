@@ -36,6 +36,9 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
 
     var dynlib = try std.DynLib.open(path);
     errdefer dynlib.close();
+    const version = dynlib.lookup(*const Auv.AbiVersionFunc, "auv_abi_version") orelse
+        return error.IncompatibleAuvAbi;
+    if (version() != Auv.abi_version) return error.IncompatibleAuvAbi;
 
     const auv: Auv = .{
         .init = dynlib.lookup(
@@ -57,6 +60,7 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
             *const Auv.DeinitFunc,
             "auv_deinit",
         ) orelse return error.MissingAuvDeinit,
+        .getThrusterGeometry = dynlib.lookup(*const Auv.ThrusterGeometryFunc, "auv_get_thruster_geometry"),
     };
 
     if (loader.prev_dynlib) |*prev_dynlib| {

@@ -13,8 +13,16 @@ pub fn main(init: std.process.Init) !void {
 
     while (true) {
         try ctx.yieldUntilNextFrameAndUpdate();
-        //Make sure the goal starts  with the inital measurement of the odometry
-        ctx.goal = math.poseTo6f(ctx.frame.camera_pose);
+        var warmup_seconds: f32 = 0;
+        while (ctx.navigation.snapshot.orientation == null) {
+            warmup_seconds += @max(ctx.controller_dt, ctx.execution_dt);
+            if (warmup_seconds >= 2) {
+                ctx.stopThrusters();
+                return error.SensorUnavailable;
+            }
+            try ctx.yieldUntilNextFrameAndUpdate();
+        }
+        ctx.holdPosition();
 
         const mission_result = switch (args.mission_id) {
             .prequalify => @import("missions/prequalify.zig").mission(&ctx),
@@ -28,10 +36,22 @@ pub fn main(init: std.process.Init) !void {
                 std.log.info("restaring mission", .{});
                 continue;
             },
-            else => return err,
+            else => {
+                ctx.stopThrusters();
+                return err;
+            },
         };
 
         std.log.info("succesfully completed mission", .{});
         break;
     }
+}
+
+test {
+    // The test build does not execute main, so explicitly discover the motion
+    // and controller modules' regression tests.
+    std.testing.refAllDecls(@import("Motion.zig"));
+    std.testing.refAllDecls(MissionContext);
+    std.testing.refAllDecls(@import("missions/prequalify.zig"));
+    std.testing.refAllDecls(math);
 }
