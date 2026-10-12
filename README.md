@@ -361,6 +361,46 @@ wait for their respective velocity observations. Route progress and settling
 pause when attitude/rate feedback is unavailable, while command deadlines
 continue. Repeated or stale observations are not differentiated as new samples.
 
+### Preserve heading and allow pitch for translation
+
+Proteus has no direct body X (sideways) thrust. On a world position or path
+command, release pitch so the controller can redirect vertical thrust sideways
+while continuing to control depth, roll, and the requested heading:
+
+```zig
+try ctx.yieldUntilReachGoal(.{ 2, 3, 1.5 }, .{
+    .facing = .{ .look_at_object = object.id },
+    .attitude_policy = .allow_pitch,
+    .max_pitch = std.math.pi / 6.0, // 30 degrees, default
+    .pitch_rate_limit = 0.25, // commanded pitch change in rad/s, default
+    .translation = .simultaneous,
+});
+```
+
+`allow_pitch` gives the controller ownership of pitch. The facing preset still
+owns yaw; for example, `look_at_object` looks toward the object, `hold_current`
+keeps the captured heading, and `face_path` turns toward the route. In this
+vehicle convention the nose is body +Y, so pitch about body Y redirects vertical
+thrust without turning the nose away from the object horizontally.
+
+The allocator checks that the geometry supports this policy. It works with a
+missing body X force direction and independent attitude torque, or a fully
+actuated layout (which needs no adaptive tilt). Other geometries, a nonlevel
+roll goal, an explicit `attitude` quaternion, and body/visual commands reject
+the policy. The prequalify orbit uses `allow_pitch`.
+
+Depth demand has priority. Sideways force is capped at
+`abs(vertical_force) * tan(max_pitch)`; with no vertical force demand there is
+no sideways capacity in this mode. Tilt and thrust limits can slow a route.
+The limits bound the attitude reference, not guaranteed physical angles.
+This trades independent pitch control for sideways movement; it does not add
+a sixth independent actuator. Allocation feedback still prevents integral
+windup when thrust limits or the pitch bound restrict the requested motion.
+
+The default `attitude_policy = .fixed` keeps the requested roll and pitch.
+Use it when attitude must be preserved, accepting any movement limits of the
+thruster layout.
+
 ### Fixed full orientation
 
 Existing facing presets still work. To request a full attitude, use a normalized

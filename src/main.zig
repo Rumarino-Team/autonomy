@@ -57,6 +57,8 @@ test {
     // The test build does not execute main, so explicitly discover the motion
     // and controller modules' regression tests.
     std.testing.refAllDecls(@import("Motion.zig"));
+    std.testing.refAllDecls(@import("MotionController.zig"));
+    std.testing.refAllDecls(@import("ThrusterAllocator.zig"));
     std.testing.refAllDecls(MissionContext);
     std.testing.refAllDecls(@import("missions/prequalify.zig"));
     std.testing.refAllDecls(math);

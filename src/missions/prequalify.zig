@@ -73,9 +73,9 @@ pub fn mission(ctx: *MissionContext) !void {
     const cube_or_rect_object = try ctx.yieldUntilFirstObjectWithAnyCls(&.{ .cube, .rect });
     try goAround(ctx, cube_or_rect_object, .{
         .facing = .{ .look_at_object = cube_or_rect_object.id },
+        .attitude_policy = .allow_pitch,
         .translation = .simultaneous,
         .position_tolerance = 0.2,
-        .timeout = 180,
         .recovery = .{ .strategy = .search_for_tracking, .max_duration = 15 },
     });
 }
@@ -112,7 +112,6 @@ fn goThrough(ctx: *MissionContext, object: *const Auv.Object) !void {
             .facing = .{ .fixed_yaw = @import("../Motion.zig").yawForDirection(direction, 0) },
             .translation = .align_first,
             .position_tolerance = 0.2,
-            .timeout = 90,
             .recovery = .{ .strategy = .search_for_tracking, .max_duration = 15 },
         },
         .corner_radius = 0,

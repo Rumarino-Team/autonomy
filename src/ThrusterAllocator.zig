@@ -89,6 +89,31 @@ pub fn reset(allocator: *Allocator) void {
     allocator.previous_commands = @splat(0);
 }
 
+/// Unit normal to a two-dimensional body-force plane. A full three-dimensional
+/// force span has no missing direction; a line cannot be repaired by one tilt.
+pub fn translationPlaneNormal(allocator: *const Allocator) ?math.Vector3f {
+    var basis: [3]math.Vector3f = undefined;
+    var count: usize = 0;
+    for (allocator.columns[0..allocator.len]) |column| {
+        var direction: math.Vector3f = .{ column[0], column[1], column[2] };
+        for (basis[0..count]) |axis| direction -= axis * @as(math.Vector3f, @splat(math.dot3f(direction, axis)));
+        const length = math.length3f(direction);
+        if (length <= 1e-4) continue;
+        basis[count] = direction / @as(math.Vector3f, @splat(length));
+        count += 1;
+        if (count == 3) return null;
+    }
+    if (count != 2) return null;
+    return math.normalize3f(math.cross3f(basis[0], basis[1]));
+}
+
+/// This first adaptive attitude policy is for a missing sideways force axis
+/// with independent attitude torque, as on Proteus. Other layouts stay explicit.
+pub fn supportsPitchAdaptation(allocator: *const Allocator) bool {
+    const normal = allocator.translationPlaneNormal() orelse return allocator.rank() == 6;
+    return @abs(normal[0]) >= 0.999 and allocator.rank() >= 5;
+}
+
 /// Bounded coordinate descent solves min ||W(B f - requested)||² + lambda ||f||².
 /// Limits and motor slew bounds are enforced during the solve, never by clipping
 /// an unconstrained inverse afterward. Work is bounded and allocation-free.

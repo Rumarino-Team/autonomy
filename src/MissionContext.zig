@@ -297,10 +297,11 @@ fn ControllerStep(ctx: *MissionContext) void {
     if (snapshot.measured_position and snapshot.orientation != null) {
         ctx.last_valid_pose = math.poseTo6f(.{ .pos = snapshot.position.?, .quat = snapshot.orientation.? });
     }
-    const target: MotionExecutor.Target = if (ctx.motion) |*motion|
+    var target: MotionExecutor.Target = if (ctx.motion) |*motion|
         MotionExecutor.update(motion, &ctx.navigation, &ctx.frame, &ctx.goal, ctx.goal_dist_threshold, elapsed)
     else
         .{ .stop = true };
+    if (ctx.allocator) |*allocator| target.translation_plane_normal = allocator.translationPlaneNormal();
     const input = ctx.controller.calculate(&ctx.navigation, target, ctx.config, ctx.controller_dt);
     setThrustersFromTamInput(ctx, input, target.max_effort);
     if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
@@ -311,12 +312,24 @@ fn ControllerStep(ctx: *MissionContext) void {
         });
         math.debug6f("goal", ctx.goal);
         math.debug6f("input", input);
-        if (ctx.allocation_result) |result| math.debug6f("allocation residual", result.residual);
+        std.log.debug("feedback: time={d:.2}s, dt={d:.6}s, position={any}, velocity={any}, yaw={any}", .{
+            @as(f64, @floatFromInt(timestamp)) * 1e-9, ctx.controller_dt,
+            snapshot.position,                         snapshot.velocity_world,
+            snapshot.yaw(),
+        });
+        if (ctx.allocation_result) |result| {
+            math.debug6f("allocation residual", result.residual);
+            std.log.debug("motor commands={any}, allocation_limited={}", .{ result.commands[0..result.len], result.saturated });
+        }
+        if (ctx.controller.pitch_adapting) std.log.debug("adaptive pitch: commanded={d:.3}rad, actual={d:.3}rad, heading={any}, force_limited={}", .{
+            ctx.controller.adaptive_pitch, math.quaternionToEuler(snapshot.orientation.?)[1], target.heading, ctx.controller.pitch_limited,
+        });
         if (ctx.motion) |*motion| {
             std.log.debug("command={s}, facing={s}, recovering={}, recovery_seconds={d:.2}, completed={}", .{
                 @tagName(motion.command), @tagName(motion.options.facing), motion.recovering, motion.recovery_seconds, motion.completed,
             });
             if (motion.failure) |failure| std.log.debug("failure={s}", .{@tagName(failure)});
+            if (motion.command == .route) std.log.debug("route progress={d:.2}/{d:.2}m", .{ motion.command.route.distance, motion.command.route.path.total_length });
         }
     }
 }
@@ -472,7 +485,7 @@ fn checkMotionFailure(ctx: *MissionContext) !void {
     if (ctx.motion) |*motion| {
         if (motion.failure == .move_timeout and motion.command == .route) {
             const route = motion.command.route;
-            std.log.err(
+            std.log.warn(
                 "route timeout: elapsed={d:.2}s, route_progress={d:.2}/{d:.2}m, vehicle_position={any}, last_reference_pose={any}",
                 .{ motion.elapsed, route.distance, route.path.total_length, ctx.navigation.snapshot.position, ctx.goal },
             );
@@ -505,6 +518,10 @@ pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f, option
 
 pub fn startFollowPath(ctx: *MissionContext, waypoints: []const math.Vector3f, options: PathOptions) !void {
     try options.validate();
+    if (options.move.attitude_policy == .allow_pitch) {
+        const allocator = if (ctx.allocator) |*allocator| allocator else return error.MissingThrusterGeometry;
+        if (!allocator.supportsPitchAdaptation() or @abs(ctx.goal[3]) > 0.05) return error.UnsupportedAttitudePolicy;
+    }
     if (!ctx.navigation.snapshot.measured_position) return error.TrackingUnavailable;
     const path = try Motion.Path.init(ctx.navigation.snapshot.position.?, waypoints, options.corner_radius);
     ctx.beginMotion(path.end, options.move);
@@ -537,6 +554,7 @@ pub fn yieldUntilSearch(ctx: *MissionContext, options: SearchOptions) !void {
 pub fn startVisualTarget(ctx: *MissionContext, options: VisualOptions, move: MoveOptions) !void {
     try options.validate();
     try move.validate();
+    if (move.attitude_policy != .fixed) return error.UnsupportedAttitudePolicy;
     if (move.facing != .look_at_object or move.facing.look_at_object != options.object_id) return error.InvalidMoveOptions;
     ctx.beginMotion(.{ ctx.goal[0], ctx.goal[1], ctx.goal[2] }, move);
     ctx.motion.?.command = .{ .visual = options };
@@ -550,6 +568,7 @@ pub fn yieldUntilVisualTarget(ctx: *MissionContext, options: VisualOptions, move
 pub fn startBodyMove(ctx: *MissionContext, options: BodyOptions, move: MoveOptions) !void {
     try options.validate();
     try move.validate();
+    if (move.attitude_policy != .fixed) return error.UnsupportedAttitudePolicy;
     if (move.facing != .hold_current and move.facing != .fixed_yaw) return error.InvalidMoveOptions;
     if (ctx.navigation.snapshot.orientation == null or
         (move.facing == .fixed_yaw and !ctx.navigation.snapshot.heading_aligned)) return error.SensorUnavailable;

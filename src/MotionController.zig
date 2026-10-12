@@ -53,6 +53,11 @@ last_depth_active: bool = false,
 last_visual_active: bool = false,
 visual_axes: math.Vector3f = @splat(0),
 feedback_available: bool = false,
+adaptive_pitch: f32 = 0,
+pitch_adapting: bool = false,
+pitch_limited: bool = false,
+adaptation_normal: ?math.Vector3f = null,
+planned_force_difference_world: math.Vector3f = @splat(0),
 
 pub fn reset(controller: *MotionController) void {
     controller.* = .{};
@@ -121,11 +126,32 @@ pub fn calculate(controller: *MotionController, nav: *const Navigation, target: 
         world_force[2] += force[2];
         controller.last_depth_active = true;
     } else controller.depth = .{};
-    var body_force = math.quaternionRotate(math.quaternionConjugate(orientation), world_force) + target.body_effort * options.body_force_scale;
-
     // Euler input packets are converted to a quaternion once; no Euler error
     // or Euler-rate derivative is used inside the attitude/rate feedback loops.
-    const desired = target.orientation orelse math.quaternionFromEuler(.{ target.roll_pitch[0], target.roll_pitch[1], target.heading orelse snapshot.yaw().? });
+    var desired = target.orientation orelse math.quaternionFromEuler(.{ target.roll_pitch[0], target.roll_pitch[1], target.heading orelse snapshot.yaw().? });
+    const was_adapting = controller.pitch_adapting;
+    controller.pitch_adapting = false;
+    controller.pitch_limited = false;
+    controller.adaptation_normal = null;
+    controller.planned_force_difference_world = @splat(0);
+    if (target.attitude_policy == .allow_pitch and target.world_position != null and target.orientation == null) {
+        if (target.translation_plane_normal) |normal| {
+            if (@abs(normal[0]) >= 0.999 and @abs(target.roll_pitch[0]) <= 0.05) {
+                const heading = target.heading orelse snapshot.yaw().?;
+                const plan = pitchForForce(world_force, heading, target.max_pitch);
+                if (!was_adapting) controller.adaptive_pitch = std.math.clamp(math.quaternionToEuler(orientation)[1], -target.max_pitch, target.max_pitch);
+                const step = target.pitch_rate_limit * dt;
+                controller.adaptive_pitch = std.math.clamp(controller.adaptive_pitch + std.math.clamp(plan.pitch - controller.adaptive_pitch, -step, step), -target.max_pitch, target.max_pitch);
+                controller.pitch_adapting = true;
+                controller.pitch_limited = plan.limited;
+                controller.adaptation_normal = normal;
+                controller.planned_force_difference_world = plan.force - world_force;
+                world_force = plan.force;
+                desired = math.quaternionFromEuler(.{ target.roll_pitch[0], controller.adaptive_pitch, heading });
+            }
+        }
+    }
+    var body_force = math.quaternionRotate(math.quaternionConjugate(orientation), world_force) + target.body_effort * options.body_force_scale;
     var requested_rate = options.attitude_gain * math.quaternionError(orientation, desired);
     if (target.visual) |visual| {
         const axes: math.Vector3f = .{ 0, if (visual.approach_active) 1 else 0, if (visual.align_vertical) 1 else 0 };
@@ -164,7 +190,13 @@ pub fn allocationFeedback(controller: *MotionController, requested: math.Vector6
     const options = config.control;
     const difference = achieved - requested;
     const body_difference = first3(difference);
-    const world_difference = math.quaternionRotate(controller.last_orientation, body_difference);
+    var translation_difference = body_difference;
+    if (controller.adaptation_normal) |normal| {
+        // During the pitch ramp, attitude is responsible for recovering the
+        // missing force direction. Do not unwind that demand before it tilts.
+        translation_difference -= normal * @as(math.Vector3f, @splat(math.dot3f(translation_difference, normal)));
+    }
+    const world_difference = math.quaternionRotate(controller.last_orientation, translation_difference) + controller.planned_force_difference_world;
     if (controller.last_world_active) {
         var residual = world_difference;
         if (controller.last_pressure_controls_z == true) residual[2] = 0;
@@ -177,4 +209,119 @@ pub fn allocationFeedback(controller: *MotionController, requested: math.Vector6
 
 fn first3(v: math.Vector6f) math.Vector3f {
     return .{ v[0], v[1], v[2] };
+}
+
+const PitchPlan = struct { pitch: f32, force: math.Vector3f, limited: bool };
+
+/// At fixed heading, rotation around body Y redirects vertical thrust into
+/// sideways thrust. Depth has priority: Fx = Fz*tan(pitch). Cap sideways force
+/// to the permitted pitch instead of sacrificing the requested world depth.
+fn pitchForForce(force: math.Vector3f, heading: f32, max_pitch: f32) PitchPlan {
+    const yaw = math.quaternionFromEuler(.{ 0, 0, heading });
+    var local = math.quaternionRotate(math.quaternionConjugate(yaw), force);
+    const capacity = @abs(local[2]) * @tan(max_pitch);
+    const sideways = std.math.clamp(local[0], -capacity, capacity);
+    const limited = @abs(sideways - local[0]) > 1e-4;
+    local[0] = sideways;
+    var pitch: f32 = 0;
+    if (@abs(local[2]) > 1e-4) {
+        pitch = std.math.atan2(sideways, local[2]);
+        if (pitch > std.math.pi / 2.0) pitch -= std.math.pi;
+        if (pitch < -std.math.pi / 2.0) pitch += std.math.pi;
+        pitch = std.math.clamp(pitch, -max_pitch, max_pitch);
+    }
+    return .{ .pitch = pitch, .force = math.quaternionRotate(yaw, local), .limited = limited };
+}
+
+test "pitch planning keeps depth and heading and caps infeasible lateral force" {
+    const yaw: f32 = 0.7;
+    const heading = math.quaternionFromEuler(.{ 0, 0, yaw });
+    for ([_]f32{ -1, 1 }) |side| {
+        const force = math.quaternionRotate(heading, .{ side, 2, -4 });
+        const plan = pitchForForce(force, yaw, std.math.pi / 6.0);
+        const attitude = math.quaternionFromEuler(.{ 0, plan.pitch, yaw });
+        const body = math.quaternionRotate(math.quaternionConjugate(attitude), plan.force);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), body[0], 1e-5);
+        try std.testing.expectApproxEqAbs(force[2], plan.force[2], 1e-5);
+        try std.testing.expectApproxEqAbs(yaw, math.quaternionToEuler(attitude)[2], 1e-5);
+        try std.testing.expect(!plan.limited);
+    }
+    const limited = pitchForForce(.{ 20, 0, -4 }, 0, std.math.pi / 6.0);
+    try std.testing.expect(limited.limited);
+    try std.testing.expectApproxEqAbs(@as(f32, -4), limited.force[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -std.math.pi / 6.0), limited.pitch, 1e-5);
+    const neutral = pitchForForce(.{ 20, 0, 0 }, 0, std.math.pi / 6.0);
+    try std.testing.expectEqual(@as(f32, 0), neutral.force[0]);
+    try std.testing.expectEqual(@as(f32, 0), neutral.pitch);
+}
+
+const TestAllocation = @import("ThrusterAllocator.zig");
+const test_proteus_thrusters = blk: {
+    const model: TestAllocation.Thruster = .{ .forward_force = 143, .reverse_force = 143 };
+    var thrusters = [_]TestAllocation.Thruster{model} ** 6;
+    thrusters[0].position = .{ 0.205, 0, 0.13 };
+    thrusters[1].position = .{ -0.205, 0, 0.13 };
+    const mounts = [_]math.Vector3f{ .{ 0.165, 0.265, 0 }, .{ -0.165, 0.265, 0 }, .{ 0.165, -0.265, 0 }, .{ -0.165, -0.265, 0 } };
+    for (mounts, 2..) |position, i| {
+        thrusters[i].position = position;
+        thrusters[i].direction = .{ 0, 0, 1 };
+    }
+    break :blk thrusters;
+};
+
+fn testProteusAllocator() !TestAllocation {
+    return TestAllocation.init(.{ .thrusters = &test_proteus_thrusters, .require_full_rank = false }, null);
+}
+
+const TestResult = struct { distance: f32, depth_error: f32, yaw_error: f32, max_pitch: f32 };
+fn simulateSideways(policy: Motion.AttitudePolicy, sideways: f32) !TestResult {
+    var allocator = try testProteusAllocator();
+    try std.testing.expect(allocator.supportsPitchAdaptation());
+    const yaw: f32 = 0.7;
+    var orientation = math.quaternionFromEuler(.{ 0, 0, yaw });
+    var position: math.Vector3f = .{ 0, 0, 2 };
+    var velocity: math.Vector3f = @splat(0);
+    var angular_velocity: math.Vector3f = @splat(0);
+    const goal = position + math.quaternionRotate(orientation, .{ sideways, 0, 0 });
+    var controller: MotionController = .{};
+    var nav: Navigation = .{};
+    const config: ConfigLoader.Config = .{
+        .non_odometry = .{ .kp = @splat(0), .ki = @splat(0), .kd = @splat(0), .center_deadband = 0.05, .target_height = 0.9 },
+        .control = .{ .velocity_kp = .{ 12, 12, 18 }, .velocity_ki = .{ 2, 2, 2 }, .integral_limit = 8 },
+    };
+    const dt: f32 = 0.02;
+    var max_pitch: f32 = 0;
+    for (0..6000) |_| {
+        nav.snapshot = .{ .position = position, .orientation = orientation, .velocity_world = velocity, .angular_velocity_body = angular_velocity, .pressure_depth = position[2], .depth_rate = velocity[2], .measured_position = true };
+        const input = controller.calculate(&nav, .{ .mode = .world, .world_position = goal, .heading = yaw, .pressure_depth = 2, .attitude_policy = policy, .translation_plane_normal = allocator.translationPlaneNormal() }, config, dt);
+        const result = allocator.allocate(input, 1, dt);
+        controller.allocationFeedback(input, result.achieved, config, dt);
+        const body_velocity = math.quaternionRotate(math.quaternionConjugate(orientation), velocity);
+        const force = math.quaternionRotate(orientation, first3(result.achieved) - body_velocity * @as(math.Vector3f, .{ 18, 12, 14 }));
+        velocity += (force + @as(math.Vector3f, .{ 0, 0, 3.6 })) * @as(math.Vector3f, @splat(dt / 5.323));
+        position += velocity * @as(math.Vector3f, @splat(dt));
+        const torque: math.Vector3f = .{ result.achieved[3], result.achieved[4], result.achieved[5] };
+        angular_velocity += (torque - angular_velocity * @as(math.Vector3f, @splat(3))) / @as(math.Vector3f, .{ 0.656, 0.700, 1.175 }) * @as(math.Vector3f, @splat(dt));
+        const rotation = angular_velocity * @as(math.Vector3f, @splat(dt * 0.5));
+        const increment = math.normalize4f(.{ rotation[0], rotation[1], rotation[2], 1 });
+        orientation = math.normalize4f(math.quaternionMul(orientation, increment));
+        const angles = math.quaternionToEuler(orientation);
+        max_pitch = @max(max_pitch, @abs(angles[1]));
+        if (!Navigation.validPoint(position) or !Navigation.validQuat(orientation)) return error.NonFiniteFeedback;
+    }
+    return .{ .distance = math.length3f(goal - position), .depth_error = @abs(position[2] - 2), .yaw_error = @abs(math.wrapAngle(math.quaternionToEuler(orientation)[2] - yaw)), .max_pitch = max_pitch };
+}
+
+test "five-axis vehicle moves sideways with heading held when pitch is released" {
+    for ([_]f32{ -0.8, 0.8 }) |side| {
+        const result = try simulateSideways(.allow_pitch, side);
+        try std.testing.expect(result.distance < 0.08);
+        try std.testing.expect(result.depth_error < 0.04);
+        try std.testing.expect(result.yaw_error < 0.01);
+        try std.testing.expect(result.max_pitch > 0.1);
+        try std.testing.expect(result.max_pitch < std.math.pi / 6.0 + 0.02);
+    }
+    const fixed = try simulateSideways(.fixed, 0.8);
+    try std.testing.expect(fixed.distance > 0.7);
+    try std.testing.expect(fixed.max_pitch < 0.02);
 }

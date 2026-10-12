@@ -15,6 +15,10 @@ pub const Facing = union(enum) {
 
 pub const Translation = enum { align_first, simultaneous };
 
+/// Fixed preserves the requested attitude. Allow_pitch preserves the facing
+/// heading while the controller chooses pitch to make translation feasible.
+pub const AttitudePolicy = enum { fixed, allow_pitch };
+
 pub const SearchOptions = struct {
     target_class: ?Auv.ObjectCls = null,
     target_id: ?u32 = null,
@@ -102,6 +106,12 @@ pub const MoveOptions = struct {
     /// Fixed full body-to-world attitude. Use facing=hold_current when supplied.
     /// Quaternions are [x,y,z,w]; normalized when consumed.
     attitude: ?math.Quaternionf = null,
+    /// World moves only: preserve full attitude or release pitch to translate.
+    attitude_policy: AttitudePolicy = .fixed,
+    /// Absolute adaptive pitch reference bound; at most pi/4 radians.
+    max_pitch: f32 = std.math.pi / 6.0,
+    /// Maximum change of the adaptive pitch reference in radians per second.
+    pitch_rate_limit: f32 = 0.25,
     attitude_tolerance: f32 = std.math.pi / 36.0,
     angular_rate_tolerance: f32 = 0.1,
     translation: Translation = .simultaneous,
@@ -117,11 +127,13 @@ pub const MoveOptions = struct {
 
     pub fn validate(options: MoveOptions) !void {
         try options.recovery.validate();
+        if (!positive(options.max_pitch) or options.max_pitch > std.math.pi / 4.0 or
+            !positive(options.pitch_rate_limit)) return error.InvalidMoveOptions;
         if (!positive(options.attitude_tolerance) or !positive(options.angular_rate_tolerance)) return error.InvalidMoveOptions;
         if (options.attitude) |q| {
             inline for (0..4) |axis| if (!std.math.isFinite(q[axis])) return error.InvalidMoveOptions;
             const norm2 = @reduce(.Add, q * q);
-            if (!std.math.isFinite(norm2) or norm2 < 0.000001 or options.facing != .hold_current or
+            if (!std.math.isFinite(norm2) or norm2 < 0.000001 or options.facing != .hold_current or options.attitude_policy != .fixed or
                 options.recovery.strategy == .search_for_tracking or options.recovery.strategy == .visual_target) return error.InvalidMoveOptions;
         }
         if (!positive(options.yaw_rate_limit) or !positive(options.yaw_tolerance) or
@@ -525,7 +537,7 @@ test "unavailable position freezes a goal-dependent heading without executor fai
     state.update(.{ 0, 0, 0 }, null, false, 0.6);
     try std.testing.expect(state.paused);
     try std.testing.expectEqual(@as(?Failure, null), state.failure);
-    try std.testing.expectEqual(@as(f32, 0.7), state.commanded_yaw);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7), state.commanded_yaw, 1e-6);
     state.update(.{ 0, 0, 0 }, null, true, 0.05);
     try std.testing.expect(!state.paused);
 }
