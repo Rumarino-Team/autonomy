@@ -11,6 +11,13 @@ extern "C" {
 
 typedef uint8_t AuvObjectCls;
 
+typedef uint8_t AuvError;
+enum {
+  AUV_ERROR_NONE = 0,
+  AUV_ERROR_SCENARIO_RESTART = 1,
+  AUV_ERROR_SEED_GOAL = 2,
+};
+
 typedef struct {
   uint32_t x;
   uint32_t y;
@@ -30,8 +37,8 @@ typedef struct {
 } AuvObject;
 
 #define AUV_FRAME_MAX_OBJECTS 128
-#define AUV_ABI_VERSION 2
-// Optional geometry extension; it does not change AuvFrame or ABI version 2.
+#define AUV_ABI_VERSION 3
+// Optional geometry extension; it does not change AuvFrame or ABI version 3.
 #define AUV_MAX_THRUSTERS 8
 typedef struct {
   MathVector3f position;
@@ -66,6 +73,7 @@ typedef struct {
   bool gyro_ok;
   // Increment whenever the localization coordinate frame is reset.
   uint32_t localization_epoch;
+  AuvError error;
 } AuvFrame;
 
 uint32_t auv_abi_version(void);

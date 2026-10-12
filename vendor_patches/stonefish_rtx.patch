@@ -1,0 +1,1575 @@
+diff --git a/Library/include/core/GraphicalSimulationApp.h b/Library/include/core/GraphicalSimulationApp.h
+index 2d89703..1c6385e 100644
+--- a/Library/include/core/GraphicalSimulationApp.h
++++ b/Library/include/core/GraphicalSimulationApp.h
+@@ -147,6 +147,8 @@ namespace sf
+ 
+         //! A method returning a pointer to the selected entity.
+         std::pair<Entity*, int> getSelectedEntity();
++        //! Forget pointers to an entity removed by a live scene edit.
++        void ClearEntitySelection();
+         
+         //! A method informing if the application is graphical.
+         bool hasGraphics();
+diff --git a/Library/include/core/MaterialManager.h b/Library/include/core/MaterialManager.h
+index bc2c9f0..169a22a 100644
+--- a/Library/include/core/MaterialManager.h
++++ b/Library/include/core/MaterialManager.h
+@@ -108,6 +108,9 @@ namespace sf
+          \param magnetic a factor defining magnetic properties
+          \return a name of the created material
+          */
++        //! Replace an existing material in place, retaining its index.
++        bool UpdateMaterial(const Material& material);
++
+         std::string CreateMaterial(const std::string& uniqueName, Scalar density, Scalar restitution, Scalar magnetic = Scalar(0));
+         
+         //! A method that sets interaction between a pair of materials.
+diff --git a/Library/include/core/NameManager.h b/Library/include/core/NameManager.h
+index 78d7ef5..875f7d4 100644
+--- a/Library/include/core/NameManager.h
++++ b/Library/include/core/NameManager.h
+@@ -55,6 +55,7 @@ namespace sf
+         
+         //! A method used to clear the pool of names.
+         void ClearNames();
++        bool HasName(const std::string& name) const;
+         
+     private:
+         std::vector<std::string> names;
+diff --git a/Library/include/core/SimulationManager.h b/Library/include/core/SimulationManager.h
+index 3f6aa1e..0ffd3d5 100644
+--- a/Library/include/core/SimulationManager.h
++++ b/Library/include/core/SimulationManager.h
+@@ -147,6 +147,11 @@ namespace sf
+          \param origin a pose of the body in the world frame
+          */
+         void AddStaticEntity(StaticEntity* ent, const Transform& origin);
++        //! Detach a static at a step boundary. Caller owns and deletes it afterwards.
++        bool RemoveStaticEntity(StaticEntity* ent);
++        //! Update water resources without resetting the world or clock.
++        void UpdateOcean(Scalar waves, Fluid fluid);
++        void DisableOcean();
+         
+         //! A method that adds an animated rigid body to the simulation world.
+         /*!
+diff --git a/Library/include/entities/Entity.h b/Library/include/entities/Entity.h
+index 1093713..4b5f214 100644
+--- a/Library/include/entities/Entity.h
++++ b/Library/include/entities/Entity.h
+@@ -98,6 +98,8 @@ namespace sf
+         
+         //! A method returning the name of the entity.
+         std::string getName() const;
++        //! Rename at a simulation step boundary, after checking name collisions.
++        void Rename(const std::string& newName);
+         
+         //! A method returning the type of the entity.
+         virtual EntityType getType() const = 0;
+diff --git a/Library/include/entities/StaticEntity.h b/Library/include/entities/StaticEntity.h
+index 2fdba02..a681776 100644
+--- a/Library/include/entities/StaticEntity.h
++++ b/Library/include/entities/StaticEntity.h
+@@ -84,6 +84,12 @@ namespace sf
+         
+         //! A method returning the material of the entity.
+         Material getMaterial() const;
++        //! Update surface properties without replacing a collision body.
++        void setSurface(const Material& material, int look);
++        //! Release a detached rigid body and its collision storage.
++        void ReleasePhysics();
++        //! Release GPU objects; safe to call more than once.
++        virtual void ReleaseGraphics();
+         
+         //! A method returning the rigid body associated with the entity.
+         btRigidBody* getRigidBody();
+diff --git a/Library/include/entities/forcefields/Ocean.h b/Library/include/entities/forcefields/Ocean.h
+index 327ccdb..8a3b1b0 100644
+--- a/Library/include/entities/forcefields/Ocean.h
++++ b/Library/include/entities/forcefields/Ocean.h
+@@ -125,17 +125,26 @@ namespace sf
+         //! A method to enable rendering of suspended particles (underwater snow).
+         void setParticles(bool enabled);
+ 
++        //! A method to set the suspended-particle field. Stored until graphics init.
++        void setParticleField(size_t count, Scalar range, Scalar sizeMin, Scalar sizeMax, Scalar drift);
++
+         //! A method informing if the particles are enabled.
+         bool hasParticles() const;
+ 
+         //! A method returning the type of the water.
+         Scalar getWaterType() const;
++
++        //! Sea state passed to the ocean constructor. 0 is a flat surface.
++        Scalar getWaveHeight() const;
+           
+         //! A method informing if the ocean waves are simulated.
+         bool hasWaves() const;
+         
+         //! A method returning a pointer to the fluid filling the ocean.
+         Fluid getLiquid() const;
++        void setLiquid(const Fluid& fluid) { liquid = fluid; }
++        //! Recreate only the wave renderer when needed; returns whether it changed.
++        bool setWaves(Scalar waves, SDL_mutex* hydrodynamics);
+         
+         //! A method returning a pointer to the OpenGL object implementing the ocean.
+         OpenGLOcean* getOpenGLOcean();
+@@ -171,6 +180,7 @@ namespace sf
+         Scalar waterType;
+         Scalar salinity;
+         Scalar oceanState;
++        bool waterTypeSet;
+         bool currentsEnabled;
+         Renderable wavesDebug;
+     };
+diff --git a/Library/include/entities/statics/Obstacle.h b/Library/include/entities/statics/Obstacle.h
+index d3efd2b..71203b8 100644
+--- a/Library/include/entities/statics/Obstacle.h
++++ b/Library/include/entities/statics/Obstacle.h
+@@ -63,6 +63,16 @@ namespace sf
+          \param look the name of the graphical material used for rendering
+          */
+         Obstacle(std::string uniqueName, std::string modelFilename, Scalar scale, const Transform& origin, bool convexHull, std::string material, std::string look = "");
++
++        //! A constructor building an obstacle from an in-memory triangle mesh.
++        /*!
++         \param uniqueName a name for the body
++         \param mesh geometry used for both physics and rendering; the obstacle takes ownership
++         \param convexHull a flag determining if the physics mesh should be treated as convex (faster collision)
++         \param material the name of the material the body is made of
++         \param look the name of the graphical material used for rendering
++         */
++        Obstacle(std::string uniqueName, Mesh* mesh, bool convexHull, std::string material, std::string look = "");
+         
+         //! A constructor building a spherical obstacle.
+         /*!
+@@ -101,12 +111,14 @@ namespace sf
+         
+         //! A method implementing the rendering of the entity.
+         std::vector<Renderable> Render();
++        void ReleaseGraphics() override;
+         
+         //! A method that returns the static body type.
+         StaticEntityType getStaticType();
+         
+     private:
+         void BuildGraphicalObject();
++        void BuildCollisionShape(bool convexHull);
+         Mesh* graMesh;
+         int graObjectId;
+     };
+diff --git a/Library/include/graphics/OpenGLCamera.h b/Library/include/graphics/OpenGLCamera.h
+index d9035d6..0854e44 100644
+--- a/Library/include/graphics/OpenGLCamera.h
++++ b/Library/include/graphics/OpenGLCamera.h
+@@ -197,6 +197,8 @@ namespace sf
+          \param ec exposure compensation factor
+          */
+         void setExposureCompensation(GLfloat ec);
++        //! Toggle FXAA when shaders were initialized with AA available.
++        void setAntiAliasing(bool enabled) { antiAliasing = enabled; }
+ 
+         //! A method returning the exposure compensation factor.
+         GLfloat getExposureCompensation();
+diff --git a/Library/include/graphics/OpenGLContent.h b/Library/include/graphics/OpenGLContent.h
+index bb3784f..2ba823a 100644
+--- a/Library/include/graphics/OpenGLContent.h
++++ b/Library/include/graphics/OpenGLContent.h
+@@ -106,6 +106,11 @@ namespace sf
+         
+         //! A method that destroys all created OpenGL content.
+         void DestroyContent();
++        //! Live scene edits are committed on the thread owning the GL context.
++        void ReleaseObject(size_t id);
++        void SetLook(Look look);
++        void NotifySceneChanged() { ++sceneRevision; }
++        size_t getSceneRevision() const { return sceneRevision; }
+         
+         //! A method to set the current rendering viewport size.
+         /*!
+@@ -546,6 +551,7 @@ namespace sf
+         std::vector<OpenGLLight*> lights;
+         std::vector<Object> objects; // Rigid meshes (static)
+         std::vector<Cable> cables;   // Cables (dynamic)
++        size_t sceneRevision = 0;
+         std::vector<Look> looks;     // OpenGL materials
+         NameManager lookNameManager;
+         std::string currentLookName;
+diff --git a/Library/include/graphics/OpenGLPipeline.h b/Library/include/graphics/OpenGLPipeline.h
+index 50c50c8..d69e6b2 100644
+--- a/Library/include/graphics/OpenGLPipeline.h
++++ b/Library/include/graphics/OpenGLPipeline.h
+@@ -99,6 +99,11 @@ namespace sf
+         
+         //! A method returning a copy of the render settings.
+         RenderSettings getRenderSettings() const;
++        //! Explicit configuration overrides startup environment flags.
++        bool ConfigureRTX(bool enabled, bool dlss, unsigned int spp, unsigned int bounces,
++                          const std::string& quality, bool debugAlbedo);
++        //! Runtime toggles; initialize with HIGH quality so resources are available.
++        void SetPostprocessing(bool aa, bool ambientOcclusion, bool reflections);
+         
+         //! A method returning a reference to the helper object settings.
+         HelperSettings& getHelperSettings();
+diff --git a/Library/include/graphics/OpenGLTrackball.h b/Library/include/graphics/OpenGLTrackball.h
+index ac7fc37..376fc7c 100644
+--- a/Library/include/graphics/OpenGLTrackball.h
++++ b/Library/include/graphics/OpenGLTrackball.h
+@@ -78,6 +78,22 @@ namespace sf
+ 
+         //! A method used to update the trasformation of the trackball.
+         void UpdateTransform();
++
++        //! A method reading the orbit used by the trackball.
++        /*!
++         \param centerPosition the position of the camera orbit center in world space [m]
++         \param orbitRotation the orientation of the camera
++         \param orbitRadius the radius of the camera orbit [m]
++         */
++        void getOrbit(glm::vec3& centerPosition, glm::quat& orbitRotation, GLfloat& orbitRadius) const;
++
++        //! A method setting the orbit used by the trackball.
++        /*!
++         \param centerPosition the position of the camera orbit center in world space [m]
++         \param orbitRotation the orientation of the camera
++         \param orbitRadius the radius of the camera orbit [m]
++         */
++        void setOrbit(const glm::vec3& centerPosition, const glm::quat& orbitRotation, GLfloat orbitRadius);
+         
+         //! A method servicing the mouse down event.
+         /*!
+diff --git a/Library/include/graphics/rtx/RTXRenderer.h b/Library/include/graphics/rtx/RTXRenderer.h
+index 2318962..77af078 100644
+--- a/Library/include/graphics/rtx/RTXRenderer.h
++++ b/Library/include/graphics/rtx/RTXRenderer.h
+@@ -24,6 +24,7 @@
+ 
+ #include <cstdint>
+ #include <vector>
++#include <string>
+ 
+ namespace sf
+ {
+@@ -44,6 +45,9 @@ namespace sf
+         static RTXRenderer* Create(bool dlss, bool offline = false);
+ 
+         ~RTXRenderer();
++        //! Apply real-time path tracing settings without recreating the world.
++        bool Configure(unsigned int spp, unsigned int bounces, bool dlss,
++                       const std::string& quality, bool debugAlbedo);
+ 
+         //! Updates acceleration structures, materials and lights from the current drawing queue.
+         void BeginFrame(const std::vector<Renderable>& queue, OpenGLContent* content, SimulationManager* sim);
+diff --git a/Library/src/core/GraphicalSimulationApp.cpp b/Library/src/core/GraphicalSimulationApp.cpp
+index fe555e4..b8e187b 100644
+--- a/Library/src/core/GraphicalSimulationApp.cpp
++++ b/Library/src/core/GraphicalSimulationApp.cpp
+@@ -1008,6 +1008,14 @@ void GraphicalSimulationApp::ResumeSimulation()
+     }
+ }
+ 
++void GraphicalSimulationApp::ClearEntitySelection()
++{
++    selectedEntity = std::make_pair(nullptr, -1);
++    trackballCenter = nullptr;
++    if(getSimulationManager() != nullptr && getSimulationManager()->getTrackball() != nullptr)
++        getSimulationManager()->getTrackball()->GlueToMoving(nullptr);
++}
++
+ void GraphicalSimulationApp::StopSimulation()
+ {
+ 	SimulationApp::StopSimulation();
+diff --git a/Library/src/core/MaterialManager.cpp b/Library/src/core/MaterialManager.cpp
+index 50c28f5..fb579bb 100644
+--- a/Library/src/core/MaterialManager.cpp
++++ b/Library/src/core/MaterialManager.cpp
+@@ -48,6 +48,17 @@ void MaterialManager::ClearMaterialsAndFluids()
+     fluidNameManager.ClearNames();
+ }
+ 
++bool MaterialManager::UpdateMaterial(const Material& material)
++{
++    for(auto& existing : materials)
++        if(existing.name == material.name)
++        {
++            existing = material;
++            return true;
++        }
++    return false;
++}
++
+ std::string MaterialManager::CreateMaterial(const std::string& uniqueName, Scalar density, Scalar restitution, Scalar magnetic)
+ {
+     //Create and add new material
+diff --git a/Library/src/core/NameManager.cpp b/Library/src/core/NameManager.cpp
+index c9bf676..d472036 100644
+--- a/Library/src/core/NameManager.cpp
++++ b/Library/src/core/NameManager.cpp
+@@ -69,6 +69,12 @@ void NameManager::RemoveName(std::string name)
+         }
+ }
+ 
++bool NameManager::HasName(const std::string& name) const
++{
++    for(const auto& existing : names) if(existing == name) return true;
++    return false;
++}
++
+ void NameManager::ClearNames()
+ {
+     names.clear();
+diff --git a/Library/src/core/SimulationManager.cpp b/Library/src/core/SimulationManager.cpp
+index 27a1eba..3fa3000 100644
+--- a/Library/src/core/SimulationManager.cpp
++++ b/Library/src/core/SimulationManager.cpp
+@@ -160,6 +160,33 @@ void SimulationManager::AddStaticEntity(StaticEntity* ent, const Transform& orig
+     }
+ }
+ 
++bool SimulationManager::RemoveStaticEntity(StaticEntity* ent)
++{
++    auto it = std::find(entities.begin(), entities.end(), ent);
++    if(it == entities.end())
++        return false;
++    if(SimulationApp::getApp()->hasGraphics())
++    {
++        auto* app = static_cast<GraphicalSimulationApp*>(SimulationApp::getApp());
++        if(app->getSelectedEntity().first == ent)
++            app->ClearEntitySelection();
++    }
++    for(auto c = contacts.begin(); c != contacts.end();)
++        if((*c)->getEntityA() == ent || (*c)->getEntityB() == ent)
++        {
++            delete *c;
++            c = contacts.erase(c);
++        }
++        else ++c;
++    collisions.erase(std::remove_if(collisions.begin(), collisions.end(),
++        [ent](const Collision& c) { return c.A == ent || c.B == ent; }), collisions.end());
++    if(ent->getRigidBody() != nullptr)
++        dynamicsWorld->removeRigidBody(ent->getRigidBody());
++    entities.erase(it);
++    ent->ReleasePhysics();
++    return true;
++}
++
+ void SimulationManager::AddAnimatedEntity(AnimatedEntity* ent)
+ {
+     if(ent != nullptr)
+@@ -238,6 +265,34 @@ void SimulationManager::EnableOcean(Scalar waves, Fluid f)
+     }
+ }
+     
++void SimulationManager::DisableOcean()
++{
++    if(ocean == nullptr)
++        return;
++    auto* ghost = ocean->getGhost();
++    dynamicsWorld->removeCollisionObject(ghost);
++    delete ghost->getCollisionShape();
++    delete ghost;
++    delete ocean;
++    ocean = nullptr;
++}
++
++void SimulationManager::UpdateOcean(Scalar waves, Fluid fluid)
++{
++    const bool graphics = SimulationApp::getApp()->hasGraphics();
++    waves = graphics ? waves : Scalar(0);
++    bool allocate = ocean == nullptr;
++    if(ocean == nullptr)
++        EnableOcean(waves, fluid);
++    else
++    {
++        ocean->setLiquid(fluid);
++        allocate = ocean->setWaves(waves, simHydroMutex);
++    }
++    if(graphics && allocate)
++        ocean->getOpenGLOcean()->AllocateParticles(static_cast<GraphicalSimulationApp*>(SimulationApp::getApp())->getGLPipeline()->getContent()->getView(0));
++}
++
+ void SimulationManager::EnableAtmosphere()
+ {
+     if(atmosphere != nullptr)
+diff --git a/Library/src/entities/Entity.cpp b/Library/src/entities/Entity.cpp
+index 064a397..9b7427b 100644
+--- a/Library/src/entities/Entity.cpp
++++ b/Library/src/entities/Entity.cpp
+@@ -44,6 +44,13 @@ Entity::~Entity(void)
+         SimulationApp::getApp()->getSimulationManager()->getNameManager()->RemoveName(name);
+ }
+ 
++void Entity::Rename(const std::string& newName)
++{
++    auto* names = SimulationApp::getApp()->getSimulationManager()->getNameManager();
++    names->RemoveName(name);
++    name = names->AddName(newName);
++}
++
+ void Entity::setRenderable(bool render)
+ {
+     renderable = render;
+diff --git a/Library/src/entities/StaticEntity.cpp b/Library/src/entities/StaticEntity.cpp
+index 85c1566..bd85d83 100644
+--- a/Library/src/entities/StaticEntity.cpp
++++ b/Library/src/entities/StaticEntity.cpp
+@@ -48,6 +48,7 @@ StaticEntity::StaticEntity(std::string uniqueName, std::string material, std::st
+ 
+ StaticEntity::~StaticEntity()
+ {
++    ReleaseGraphics();
+     if(phyMesh != nullptr) 
+         delete phyMesh;
+ }
+@@ -62,6 +63,54 @@ Material StaticEntity::getMaterial() const
+     return mat;
+ }
+ 
++void StaticEntity::setSurface(const Material& material, int look)
++{
++    mat = material;
++    lookId = look;
++}
++
++namespace
++{
++void DeleteStaticShape(btCollisionShape* shape)
++{
++    if(auto* compound = dynamic_cast<btCompoundShape*>(shape))
++        for(int i = 0; i < compound->getNumChildShapes(); ++i)
++            DeleteStaticShape(compound->getChildShape(i));
++    if(auto* mesh = dynamic_cast<btBvhTriangleMeshShape*>(shape))
++    {
++        auto* array = dynamic_cast<btTriangleIndexVertexArray*>(mesh->getMeshInterface());
++        if(array != nullptr)
++        {
++            for(int i = 0; i < array->getIndexedMeshArray().size(); ++i)
++            {
++                const auto& part = array->getIndexedMeshArray()[i];
++                delete[] reinterpret_cast<const Scalar*>(part.m_vertexBase);
++                delete[] reinterpret_cast<const int*>(part.m_triangleIndexBase);
++            }
++            delete array;
++        }
++    }
++    delete shape;
++}
++}
++
++void StaticEntity::ReleasePhysics()
++{
++    if(rigidBody == nullptr)
++        return;
++    DeleteStaticShape(rigidBody->getCollisionShape());
++    delete rigidBody->getMotionState();
++    delete rigidBody;
++    rigidBody = nullptr;
++}
++
++void StaticEntity::ReleaseGraphics()
++{
++    if(phyObjectId >= 0 && SimulationApp::getApp()->hasGraphics())
++        static_cast<GraphicalSimulationApp*>(SimulationApp::getApp())->getGLPipeline()->getContent()->ReleaseObject(phyObjectId);
++    phyObjectId = -1;
++}
++
+ void StaticEntity::setTransform(const Transform& trans)
+ {
+     if(rigidBody != nullptr)
+@@ -155,6 +204,7 @@ void StaticEntity::AddToSimulation(SimulationManager* sm, const Transform& origi
+     if(rigidBody != nullptr)
+     {
+         btDefaultMotionState* motionState = new btDefaultMotionState(origin);
++        delete rigidBody->getMotionState();
+         rigidBody->setMotionState(motionState);
+         sm->getDynamicsWorld()->addRigidBody(rigidBody, MASK_STATIC, MASK_DYNAMIC);
+     }
+diff --git a/Library/src/entities/forcefields/Ocean.cpp b/Library/src/entities/forcefields/Ocean.cpp
+index c7f7037..8afeb72 100644
+--- a/Library/src/entities/forcefields/Ocean.cpp
++++ b/Library/src/entities/forcefields/Ocean.cpp
+@@ -58,6 +58,7 @@ Ocean::Ocean(std::string uniqueName, Scalar waves, Fluid l) : ForcefieldEntity(u
+     wavesDebug.model = glm::mat4(1.f);
+     wavesDebug.data = std::make_shared<std::vector<glm::vec3>>();
+     waterType = Scalar(0.0);
++    waterTypeSet = false;
+     glOcean = nullptr;
+ }
+ 
+@@ -91,6 +92,11 @@ Scalar Ocean::getWaterType() const
+ {
+     return waterType;
+ }
++
++Scalar Ocean::getWaveHeight() const
++{
++    return oceanState;
++}
+         
+ OpenGLOcean* Ocean::getOpenGLOcean()
+ {
+@@ -115,13 +121,28 @@ VelocityField* Ocean::getVelocityField(size_t index)
+         return nullptr;
+ }
+ 
+-void Ocean::setWaterType(Scalar jerlov)
+-{ 
++bool Ocean::setWaves(Scalar waves, SDL_mutex* hydrodynamics)
++{
++    waves = std::max(Scalar(0), std::min(Scalar(2), waves));
++    if(waves == oceanState)
++        return false;
++    oceanState = waves;
++    ghost->setWorldTransform(Transform(Quaternion::getIdentity(), Vector3(0, 0, depth/Scalar(2) - waves*Scalar(3))));
+     if(glOcean != nullptr)
+     {
+-        waterType = jerlov > Scalar(1) ? Scalar(1) : (jerlov < Scalar(0) ? Scalar(0) : jerlov);
+-        glOcean->setWaterType((float)waterType);
++        delete glOcean;
++        glOcean = nullptr;
++        InitGraphics(hydrodynamics);
+     }
++    return true;
++}
++
++void Ocean::setWaterType(Scalar jerlov)
++{
++    waterType = jerlov > Scalar(1) ? Scalar(1) : (jerlov < Scalar(0) ? Scalar(0) : jerlov);
++    waterTypeSet = true;
++    if(glOcean != nullptr)
++        glOcean->setWaterType((float)waterType);
+ }
+ 
+ void Ocean::setParticles(bool enabled)
+@@ -130,6 +151,15 @@ void Ocean::setParticles(bool enabled)
+         glOcean->setParticles(enabled);
+ }
+ 
++void Ocean::setParticleField(size_t count, Scalar range, Scalar sizeMin, Scalar sizeMax, Scalar drift)
++{
++    (void)count;
++    (void)range;
++    (void)sizeMin;
++    (void)sizeMax;
++    (void)drift;
++}
++
+ void Ocean::SetConditions(Scalar waterTemp)
+ {
+     if(glOcean != nullptr)
+@@ -273,7 +303,9 @@ void Ocean::InitGraphics(SDL_mutex* hydrodynamics)
+         glOcean = new OpenGLRealOcean(depth, oceanState, hydrodynamics);
+     else
+         glOcean = new OpenGLFlatOcean(depth);
+-    setWaterType(0.2);
++    if(!waterTypeSet)
++        waterType = Scalar(0.2);
++    glOcean->setWaterType((float)waterType);
+ }
+ 
+ std::vector<Renderable> Ocean::Render()
+diff --git a/Library/src/entities/statics/Obstacle.cpp b/Library/src/entities/statics/Obstacle.cpp
+index da008ff..ca5313c 100644
+--- a/Library/src/entities/statics/Obstacle.cpp
++++ b/Library/src/entities/statics/Obstacle.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "entities/statics/Obstacle.h"
+ 
++#include <cstdlib>
+ #include "core/GraphicalSimulationApp.h"
+ #include "graphics/OpenGLPipeline.h"
+ #include "graphics/OpenGLContent.h"
+@@ -47,7 +48,22 @@ Obstacle::Obstacle(std::string uniqueName,
+     }
+     else
+         phyMesh = graMesh;
+-        
++
++    BuildCollisionShape(convexHull);
++}
++
++Obstacle::Obstacle(std::string uniqueName, Mesh* mesh, bool convexHull, std::string material, std::string look)
++    : StaticEntity(uniqueName, material, look)
++{
++    if(mesh == nullptr)
++        abort();
++    graMesh = mesh;
++    phyMesh = mesh;
++    BuildCollisionShape(convexHull);
++}
++
++void Obstacle::BuildCollisionShape(bool convexHull)
++{
+     graObjectId = -1;
+ 
+     //Buidling collision shape
+@@ -158,6 +174,7 @@ Obstacle::Obstacle(std::string uniqueName, Scalar cylinderRadius, Scalar cylinde
+     
+ Obstacle::~Obstacle()
+ {
++    ReleaseGraphics();
+     if(graMesh != nullptr && graMesh != phyMesh)
+         delete graMesh;
+ }
+@@ -167,13 +184,23 @@ StaticEntityType Obstacle::getStaticType()
+     return StaticEntityType::OBSTACLE;
+ }
+     
++void Obstacle::ReleaseGraphics()
++{
++    if(graObjectId >= 0 && SimulationApp::getApp()->hasGraphics())
++        static_cast<GraphicalSimulationApp*>(SimulationApp::getApp())->getGLPipeline()->getContent()->ReleaseObject(graObjectId);
++    if(phyObjectId == graObjectId)
++        phyObjectId = -1;
++    graObjectId = -1;
++    StaticEntity::ReleaseGraphics();
++}
++
+ void Obstacle::BuildGraphicalObject()
+ {
+     if(graMesh == nullptr || !SimulationApp::getApp()->hasGraphics())
+         return;
+         
+     graObjectId = ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BuildObject(graMesh);
+-    phyObjectId = ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BuildObject(phyMesh);
++    phyObjectId = phyMesh == graMesh ? graObjectId : ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BuildObject(phyMesh);
+ }
+ 
+ std::vector<Renderable> Obstacle::Render()
+diff --git a/Library/src/graphics/GLSLShader.cpp b/Library/src/graphics/GLSLShader.cpp
+index 890d3f1..25a764c 100644
+--- a/Library/src/graphics/GLSLShader.cpp
++++ b/Library/src/graphics/GLSLShader.cpp
+@@ -1,4 +1,4 @@
+-/*    
++/*
+     This file is a part of Stonefish.
+ 
+     Stonefish is free software: you can redistribute it and/or modify
+@@ -48,7 +48,7 @@ GLSLShader::GLSLShader(const std::vector<GLSLSource>& sources, const std::vector
+     if(sources.size() > 0)
+     {
+         valid = true;
+-        
++
+         std::vector<GLuint> shaders = precompiled;
+         GLint compiled = 0;
+ 
+@@ -77,7 +77,7 @@ GLSLShader::GLSLShader(const std::vector<GLuint>& precompiled)
+     program = CreateProgram(precompiled, precompiled.size());
+     if(program == 0)
+         valid = false;
+-    else 
++    else
+         valid = true;
+ }
+ 
+@@ -88,17 +88,17 @@ GLSLShader::GLSLShader(std::string fragment, std::string vertex)
+     GLuint vs;
+     GLuint fs;
+     std::string emptyHeader = "";
+-    
++
+     if(vertex == "")
+         vs = saqVertexShader;
+     else
+         vs = LoadShader(GL_VERTEX_SHADER, vertex, emptyHeader, &compiled);
+-    
++
+     fs = LoadShader(GL_FRAGMENT_SHADER, fragment, emptyHeader, &compiled);
+     program = CreateProgram({vs, fs}, vs == saqVertexShader ? 1 : 0);
+     valid = true;
+ }
+-    
++
+ GLSLShader::~GLSLShader()
+ {
+     if(valid)
+@@ -130,14 +130,14 @@ bool GLSLShader::AddAttribute(std::string name, ParameterType type)
+     GLSLAttribute att;
+     att.name = name;
+     att.type = type;
+-    
++
+     Use();
+     att.index = glGetAttribLocation(program, name.c_str());
+     OpenGLState::UseProgram(0);
+-    
++
+     if(att.index < 0)
+         return false;
+-    
++
+     attributes.push_back(att);
+     return true;
+ }
+@@ -147,11 +147,11 @@ bool GLSLShader::AddUniform(std::string name, ParameterType type)
+     GLSLUniform uni;
+     uni.name = name;
+     uni.type = type;
+-    
++
+     Use();
+     uni.location = glGetUniformLocation(program, name.c_str());
+     OpenGLState::UseProgram(0);
+-    
++
+     if(uni.location < 0)
+     {
+ #ifdef DEBUG
+@@ -159,7 +159,7 @@ bool GLSLShader::AddUniform(std::string name, ParameterType type)
+ #endif
+         return false;
+     }
+-    
++
+     uniforms.push_back(uni);
+     return true;
+ }
+@@ -168,10 +168,10 @@ bool GLSLShader::SetAttribute(std::string name, GLfloat x)
+ {
+     GLint index = 0;
+     bool success = GetAttribute(name, FLOAT, index);
+-    
++
+     if(success)
+         glVertexAttrib1f(index, x);
+-    
++
+     return success;
+ }
+ 
+@@ -179,10 +179,10 @@ bool GLSLShader::SetUniform(std::string name, bool x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, BOOLEAN, location);
+-  
++
+     if(success)
+         glUniform1i(location, (GLint)x);
+-    
++
+     return success;
+ }
+ 
+@@ -190,10 +190,10 @@ bool GLSLShader::SetUniform(std::string name, GLfloat x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, FLOAT, location);
+-    
++
+     if(success)
+         glUniform1f(location, x);
+-    
++
+     return success;
+ }
+ 
+@@ -201,10 +201,10 @@ bool GLSLShader::SetUniform(std::string name, glm::vec2 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, VEC2, location);
+-    
++
+     if(success)
+         glUniform2fv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -212,10 +212,10 @@ bool GLSLShader::SetUniform(std::string name, glm::vec3 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, VEC3, location);
+-    
++
+     if(success)
+         glUniform3fv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -223,10 +223,10 @@ bool GLSLShader::SetUniform(std::string name, glm::vec4 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, VEC4, location);
+-    
++
+     if(success)
+         glUniform4fv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -234,10 +234,10 @@ bool GLSLShader::SetUniform(std::string name, GLuint x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, UINT, location);
+-    
++
+     if(success)
+         glUniform1ui(location, x);
+-    
++
+     return success;
+ }
+ 
+@@ -245,10 +245,10 @@ bool GLSLShader::SetUniform(std::string name, GLint x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, INT, location);
+-    
++
+     if(success)
+         glUniform1i(location, x);
+-    
++
+     return success;
+ }
+ 
+@@ -256,10 +256,10 @@ bool GLSLShader::SetUniform(std::string name, glm::ivec2 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, IVEC2, location);
+-    
++
+     if(success)
+         glUniform2iv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -267,10 +267,10 @@ bool GLSLShader::SetUniform(std::string name, glm::ivec3 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, IVEC3, location);
+-    
++
+     if(success)
+         glUniform3iv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -278,10 +278,10 @@ bool GLSLShader::SetUniform(std::string name, glm::ivec4 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, IVEC4, location);
+-    
++
+     if(success)
+         glUniform4iv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -289,10 +289,10 @@ bool GLSLShader::SetUniform(std::string name, glm::uvec2 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, UVEC2, location);
+-    
++
+     if(success)
+         glUniform2uiv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -300,10 +300,10 @@ bool GLSLShader::SetUniform(std::string name, glm::uvec3 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, UVEC3, location);
+-    
++
+     if(success)
+         glUniform3uiv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -311,10 +311,10 @@ bool GLSLShader::SetUniform(std::string name, glm::uvec4 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, UVEC4, location);
+-    
++
+     if(success)
+         glUniform4uiv(location, 1, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -322,10 +322,10 @@ bool GLSLShader::SetUniform(std::string name, glm::mat3 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, MAT3, location);
+-    
++
+     if(success)
+         glUniformMatrix3fv(location, 1, GL_FALSE, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -333,10 +333,10 @@ bool GLSLShader::SetUniform(std::string name, glm::mat4 x)
+ {
+     GLint location = 0;
+     bool success = GetUniform(name, MAT4, location);
+-    
++
+     if(success)
+         glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(x));
+-    
++
+     return success;
+ }
+ 
+@@ -376,7 +376,7 @@ bool GLSLShader::GetAttribute(std::string name, ParameterType type, GLint& index
+             else
+                 return false;
+         }
+-    
++
+     return false;
+ }
+ 
+@@ -470,14 +470,14 @@ GLuint GLSLShader::LoadShader(GLenum shaderType, const std::string& filename, co
+     while(!sourceBuf.eof())
+     {
+         std::getline(sourceBuf, line);
+-        
++
+         if(line.find("#inject") == std::string::npos)
+             source.append(line + "\n");
+         else //inject code from another source file
+         {
+             size_t pos1 = line.find("\"");
+             size_t pos2 = line.find("\"", pos1+1);
+-            
++
+             if(pos1 > 0 && pos2 > pos1)
+             {
+                 std::string injectedPath = GetShaderPath() + line.substr(pos1+1, pos2-pos1-1);
+@@ -491,7 +491,7 @@ GLuint GLSLShader::LoadShader(GLenum shaderType, const std::string& filename, co
+                 std::istringstream injectedString(rh2.string());
+                 std::istream& injectedBuf(injectedString);
+ #else
+-                
++
+                 std::ifstream injectedFile(injectedPath);
+                 if(!injectedFile.is_open())
+                 {
+@@ -518,7 +518,7 @@ GLuint GLSLShader::LoadShader(GLenum shaderType, const std::string& filename, co
+     }
+ #ifndef EMBEDDED_RESOURCES
+     sourceFile.close();
+-#endif    
++#endif
+     const char* shaderSource = source.c_str();
+     if(shaderSource != NULL)
+     {
+@@ -529,8 +529,8 @@ GLuint GLSLShader::LoadShader(GLenum shaderType, const std::string& filename, co
+         if(*shaderCompiled == 0)
+         {
+             cError("Failed to compile shader: %s", sourcePath.c_str());
+-#ifdef DEBUG	
+-            GLint infoLogLength = 0;	
++#ifdef DEBUG
++            GLint infoLogLength = 0;
+             glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLogLength);
+             if(infoLogLength > 0)
+             {
+@@ -544,7 +544,7 @@ GLuint GLSLShader::LoadShader(GLenum shaderType, const std::string& filename, co
+     }
+     else
+         *shaderCompiled = 0;
+-    
++
+     return shader;
+ }
+ 
+@@ -552,11 +552,11 @@ GLuint GLSLShader::CreateProgram(const std::vector<GLuint>& compiledShaders, uns
+ {
+     GLint programLinked = 0;
+     GLuint program = glCreateProgram();
+-    
++
+     for(unsigned int i=0; i<compiledShaders.size(); ++i)
+         if(compiledShaders[i] > 0)
+             glAttachShader(program, compiledShaders[i]);
+-    
++
+     glLinkProgram(program);
+ #ifdef DEBUG
+     GLint infoLogLength = 0;
+@@ -569,7 +569,7 @@ GLuint GLSLShader::CreateProgram(const std::vector<GLuint>& compiledShaders, uns
+     }
+ #endif
+     glGetProgramiv(program, GL_LINK_STATUS, &programLinked);
+-    
++
+     for(unsigned int i=0; i<compiledShaders.size(); ++i)
+     {
+         if(compiledShaders[i] > 0)
+@@ -579,14 +579,14 @@ GLuint GLSLShader::CreateProgram(const std::vector<GLuint>& compiledShaders, uns
+                 glDeleteShader(compiledShaders[i]);
+         }
+     }
+-    
++
+     if(programLinked == 0)
+     {
+         cError("Failed to link program!");
+         glDeleteProgram(program);
+         program = 0;
+     }
+-    
++
+     return program;
+ }
+ 
+diff --git a/Library/src/graphics/OpenGLContent.cpp b/Library/src/graphics/OpenGLContent.cpp
+index 02a4949..c59108a 100644
+--- a/Library/src/graphics/OpenGLContent.cpp
++++ b/Library/src/graphics/OpenGLContent.cpp
+@@ -578,6 +578,7 @@ void OpenGLContent::Finalize()
+ 
+ void OpenGLContent::DestroyContent()
+ {
++    NotifySceneChanged();
+     for(size_t i=0; i<looks.size(); ++i)
+     {
+         if(looks[i].albedoTexture != 0)
+@@ -874,7 +875,7 @@ void OpenGLContent::DrawObject(int objectId, int lookId, const glm::mat4& M)
+         case DrawingMode::TEMPERATURE:
+         {
+             if(lookId < 0)
+-                UseLook(getLook(looks.size()-1), false, M); // Use default look
++                UseLook(getLook(getLookId("__Default__")), false, M); // Use default look
+             else
+                 UseLook(getLook(lookId), objects[objectId].texturable, M); // Use user defined look
+         }
+@@ -957,7 +958,7 @@ void OpenGLContent::DrawCable(size_t cableId, GLfloat radius, const std::vector<
+         case DrawingMode::TEMPERATURE:
+         {
+             if (lookId < 0)
+-                UseCableLook(getLook(looks.size() - 1), radius); // Use default look
++                UseCableLook(getLook(getLookId("__Default__")), radius); // Use default look
+             else
+                 UseCableLook(getLook(lookId), radius); // Use user defined look
+         }
+@@ -1310,10 +1311,46 @@ unsigned int OpenGLContent::BuildObject(Mesh* mesh)
+     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(Face) * mesh->faces.size(), &mesh->faces[0].vertexID[0], GL_STATIC_DRAW);
+     OpenGLState::BindVertexArray(0);
+     
++    for(size_t i = 0; i < objects.size(); ++i)
++        if(objects[i].vao == 0)
++        {
++            objects[i] = obj;
++            return static_cast<unsigned int>(i);
++        }
+     objects.push_back(obj);
+     return (unsigned int)objects.size()-1;
+ }
+ 
++void OpenGLContent::ReleaseObject(size_t id)
++{
++    if(id >= objects.size() || objects[id].vao == 0)
++        return;
++    auto& obj = objects[id];
++    glDeleteBuffers(1, &obj.vboVertex);
++    glDeleteBuffers(1, &obj.vboIndex);
++    glDeleteVertexArrays(1, &obj.vao);
++    obj = Object{};
++}
++
++void OpenGLContent::SetLook(Look look)
++{
++    const int id = getLookId(look.name);
++    if(id < 0)
++    {
++        look.name = lookNameManager.AddName(look.name);
++        looks.push_back(std::move(look));
++    }
++    else
++    {
++        auto& old = looks[id];
++        if(old.albedoTexture) glDeleteTextures(1, &old.albedoTexture);
++        if(old.normalMap) glDeleteTextures(1, &old.normalMap);
++        if(old.temperatureMap) glDeleteTextures(1, &old.temperatureMap);
++        old = std::move(look);
++    }
++    currentLookName.clear();
++}
++
+ size_t OpenGLContent::BuildCable(size_t numNodes)
+ {
+     Cable cable;
+diff --git a/Library/src/graphics/OpenGLPipeline.cpp b/Library/src/graphics/OpenGLPipeline.cpp
+index 2095caf..1b6a199 100644
+--- a/Library/src/graphics/OpenGLPipeline.cpp
++++ b/Library/src/graphics/OpenGLPipeline.cpp
+@@ -138,6 +138,38 @@ RenderSettings OpenGLPipeline::getRenderSettings() const
+     return rSettings;
+ }
+     
++bool OpenGLPipeline::ConfigureRTX(bool enabled, bool dlss, unsigned int spp, unsigned int bounces,
++                                  const std::string& quality, bool debugAlbedo)
++{
++#ifdef STONEFISH_HAS_RTX
++    if(enabled && (rtx == nullptr || rSettings.rtxOffline))
++    {
++        delete rtx;
++        rtx = RTXRenderer::Create(dlss, false);
++    }
++    bool supported = !enabled || rtx != nullptr;
++    if(rtx != nullptr && enabled) supported = rtx->Configure(spp, bounces, dlss, quality, debugAlbedo) && supported;
++    rSettings.rtx = enabled && rtx != nullptr;
++    if(enabled) rSettings.rtxOffline = false;
++    rSettings.dlss = dlss;
++    if(!supported) cWarning("Requested RTX/DLSS settings unavailable; using the available render path");
++    return supported;
++#else
++    if(enabled) cWarning("RTX requested, but this build has no OptiX renderer; using OpenGL");
++    return !enabled;
++#endif
++}
++
++void OpenGLPipeline::SetPostprocessing(bool aa, bool ambientOcclusion, bool reflections)
++{
++    rSettings.aa = aa ? RenderQuality::HIGH : RenderQuality::DISABLED;
++    rSettings.ao = ambientOcclusion ? RenderQuality::HIGH : RenderQuality::DISABLED;
++    rSettings.ssr = reflections ? RenderQuality::HIGH : RenderQuality::DISABLED;
++    for(size_t i = 0; i < content->getViewsCount(); ++i)
++        if(auto* camera = dynamic_cast<OpenGLCamera*>(content->getView(i)))
++            camera->setAntiAliasing(aa);
++}
++
+ HelperSettings& OpenGLPipeline::getHelperSettings()
+ {
+     return hSettings;
+@@ -477,7 +509,7 @@ void OpenGLPipeline::Render(SimulationManager* sim)
+ 
+ #ifdef STONEFISH_HAS_RTX
+         //Color cameras are path traced instead of rasterized
+-        if(rtx != nullptr && view->getType() == ViewType::CAMERA && static_cast<OpenGLRealCamera*>(view)->hasSensor())
++        if(rSettings.rtx && rtx != nullptr && view->getType() == ViewType::CAMERA && static_cast<OpenGLRealCamera*>(view)->hasSensor())
+         {
+             OpenGLRealCamera* camera = static_cast<OpenGLRealCamera*>(view);
+             if(!rtxFrameReady)
+diff --git a/Library/src/graphics/OpenGLTrackball.cpp b/Library/src/graphics/OpenGLTrackball.cpp
+index fcd5a58..31a4929 100644
+--- a/Library/src/graphics/OpenGLTrackball.cpp
++++ b/Library/src/graphics/OpenGLTrackball.cpp
+@@ -117,6 +117,21 @@ void OpenGLTrackball::UpdateTransform()
+     ExtractFrustumFromVP(viewUBOData.frustum, viewUBOData.VP);
+ }
+ 
++void OpenGLTrackball::getOrbit(glm::vec3& centerPosition, glm::quat& orbitRotation, GLfloat& orbitRadius) const
++{
++    centerPosition = center;
++    orbitRotation = rotation;
++    orbitRadius = radius;
++}
++
++void OpenGLTrackball::setOrbit(const glm::vec3& centerPosition, const glm::quat& orbitRotation, GLfloat orbitRadius)
++{
++    center = tempCenter = centerPosition;
++    rotation = orbitRotation;
++    radius = orbitRadius < 0.05f ? 0.05f : orbitRadius;
++    UpdateTransform();
++}
++
+ GLfloat OpenGLTrackball::calculateZ(GLfloat x, GLfloat y)
+ {
+     if(x*x+y*y <= 0.5f)
+diff --git a/Library/src/graphics/rtx/RTXDLSS.cpp b/Library/src/graphics/rtx/RTXDLSS.cpp
+index b22ed2a..33ddb7a 100644
+--- a/Library/src/graphics/rtx/RTXDLSS.cpp
++++ b/Library/src/graphics/rtx/RTXDLSS.cpp
+@@ -119,6 +119,16 @@ DLSS* DLSS::Create(CUcontext context, cudaStream_t stream)
+     return dlss;
+ }
+ 
++void DLSS::SetQuality(const std::string& value)
++{
++    quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
++    dlaa = value == "dlaa";
++    if(value == "balanced") quality = NVSDK_NGX_PerfQuality_Value_Balanced;
++    else if(value == "performance") quality = NVSDK_NGX_PerfQuality_Value_MaxPerf;
++    else if(value == "ultra") quality = NVSDK_NGX_PerfQuality_Value_UltraPerformance;
++    else if(dlaa) quality = NVSDK_NGX_PerfQuality_Value_DLAA;
++}
++
+ DLSS::~DLSS()
+ {
+     if(params != nullptr)
+diff --git a/Library/src/graphics/rtx/RTXDLSS.h b/Library/src/graphics/rtx/RTXDLSS.h
+index e87e94e..1db74f5 100644
+--- a/Library/src/graphics/rtx/RTXDLSS.h
++++ b/Library/src/graphics/rtx/RTXDLSS.h
+@@ -54,6 +54,7 @@ namespace rtx
+ 
+         //! Creates a feature that upscales to outW x outH; reports the render resolution to use.
+         DLSSFeature* CreateFeature(unsigned int outW, unsigned int outH);
++        void SetQuality(const std::string& value);
+         void DestroyFeature(DLSSFeature* f);
+ 
+         //! Upscales linear device buffers at render resolution into a linear output buffer.
+diff --git a/Library/src/graphics/rtx/RTXOffline.cpp b/Library/src/graphics/rtx/RTXOffline.cpp
+index 48d87f1..431eee2 100644
+--- a/Library/src/graphics/rtx/RTXOffline.cpp
++++ b/Library/src/graphics/rtx/RTXOffline.cpp
+@@ -149,6 +149,7 @@ struct RTXOffline::Impl
+     OptixShaderBindingTable sbt = {};
+     DeviceBuffer raygenRecord, missRecords, hitRecords, paramsDev;
+ 
++    size_t sceneRevision = size_t(-1);
+     std::unordered_map<int, GeometryGPU> geometries;
+     std::vector<rtx::Geometry> geometryTable;
+     DeviceBuffer geometryTableDev;
+@@ -1013,6 +1014,28 @@ RTXOffline* RTXOffline::Create()
+ void RTXOffline::BeginFrame(const std::vector<Renderable>& queue, OpenGLContent* content, SimulationManager* sim)
+ {
+     Impl& d = *impl;
++    // A live edit may reuse GL object/texture IDs. Invalidate copied CUDA
++    // resources at the next render boundary, after all previous launches finish.
++    if(d.sceneRevision != content->getSceneRevision())
++    {
++        cudaStreamSynchronize(d.stream);
++        for(auto& g : d.geometries) g.second.Free();
++        d.geometries.clear();
++        d.geometryTable.clear();
++        for(auto& t : d.textures)
++        {
++            if(t.second.tex) cudaDestroyTextureObject(t.second.tex);
++            if(t.second.array) cudaFreeArray(t.second.array);
++        }
++        d.textures.clear();
++        d.materials.clear();
++        d.previousModels.clear();
++        for(auto& camera : d.cameras) camera.second.hasPrev = false;
++        d.materialCurves.clear();
++        d.surface.Free();
++        d.surfaceTable = -1;
++        d.sceneRevision = content->getSceneRevision();
++    }
+     ++d.globalFrame;
+     d.simTime = sim->getSimulationTime();
+     d.frameDt = d.prevSimTime >= 0.0 ? (float)(d.simTime - d.prevSimTime) : 0.f;
+@@ -1030,7 +1053,7 @@ void RTXOffline::BeginFrame(const std::vector<Renderable>& queue, OpenGLContent*
+     d.emissive.clear();
+     std::map<std::tuple<int, int, int>, glm::mat4> currentModels;
+     std::map<std::pair<int, int>, int> occurrence;
+-    const int defaultLook = (int)content->getLooksCount() - 1;
++    const int defaultLook = content->getLookId("__Default__");
+     const float open = d.frameDt > 0.f ? glm::clamp(1.f - d.exposureWindow / d.frameDt, 0.f, 1.f) : 1.f;
+     d.exposureWindow = 0.f;
+     Ocean* ocean = sim->getOcean();
+diff --git a/Library/src/graphics/rtx/RTXRenderer.cpp b/Library/src/graphics/rtx/RTXRenderer.cpp
+index 6b38993..7cf22fe 100644
+--- a/Library/src/graphics/rtx/RTXRenderer.cpp
++++ b/Library/src/graphics/rtx/RTXRenderer.cpp
+@@ -93,6 +93,7 @@ struct RTXRenderer::Impl
+ {
+     RTXOffline* offline = nullptr;
+     bool useDlss = false;
++    std::string dlssQuality;
+     unsigned int spp = 4;
+     unsigned int maxBounces = 1;
+     bool debugAlbedo = false;
+@@ -107,6 +108,7 @@ struct RTXRenderer::Impl
+     OptixShaderBindingTable sbt = {};
+     DeviceBuffer raygenRecord, missRecords, hitRecords;
+ 
++    size_t sceneRevision = size_t(-1);
+     std::unordered_map<int, GeometryGPU> geometries;
+     std::vector<rtx::Geometry> geometryTable;
+     DeviceBuffer geometryTableDev;
+@@ -388,7 +390,7 @@ bool RTXRenderer::Impl::PrepareCamera(OpenGLRealCamera* cam, CameraState& s)
+     s.renderH = outH;
+     s.hasPrev = false;
+ #ifdef STONEFISH_HAS_DLSS
+-    if(dlss != nullptr)
++    if(useDlss && dlss != nullptr)
+     {
+         if(s.dlss != nullptr)
+             dlss->DestroyFeature(s.dlss);
+@@ -475,7 +477,7 @@ const uint8_t* RTXRenderer::Impl::Render(OpenGLRealCamera* cam)
+         return nullptr;
+     }
+ 
+-    const float4* finalColor = s.color.as<float4>();
++    const float4* finalColor = debugAlbedo ? s.albedo.as<float4>() : s.color.as<float4>();
+     if(debugAlbedo && s.dlss == nullptr)
+     {
+         LaunchTonemap(s.albedo.as<float4>(), s.rgb.as<unsigned char>(), s.outW, s.outH, 1.f, stream);
+@@ -486,7 +488,7 @@ const uint8_t* RTXRenderer::Impl::Render(OpenGLRealCamera* cam)
+ #ifdef STONEFISH_HAS_DLSS
+     if(s.dlss != nullptr)
+     {
+-        if(dlss->Evaluate(s.dlss, s.color.as<float4>(), s.depth.as<float>(), s.motion.as<float2>(),
++        if(dlss->Evaluate(s.dlss, finalColor, s.depth.as<float>(), s.motion.as<float2>(),
+                           p.jitter.x, p.jitter.y, !s.hasPrev, s.upscaled.as<float4>()))
+             finalColor = s.upscaled.as<float4>();
+         else
+@@ -513,7 +515,7 @@ const uint8_t* RTXRenderer::Impl::Render(OpenGLRealCamera* cam)
+     float ev100 = logSum / (float)n + log2f(100.f / 12.5f);
+     float target = std::min(1.f / (1.2f * powf(2.f, ev100)), 0.0004f);
+     s.exposure = s.exposure < 0.f ? target : s.exposure + (target - s.exposure) * 0.1f;
+-    float exposure = s.exposure * powf(2.f, cam->getExposureCompensation());
++    float exposure = debugAlbedo ? 1.f : s.exposure * powf(2.f, cam->getExposureCompensation());
+ 
+     LaunchTonemap(finalColor, s.rgb.as<unsigned char>(), s.outW, s.outH, exposure, stream);
+     cudaMemcpyAsync(s.host, (void*)s.rgb.ptr, (size_t)n * 3, cudaMemcpyDeviceToHost, stream);
+@@ -622,6 +624,43 @@ RTXRenderer* RTXRenderer::Create(bool dlss, bool offline)
+     return r;
+ }
+ 
++bool RTXRenderer::Configure(unsigned int spp, unsigned int bounces, bool useDlss,
++                            const std::string& quality, bool debugAlbedo)
++{
++    Impl& d = *impl;
++    if(d.offline != nullptr) return false;
++    cudaStreamSynchronize(d.stream);
++    const bool rebuild = d.useDlss != useDlss || d.dlssQuality != quality;
++    bool supported = true;
++#ifdef STONEFISH_HAS_DLSS
++    if(useDlss && d.dlss == nullptr) d.dlss = DLSS::Create(d.cuContext, d.stream);
++    if(useDlss && d.dlss == nullptr) { useDlss = false; supported = false; }
++    if(rebuild)
++    {
++        for(auto& [camera, state] : d.cameras)
++        {
++            if(d.dlss && state.dlss) d.dlss->DestroyFeature(state.dlss);
++            state.dlss = nullptr;
++            state.outW = 0; // PrepareCamera recreates buffers/features next frame.
++        }
++        if(d.dlss) d.dlss->SetQuality(quality);
++    }
++#else
++    if(useDlss) supported = false;
++    useDlss = false;
++#endif
++    d.useDlss = useDlss;
++    d.dlssQuality = quality;
++    d.spp = std::max(1u, spp);
++    d.maxBounces = bounces;
++    d.debugAlbedo = debugAlbedo;
++    for(auto& [camera, state] : d.cameras) state.hasPrev = false;
++    d.previousModels.clear();
++    cInfo("RTX settings: %u spp, %u bounce(s), DLSS %s (%s), debug albedo %s",
++          d.spp, d.maxBounces, useDlss ? "on" : "off", quality.c_str(), debugAlbedo ? "on" : "off");
++    return supported;
++}
++
+ void RTXRenderer::BeginFrame(const std::vector<Renderable>& queue, OpenGLContent* content, SimulationManager* sim)
+ {
+     Impl& d = *impl;
+@@ -630,6 +669,26 @@ void RTXRenderer::BeginFrame(const std::vector<Renderable>& queue, OpenGLContent
+         d.offline->BeginFrame(queue, content, sim);
+         return;
+     }
++    // A live edit may reuse GL object/texture IDs. Invalidate copied CUDA
++    // resources at the next render boundary, after all previous launches finish.
++    if(d.sceneRevision != content->getSceneRevision())
++    {
++        cudaStreamSynchronize(d.stream);
++        for(auto& g : d.geometries) g.second.Free();
++        d.geometries.clear();
++        d.geometryTable.clear();
++        for(auto& t : d.textures)
++        {
++            if(t.second.tex) cudaDestroyTextureObject(t.second.tex);
++            if(t.second.array) cudaFreeArray(t.second.array);
++        }
++        d.textures.clear();
++        d.materials.clear();
++        d.previousModels.clear();
++        for(auto& camera : d.cameras) camera.second.hasPrev = false;
++        d.geometryTableDirty = true;
++        d.sceneRevision = content->getSceneRevision();
++    }
+     ++d.globalFrame;
+     d.UpdateMaterials(content);
+ 
+@@ -637,7 +696,7 @@ void RTXRenderer::BeginFrame(const std::vector<Renderable>& queue, OpenGLContent
+     d.instances.clear();
+     std::map<std::tuple<int, int, int>, glm::mat4> currentModels;
+     std::map<std::pair<int, int>, int> occurrence;
+-    const int defaultLook = (int)content->getLooksCount() - 1;
++    const int defaultLook = content->getLookId("__Default__");
+ 
+     for(const Renderable& r : queue)
+     {
+@@ -728,6 +787,7 @@ void RTXRenderer::BeginFrame(const std::vector<Renderable>& queue, OpenGLContent
+     p.waterRadiance = make_float3(30.f * skyScale, 180.f * skyScale, 240.f * skyScale);
+     p.waterZ = 0.f;
+     p.waterEta = 1.33f;
++    p.waterWave = 0.f;
+     p.water = 0;
+     p.snowDensity = 0.f;
+     p.snowDrift = make_float3(0.08f, 0.02f, 0.03f);
+@@ -738,14 +798,15 @@ void RTXRenderer::BeginFrame(const std::vector<Renderable>& queue, OpenGLContent
+         glm::vec3 b = glm::max(ocean->getOpenGLOcean()->getLightScattering(), glm::vec3(0.f));
+         p.waterExtinction = F3(c);
+         p.waterScatter = F3(b);
++        p.waterWave = (float)ocean->getWaveHeight();
+         p.water = 1;
+         if(ocean->hasParticles())
+             p.snowDensity = 0.32f;
+         static bool logged = false;
+         if(!logged)
+         {
+-            cInfo("RTX water: c=(%.3f %.3f %.3f) /m  b=(%.3f %.3f %.3f) /m  snow %s",
+-                  c.x, c.y, c.z, b.x, b.y, b.z, p.snowDensity > 0.f ? "on" : "off");
++            cInfo("RTX water: c=(%.3f %.3f %.3f) /m  b=(%.3f %.3f %.3f) /m  wave %.3f  snow %s",
++                  c.x, c.y, c.z, b.x, b.y, b.z, p.waterWave, p.snowDensity > 0.f ? "on" : "off");
+             logged = true;
+         }
+     }
+diff --git a/Library/src/graphics/rtx/RTXShared.h b/Library/src/graphics/rtx/RTXShared.h
+index d7446b1..5a2a1a3 100644
+--- a/Library/src/graphics/rtx/RTXShared.h
++++ b/Library/src/graphics/rtx/RTXShared.h
+@@ -97,9 +97,10 @@ namespace rtx
+         int underwater;
+         float3 waterExtinction; // Jerlov beam attenuation c [1/m]
+         float3 waterScatter;    // Jerlov scattering b [1/m]
+-        float waterZ;           // flat surface, NED (z down)
++        float waterZ;           // mean surface, NED (z down)
+         float waterEta;         // water refractive index
+-        int water;              // flat-ocean medium is active
++        float waterWave;        // sea state; 0 keeps the surface flat
++        int water;              // ocean medium is active
+         float snowDensity;      // flake occupancy per lattice cell, 0 disables
+         float snowTime;
+         float snowDt;
+diff --git a/Library/src/graphics/rtx/rtx_programs.cu b/Library/src/graphics/rtx/rtx_programs.cu
+index ee14e16..feeffca 100644
+--- a/Library/src/graphics/rtx/rtx_programs.cu
++++ b/Library/src/graphics/rtx/rtx_programs.cu
+@@ -153,9 +153,11 @@ static __forceinline__ __device__ float3 shade(const Surface& s, float3 N, float
+     return (kD * s.albedo / RTX_PI + specular) * NdotL;
+ }
+ 
+-static __forceinline__ __device__ float3 background(float3 dir)
++static __forceinline__ __device__ float3 background(float3 dir, int inWater)
+ {
+-    if(params.underwater)
++    // The camera's initial medium is not necessarily the ray's current medium:
++    // transmitted rays can cross the interface and see the above-water sky.
++    if(inWater)
+         return params.waterRadiance;
+     float up = -dir.z;
+     if(up < 0.f)
+@@ -215,6 +217,27 @@ static __forceinline__ __device__ bool refractDir(float3 I, float3 N, float eta,
+     return true;
+ }
+ 
++// Upward displacement of a short pool chop, in metres. waterWave is the Stonefish sea state.
++static __forceinline__ __device__ float poolRipple(float x, float y, float time, float waterWave)
++{
++    float a = fminf(waterWave * 0.1f, 0.04f);
++    float h = 0.f;
++    h += a * sinf(6.2f * x + 1.15f * time);
++    h += a * 0.65f * sinf(5.4f * y - 0.85f * time);
++    h += a * 0.40f * sinf(4.1f * x + 3.3f * y + 1.55f * time);
++    h += a * 0.22f * sinf(11.f * x - 8.f * y - 2.1f * time);
++    return h;
++}
++
++// Downward normal (NED +Z, into the water) of the surface z = waterZ - h.
++static __forceinline__ __device__ float3 poolRippleDownNormal(float x, float y, float time, float waterWave)
++{
++    const float e = 0.02f;
++    float dhdx = (poolRipple(x + e, y, time, waterWave) - poolRipple(x - e, y, time, waterWave)) / (2.f * e);
++    float dhdy = (poolRipple(x, y + e, time, waterWave) - poolRipple(x, y - e, time, waterWave)) / (2.f * e);
++    return normalize(make_float3(dhdx, dhdy, 1.f));
++}
++
+ static __forceinline__ __device__ float fresnelDielectric(float cosI, float eta)
+ {
+     float sin2T = eta * eta * fmaxf(0.f, 1.f - cosI * cosI);
+@@ -481,6 +504,7 @@ extern "C" __global__ void __raygen__camera()
+         int scatter = 0;
+         int guard = 0;
+         int first = 1;
++        int inWater = params.underwater;
+         while(scatter <= (int)params.maxBounces && guard < (int)params.maxBounces + 8)
+         {
+             ++guard;
+@@ -530,9 +554,22 @@ extern "C" __global__ void __raygen__camera()
+             if(tSurf < tGeom)
+             {
+                 float3 surfP = origin + dir * tSurf;
++                if(params.waterWave > 1e-4f && fabsf(dir.z) > 1e-4f)
++                {
++                    float h = poolRipple(surfP.x, surfP.y, params.snowTime, params.waterWave);
++                    float t2 = tSurf + (params.waterZ - h - surfP.z) / dir.z;
++                    if(t2 > tmin && t2 < tGeom)
++                    {
++                        tSurf = t2;
++                        surfP = origin + dir * tSurf;
++                    }
++                }
+                 float3 Tr = attenuate(origin, dir, tSurf, radiance, throughput);
+                 throughput *= Tr;
+-                float3 Ns = fromBelow ? make_float3(0.f, 0.f, 1.f) : make_float3(0.f, 0.f, -1.f);
++                float3 downN = params.waterWave > 1e-4f
++                    ? poolRippleDownNormal(surfP.x, surfP.y, params.snowTime, params.waterWave)
++                    : make_float3(0.f, 0.f, 1.f);
++                float3 Ns = fromBelow ? downN : -downN;
+                 float eta = fromBelow ? params.waterEta : 1.f / params.waterEta;
+                 float cosI = clampf(-dot(Ns, dir), 0.f, 1.f);
+                 float F = fresnelDielectric(cosI, eta);
+@@ -556,6 +593,7 @@ extern "C" __global__ void __raygen__camera()
+                     throughput *= 1.f / (eta * eta);
+                     dir = rd;
+                     origin = surfP - Ns * RAY_EPS;
++                    inWater = !inWater;
+                 }
+                 if(maxComponent(throughput) < 1e-4f)
+                     break;
+@@ -566,7 +604,7 @@ extern "C" __global__ void __raygen__camera()
+             {
+                 float reach = fmaxf(params.farClip, 1.f);
+                 float3 Tr = attenuate(origin, dir, reach, radiance, throughput);
+-                radiance += throughput * Tr * background(dir);
++                radiance += throughput * Tr * background(dir, inWater);
+                 if(guide)
+                 {
+                     float3 far = params.eye + dir * (params.farClip * 0.5f);
+diff --git a/UPSTREAM.md b/UPSTREAM.md
+index 2c5839a..4bd57f6 100644
+--- a/UPSTREAM.md
++++ b/UPSTREAM.md
+@@ -57,7 +57,7 @@ CIE XYZ, before the sensor), `rtx_<sensor>_<n>_raw.png` (16-bit Bayer mosaic), a
+ PNG. The EXR writer is in-tree (uncompressed scanline, float B/G/R); tinyexr is not a dependency.
+ Seeds come from the frame index, the pixel, and `sampling seed`, so a repeated run matches.
+ 
+-Hydrus uses `auvs/hydrus_sim/rtx_offline.xml`. The root is `<rtx_offline>`. Attributes not set keep
++Hydrus uses `auvs/stonefish_sim/rtx_offline.xml`. The root is `<rtx_offline>`. Attributes not set keep
+ the defaults in `RTXConfig.h`.
+ 
+ | Element | Attributes |
+@@ -92,7 +92,7 @@ tracking, Beer-Lambert, Snell's window, the flat-port angle, the Jakob-Hanika ro
+ ColorChecker through the default sensitivities (CIE76), and specular-manifold caustics against a
+ photon map.
+ 
+-On the Hydrus pool camera at 800×600 with the settings in `auvs/hydrus_sim/rtx_offline.xml`, one
++On the Hydrus pool camera at 800×600 with the settings in `auvs/stonefish_sim/rtx_offline.xml`, one
+ sample costs about 22 ms, so 1,024 samples take about 22 s and 65,536 samples about 25 min on the
+ RTX 4090. Green-channel RMSE against an independent 65,536-sample frame was 0.55, 0.27 and 0.14
+ of the mean at 64, 256 and 1,024 samples, which tracks 1/sqrt(samples). The in-renderer relative

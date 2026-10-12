@@ -5,6 +5,8 @@ const c = @cImport({
     @cInclude("auv.h");
 });
 
+pub const Error = enum(u8) { none, scenario_restart, seed_goal };
+
 pub const ObjectCls = enum(u8) {
     cube,
     rect,
@@ -52,6 +54,7 @@ pub const Frame = extern struct {
     imu_ok: bool,
     gyro_ok: bool,
     localization_epoch: u32,
+    @"error": Error,
 };
 
 pub const abi_version = c.AUV_ABI_VERSION;
@@ -160,6 +163,7 @@ comptime {
     assertSameLayout(math.Vector6f, c.MathVector6f);
     assertSameLayout(math.Pose, c.MathPose);
     assertSameLayout(math.BoundingBox, c.MathBoundingBox);
+    assertSameLayout(Error, c.AuvError);
     assertSameLayout(ObjectCls, c.AuvObjectCls);
     assertSameLayout(Object, c.AuvObject);
     assertSameLayout(Point2u, c.AuvPoint2u);

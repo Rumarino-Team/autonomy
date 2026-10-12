@@ -1,8 +1,11 @@
+#include "blender_stonefish_cpp/build_scene.hpp"
+#include "robot.hpp"
+
 #include <cmath>
 #include <cstdio>
+#include <iostream>
 #include <math.h>
-#include <csignal>
-#include <cstdlib>
+
 #include "../../include/auv.h"
 
 #include "Stonefish/actuators/Actuator.h"
@@ -10,49 +13,60 @@
 #include "Stonefish/core/ConsoleSimulationApp.h"
 #include "Stonefish/core/GraphicalSimulationApp.h"
 #include "Stonefish/core/Robot.h"
-#include "Stonefish/core/ScenarioParser.h"
+#include "Stonefish/core/SimulationApp.h"
 #include "Stonefish/core/SimulationManager.h"
 #include "Stonefish/entities/Entity.h"
 #include "Stonefish/entities/MovingEntity.h"
+#include "Stonefish/entities/SolidEntity.h"
 #include "Stonefish/entities/StaticEntity.h"
 #include "Stonefish/graphics/OpenGLDataStructs.h"
 #include "Stonefish/graphics/OpenGLPipeline.h"
+#include "Stonefish/graphics/OpenGLTrackball.h"
+#include "Stonefish/graphics/OpenGLContent.h"
+#include "Stonefish/entities/forcefields/Ocean.h"
+#include <glm/gtc/quaternion.hpp>
 #include "Stonefish/sensors/Sensor.h"
 #include "Stonefish/sensors/ScalarSensor.h"
 #include "Stonefish/sensors/Sample.h"
 #include "Stonefish/sensors/vision/Camera.h"
+#include "Stonefish/sensors/vision/ColorCamera.h"
 
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <dlfcn.h>
+#include <exception>
 #include <filesystem>
-#include <iostream>
-#include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#include <poll.h>
+#include <sys/inotify.h>
+#include <unistd.h>
+#include <nlohmann/json.hpp>
+#include <fstream>
 
-
-static std::filesystem::path dataPath = "auvs/stonefish_sim/data/";
-static std::string scenario_file = "scenarios/hydrus_env.scn";
-static constexpr sf::Scalar kStepsPerSecond = 360.0;
-static constexpr sf::Scalar kPhysicsDt = sf::Scalar(1) / kStepsPerSecond;
-static constexpr sf::Scalar kRealtimeFactorCap = 1.0;
-static constexpr sf::Scalar kTrackingOkSeconds = 1000.0;
-static sf::Scalar trackingLossStart = kTrackingOkSeconds;
-static sf::Scalar trackingLossDuration = std::numeric_limits<sf::Scalar>::infinity();
-static uint32_t localizationEpoch = 0;
-static constexpr auto kMinRenderInterval = std::chrono::milliseconds(16);
-static constexpr bool kConsoleApp = false;
-static sf::Scalar realtimeFactorCap = kRealtimeFactorCap;
-
+#ifndef AUV_PLATFORM_CONFIG
+#define AUV_PLATFORM_CONFIG "auvs/stonefish_sim/platform.json"
+#endif
+static constexpr const char* kPlatformConfigPath = AUV_PLATFORM_CONFIG;
 
 volatile std::sig_atomic_t g_stop_requested = 0;
-
+static bool g_seed_goal_pending = true;
+static uint32_t localizationEpoch = 0;
+static std::optional<sf::Scalar> trackingLossStartOverride;
+static sf::Scalar trackingLossDuration = std::numeric_limits<sf::Scalar>::infinity();
 void requestStop(int)
 {
     g_stop_requested = 1;
@@ -65,6 +79,209 @@ void stopIfRequested()
     std::cerr << "[stonefish_sim] interrupted; shutting down" << std::endl;
     auv_deinit();
     std::exit(130);
+}
+
+struct RtxConfig {
+    bool enabled = false, dlss = true, debugAlbedo = false;
+    unsigned int spp = 4, bounces = 1;
+    std::string quality = "quality";
+    bool operator==(const RtxConfig&) const = default;
+};
+struct LookOverride {
+    std::optional<blender_stonefish_cpp::Vec3> color;
+    std::optional<double> roughness, metalness, reflectivity;
+    bool operator==(const LookOverride&) const = default;
+};
+struct GraphicsConfig {
+    std::optional<double> sunAzimuth, sunElevation, jerlov, waveHeight;
+    std::optional<bool> particles;
+    bool oceanVisible = true, aa = true, ao = true, ssr = true;
+    double viewerExposure = 0, cameraExposure = 0;
+    std::optional<RtxConfig> rtx;
+    std::map<std::string, LookOverride> looks;
+    bool operator==(const GraphicsConfig&) const = default;
+};
+
+GraphicsConfig ParseGraphics(const nlohmann::json& document)
+{
+    GraphicsConfig out;
+    if(!document.contains("graphics")) return out;
+    const auto& graphics = document.at("graphics");
+    auto keys = [](const nlohmann::json& object, std::initializer_list<const char*> allowed, const std::string& label) {
+        if(!object.is_object()) throw std::runtime_error(label + " must be an object");
+        for(const auto& [name, value] : object.items())
+            if(std::none_of(allowed.begin(), allowed.end(), [&](const char* key) { return name == key; }))
+                throw std::runtime_error("unknown " + label + " setting: " + name);
+    };
+    auto number = [](const nlohmann::json& value, double lo, double hi, const std::string& label) {
+        if(!value.is_number()) throw std::runtime_error(label + " must be numeric");
+        const double v = value.get<double>();
+        if(!std::isfinite(v) || v < lo || v > hi) throw std::runtime_error(label + " is out of range");
+        return v;
+    };
+    auto optionalNumber = [&](const nlohmann::json& object, const char* key, double lo, double hi) -> std::optional<double> {
+        if(!object.contains(key) || object.at(key).is_null()) return {};
+        return number(object.at(key), lo, hi, key);
+    };
+    keys(graphics, {"sun", "ocean", "viewer_exposure_ev", "camera_exposure_ev", "raster", "rtx", "looks"}, "graphics");
+    if(graphics.contains("sun")) {
+        const auto& sun = graphics.at("sun"); keys(sun, {"azimuth_deg", "elevation_deg"}, "sun");
+        out.sunAzimuth = optionalNumber(sun, "azimuth_deg", -360, 360);
+        out.sunElevation = optionalNumber(sun, "elevation_deg", -90, 90);
+    }
+    if(graphics.contains("ocean")) {
+        const auto& ocean = graphics.at("ocean"); keys(ocean, {"render_enabled", "jerlov", "particles", "wave_height"}, "ocean");
+        out.oceanVisible = ocean.value("render_enabled", true);
+        out.jerlov = optionalNumber(ocean, "jerlov", 0, 1);
+        out.waveHeight = optionalNumber(ocean, "wave_height", 0, 2);
+        if(ocean.contains("particles") && !ocean.at("particles").is_null()) out.particles = ocean.at("particles").get<bool>();
+    }
+    if(graphics.contains("viewer_exposure_ev")) out.viewerExposure = number(graphics.at("viewer_exposure_ev"), -20, 20, "viewer_exposure_ev");
+    if(graphics.contains("camera_exposure_ev")) out.cameraExposure = number(graphics.at("camera_exposure_ev"), -20, 20, "camera_exposure_ev");
+    if(graphics.contains("raster")) {
+        const auto& raster = graphics.at("raster"); keys(raster, {"anti_aliasing", "ambient_occlusion", "screen_space_reflections"}, "raster");
+        out.aa = raster.value("anti_aliasing", true); out.ao = raster.value("ambient_occlusion", true);
+        out.ssr = raster.value("screen_space_reflections", true);
+    }
+    if(graphics.contains("rtx")) {
+        const auto& rtx = graphics.at("rtx");
+        keys(rtx, {"enabled", "samples_per_pixel", "max_bounces", "dlss", "dlss_quality", "debug_albedo"}, "rtx");
+        RtxConfig config;
+        config.enabled = rtx.value("enabled", false); config.dlss = rtx.value("dlss", true);
+        config.debugAlbedo = rtx.value("debug_albedo", false); config.quality = rtx.value("dlss_quality", std::string("quality"));
+        auto integer = [&](const char* key, unsigned fallback, unsigned lo, unsigned hi) {
+            if(!rtx.contains(key)) return fallback;
+            const auto& value = rtx.at(key);
+            if(!value.is_number_integer()) throw std::runtime_error(std::string(key) + " must be an integer");
+            return static_cast<unsigned>(number(value, lo, hi, key));
+        };
+        config.spp = integer("samples_per_pixel", 4, 1, 4096); config.bounces = integer("max_bounces", 1, 0, 64);
+        if(config.quality != "quality" && config.quality != "balanced" && config.quality != "performance"
+           && config.quality != "ultra" && config.quality != "dlaa") throw std::runtime_error("invalid dlss_quality");
+        out.rtx = config;
+    }
+    if(graphics.contains("looks")) {
+        const auto& looks = graphics.at("looks");
+        if(!looks.is_object()) throw std::runtime_error("looks must be an object");
+        for(const auto& [name, value] : looks.items()) {
+            keys(value, {"color", "roughness", "metalness", "reflectivity"}, "look " + name);
+            LookOverride look;
+            if(value.contains("color") && !value.at("color").is_null()) {
+                const auto& color = value.at("color");
+                if(!color.is_array() || color.size() != 3) throw std::runtime_error("look color must have three components");
+                look.color = blender_stonefish_cpp::Vec3{number(color[0], 0, 1, "color"), number(color[1], 0, 1, "color"), number(color[2], 0, 1, "color")};
+            }
+            look.roughness = optionalNumber(value, "roughness", 0, 1); look.metalness = optionalNumber(value, "metalness", 0, 1);
+            look.reflectivity = optionalNumber(value, "reflectivity", 0, 1);
+            out.looks.emplace(name, std::move(look));
+        }
+    }
+    return out;
+}
+
+void OverrideSceneGraphics(const GraphicsConfig& graphics, blender_stonefish_cpp::SceneSettings& settings)
+{
+    auto& env = settings.environment;
+    if(graphics.sunAzimuth) env.azimuth = *graphics.sunAzimuth;
+    if(graphics.sunElevation) env.elevation = *graphics.sunElevation;
+    if(graphics.jerlov) env.jerlov = *graphics.jerlov;
+    if(graphics.waveHeight) env.waves = *graphics.waveHeight;
+    if(graphics.particles) env.particles = *graphics.particles;
+    for(const auto& [name, override] : graphics.looks) {
+        auto it = settings.looks.find(name);
+        if(it == settings.looks.end()) throw std::runtime_error("unknown graphics look: " + name);
+        auto& look = it->second;
+        if(override.color) look.color = *override.color;
+        if(override.roughness) look.roughness = *override.roughness;
+        if(override.metalness) look.metalness = *override.metalness;
+        if(override.reflectivity) look.reflectivity = *override.reflectivity;
+    }
+}
+
+struct PlatformConfig {
+    std::filesystem::path dataPath;
+    std::string blendFile;
+    std::string robot;
+    sf::Scalar kPhysicsDt;
+    sf::Scalar kStepsPerSecond;
+    sf::Scalar kRealtimeFactorCap;
+    sf::Scalar kTrackingOkSeconds;
+    std::chrono::milliseconds kMinRenderInterval;
+    bool kConsoleApp = false;
+    bool kBBoxOnlyInFrontOfCamera = false;
+    // Blender camera object name. Empty keeps the default trackball.
+    std::string viewCamera;
+    GraphicsConfig graphics;
+};
+
+std::optional<PlatformConfig> loadPlatformConfig(const std::filesystem::path& path){
+    std::ifstream json_file(path);
+    if(!json_file){
+        return std::nullopt;
+    }
+
+    const nlohmann::json parsed_json = nlohmann::json::parse(json_file);
+
+    PlatformConfig config{
+        .dataPath = parsed_json.at("data_path").get<std::string>(),
+        .blendFile = parsed_json.at("blend_file").get<std::string>(),
+        .robot = parsed_json.contains("robot") ? parsed_json.at("robot").get<std::string>() : "hydrus",
+        .kStepsPerSecond = parsed_json.at("steps_per_second").get<double>(),
+        .kRealtimeFactorCap = parsed_json.at("realtime_factor_cap").get<double>(),
+        .kTrackingOkSeconds = parsed_json.at("tracking_ok_seconds").get<double>(),
+        .kMinRenderInterval = std::chrono::milliseconds{
+            parsed_json.at("min_render_interval_ms").get<int>()},
+        .kConsoleApp = parsed_json.at("console").get<bool>(),
+        .kBBoxOnlyInFrontOfCamera = parsed_json.at("bbox_only_in_front_of_camera").get<bool>(),
+    };
+    if(parsed_json.contains("view_camera") && !parsed_json["view_camera"].is_null())
+    {
+        if(!parsed_json["view_camera"].is_string())
+        {
+            std::cerr << "[Parser] view_camera must be a string in " << path.string() << std::endl;
+            return std::nullopt;
+        }
+        config.viewCamera = parsed_json["view_camera"].get<std::string>();
+    }
+
+
+    if(config.dataPath.empty()){
+        std::cerr << "[Parser] data_path is empty in " << path.string() << std::endl;
+        return std::nullopt;
+    }
+    if(config.blendFile.empty()){
+        std::cerr << "[Parser] blend_file is required in " << path.string() << std::endl;
+        return std::nullopt;
+    }
+    if(!std::filesystem::is_directory(config.dataPath)){
+        std::cerr << "[Parser] data_path is not a directory: " << config.dataPath.string() << std::endl;
+        return std::nullopt;
+    }
+    const std::filesystem::path blend_path = config.dataPath / config.blendFile;
+    if(!std::filesystem::is_regular_file(blend_path)){
+        std::cerr << "[Parser] blend file not found: " << blend_path.string() << std::endl;
+        return std::nullopt;
+    }
+    if(!std::isfinite(config.kStepsPerSecond) || config.kStepsPerSecond <= sf::Scalar(0)){
+        std::cerr << "[Parser] steps_per_second must be > 0 in " << path.string() << std::endl;
+        return std::nullopt;
+    }
+    if(!std::isfinite(config.kRealtimeFactorCap) || config.kRealtimeFactorCap < sf::Scalar(0)){
+        std::cerr << "[Parser] realtime_factor_cap must be >= 0 in " << path.string() << std::endl;
+        return std::nullopt;
+    }
+    if(!std::isfinite(config.kTrackingOkSeconds) || config.kTrackingOkSeconds < sf::Scalar(0)){
+        std::cerr << "[Parser] tracking_ok_seconds must be >= 0 in " << path.string() << std::endl;
+        return std::nullopt;
+    }
+    if(config.kMinRenderInterval.count() < 0){
+        std::cerr << "[Parser] min_render_interval_ms must be >= 0 in " << path.string() << std::endl;
+        return std::nullopt;
+    }
+
+    config.graphics = ParseGraphics(parsed_json);
+    config.kPhysicsDt = sf::Scalar(1) / config.kStepsPerSecond;
+    return config;
 }
 
 namespace
@@ -152,6 +369,31 @@ bool FillObjectBBox(sf::Entity* entity, MathBoundingBox& bbox)
 }
 
 // Stonefish camera frame: +X right, +Y down, +Z along the optical axis.
+bool IsInFrontOfCamera(sf::Camera* camera, sf::Entity* entity)
+{
+    if(camera == nullptr || entity == nullptr)
+        return false;
+
+    sf::Vector3 min;
+    sf::Vector3 max;
+    entity->getAABB(min, max);
+    const sf::Transform world_to_camera = camera->getSensorFrame().inverse();
+
+    for(int corner = 0; corner < 8; ++corner)
+    {
+        const sf::Vector3 world(
+            (corner & 1) != 0 ? max.x() : min.x(),
+            (corner & 2) != 0 ? max.y() : min.y(),
+            (corner & 4) != 0 ? max.z() : min.z());
+        const sf::Vector3 local = world_to_camera * world;
+        if(local.z() > sf::Scalar(0.05)){
+            std::cout << entity->getName() << std::endl;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ProjectObjectBox(
     sf::Camera* camera,
     unsigned int image_width,
@@ -218,69 +460,119 @@ bool ProjectObjectBox(
     return box.bottom_right.x > box.top_left.x && box.bottom_right.y > box.top_left.y;
 }
 
-class AuvScenarioParser : public sf::ScenarioParser
+#ifndef BLENDER_STONEFISH_CONFIG
+#define BLENDER_STONEFISH_CONFIG "auvs/stonefish_sim/stonefish_config.yaml"
+#endif
+
+glm::mat3 RotationAbout(const glm::vec3& axis, float angle)
 {
-public:
-    using ScenarioParser::ScenarioParser;
-    std::unordered_map<std::string, ObjectCls> objectClasses;
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    if(axis.x != 0.f)
+        return glm::mat3(glm::vec3(1.f, 0.f, 0.f), glm::vec3(0.f, c, s), glm::vec3(0.f, -s, c));
+    if(axis.y != 0.f)
+        return glm::mat3(glm::vec3(c, 0.f, -s), glm::vec3(0.f, 1.f, 0.f), glm::vec3(s, 0.f, c));
+    return glm::mat3(glm::vec3(c, s, 0.f), glm::vec3(-s, c, 0.f), glm::vec3(0.f, 0.f, 1.f));
+}
 
-protected:
-    bool ParseStatic(XMLElement* element) override
-    {
-        const char* type = nullptr;
-        element->QueryStringAttribute("type", &type);
-        if(type != nullptr && (std::string(type) == "plane" || std::string(type) == "terrain"))
-            return ScenarioParser::ParseStatic(element);
-
-        const char* name = nullptr;
-        element->QueryStringAttribute("name", &name);
-        const char* display_name = name != nullptr ? name : "<unnamed>";
-
-        const char* cls = nullptr;
-        if(element->QueryStringAttribute("cls", &cls) != XML_SUCCESS)
-            element->QueryStringAttribute("clss", &cls);
-
-        if(cls == nullptr || *cls == '\0')
-        {
-            std::cerr << "[stonefish_sim] static object '" << display_name << "' is missing a cls tag\n";
-            return false;
-        }
-
-        const auto mapped = ParseObjectClass(cls);
-        if(!mapped)
-        {
-            std::cerr << "[stonefish_sim] static object '" << display_name << "' has unknown cls '" << cls << "'\n";
-            return false;
-        }
-        if(name == nullptr)
-        {
-            std::cerr << "[stonefish_sim] static object with cls '" << cls << "' is missing a name\n";
-            return false;
-        }
-
-        objectClasses[name] = *mapped;
-        return ScenarioParser::ParseStatic(element);
-    }
-};
+// Blender camera local -Z looks forward and local +Y is up. Mesh import flips local Z
+// and stores the object rotation as (-roll, pitch, -yaw), so the view uses that frame.
+bool ViewRotation(const double location[3], const double rotation[3], glm::vec3& eye, glm::vec3& forward, glm::quat& rotation_out)
+{
+    const glm::mat3 object =
+        RotationAbout(glm::vec3(0.f, 0.f, 1.f), static_cast<float>(-rotation[2]))
+        * RotationAbout(glm::vec3(0.f, 1.f, 0.f), static_cast<float>(rotation[1]))
+        * RotationAbout(glm::vec3(1.f, 0.f, 0.f), static_cast<float>(-rotation[0]));
+    forward = glm::normalize(object * glm::vec3(0.f, 0.f, 1.f));
+    glm::vec3 up = object * glm::vec3(0.f, 1.f, 0.f);
+    up = up - glm::dot(up, forward) * forward;
+    eye = glm::vec3(
+        static_cast<float>(-location[0]), static_cast<float>(location[1]), static_cast<float>(-location[2]));
+    if(glm::dot(up, up) < 1e-8f)
+        return false;
+    up = glm::normalize(up);
+    const glm::vec3 side = glm::normalize(glm::cross(up, forward));
+    const glm::mat3 world_from_local(side, -forward, up);
+    rotation_out = glm::quat_cast(glm::transpose(world_from_local));
+    return true;
+}
 
 class SimManager : public sf::SimulationManager
 {
 public:
-    SimManager(sf::Scalar stepsPerSecond, std::filesystem::path scenarioPath)
+    SimManager(
+        sf::Scalar stepsPerSecond,
+        std::filesystem::path data,
+        std::string blendFile,
+        std::string robot)
         : SimulationManager(stepsPerSecond),
-          scenarioPath(std::move(scenarioPath))
+          dataPath(std::move(data)),
+          blendPath(dataPath / blendFile),
+          robotName(std::move(robot))
     {
+    }
+
+    ~SimManager() override
+    {
+        destroyCameraPreview();
+    }
+
+    void destroyCameraPreview()
+    {
+        if(cameraPreviewEventWatchInstalled)
+        {
+            SDL_DelEventWatch(WatchCameraPreviewEvent, this);
+            cameraPreviewEventWatchInstalled = false;
+        }
+        if(cameraPreviewContext != nullptr)
+        {
+            if(cameraPreviewWindow != nullptr)
+                SDL_GL_MakeCurrent(cameraPreviewWindow, cameraPreviewContext);
+            if(cameraPreviewTexture != 0)
+                glDeleteTextures(1, &cameraPreviewTexture);
+            if(cameraPreviewBuffer != 0)
+                glDeleteBuffers(1, &cameraPreviewBuffer);
+            if(cameraPreviewVao != 0)
+                glDeleteVertexArrays(1, &cameraPreviewVao);
+            if(cameraPreviewProgram != 0)
+                glDeleteProgram(cameraPreviewProgram);
+            if(mainGLWindow != nullptr && mainGLContext != nullptr)
+                SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_GL_DeleteContext(cameraPreviewContext);
+            cameraPreviewContext = nullptr;
+        }
+        if(cameraPreviewWindow != nullptr)
+        {
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+        }
+        cameraPreviewTexture = 0;
+        cameraPreviewBuffer = 0;
+        cameraPreviewVao = 0;
+        cameraPreviewProgram = 0;
+        mainGLWindow = nullptr;
+        mainGLContext = nullptr;
     }
 
     void BuildScenario() override
     {
-        AuvScenarioParser parser(this);
-        if(!parser.Parse(scenarioPath.string()))
+        auto scene = blender_stonefish_cpp::ReadScene(blendPath, BLENDER_STONEFISH_CONFIG);
+        const auto nativeClasses = blender_stonefish_cpp::BuildScene(
+            *this, scene, BLENDER_STONEFISH_CONFIG, dataPath, blendPath);
+        viewCameras.clear();
+        for(const auto& camera : scene.cameras)
+            RememberViewCamera(camera.name, camera.location.data(), camera.rotation.data());
+        builtScene = std::move(scene);
+        builtSettings = blender_stonefish_cpp::ReadSceneSettings(BLENDER_STONEFISH_CONFIG, dataPath);
+        sceneDefaults = builtSettings;
+        if(!BuildRobot(*this, dataPath, robotName))
+            throw std::runtime_error("[stonefish_sim] failed to build robot " + robotName);
+        for(const auto& [name, cls] : nativeClasses)
         {
-            std::cerr << "Failed to parse scenario " << scenarioPath.string() << '\n';
-            return;
+            const auto mapped = ParseObjectClass(cls.c_str());
+            if(!mapped)
+                throw std::runtime_error("[stonefish_sim] unknown object class " + cls + " for " + name);
         }
-        const auto objectClasses = std::move(parser.objectClasses);
 
         odometry = nullptr;
         imu = nullptr;
@@ -315,27 +607,43 @@ public:
                 have_odometry = odometry->getNumOfChannels() >= 10;
             }
             else if(scalar->getScalarSensorType() == sf::ScalarSensorType::IMU && scalar->getNumOfChannels() >= 9)
-            {
                 imu = scalar;
-            }
         }
 
-        tracked_objects.clear();
-        for(unsigned int i = 0; sf::Entity* entity = getEntity(i); ++i)
+        if(auto* colorCamera = dynamic_cast<sf::ColorCamera*>(camera))
         {
-            if(tracked_objects.size() == AUV_FRAME_MAX_OBJECTS)
-                break;
-            auto it = objectClasses.find(entity->getName());
-            if(it == objectClasses.end())
-                continue;
-            tracked_objects.push_back({entity, i, it->second});
+            colorCamera->InstallNewDataHandler([this](sf::ColorCamera* source) {
+                const auto* pixels = static_cast<const uint8_t*>(source->getImageDataPointer());
+                unsigned int width = 0;
+                unsigned int height = 0;
+                source->getResolution(width, height);
+                if(pixels == nullptr || width == 0 || height == 0)
+                    return;
+
+                std::lock_guard<std::mutex> lock(cameraPreviewFrameMutex);
+                cameraPreviewWidth = width;
+                cameraPreviewHeight = height;
+                const size_t rowBytes = static_cast<size_t>(width) * 3;
+                const size_t sourceStride = (rowBytes + 3u) & ~size_t(3u);
+                cameraPreviewFrame.resize(rowBytes * height);
+                for(unsigned int row = 0; row < height; ++row)
+                    std::memcpy(
+                        cameraPreviewFrame.data() + static_cast<size_t>(row) * rowBytes,
+                        pixels + static_cast<size_t>(row) * sourceStride,
+                        rowBytes);
+                cameraPreviewFrameDirty.store(true);
+            });
+            if(sf::SimulationApp::getApp() != nullptr && sf::SimulationApp::getApp()->hasGraphics())
+                createCameraPreviewWindow();
         }
+
+        RefreshTrackedObjects();
 
         thrusters.clear();
         sf::Robot* robot = getRobot(0u);
         if(robot == nullptr)
         {
-            std::cout << "[stonefish_sim] no robot in scenario; thrusters will not run\n";
+            std::cout << "[stonefish_sim] no robot in scenario; thrusters will not run" << std::endl;
             return;
         }
         for(size_t i = 0; sf::Actuator* actuator = robot->getActuator(i); ++i)
@@ -346,10 +654,68 @@ public:
         }
     }
 
+    void RefreshTrackedObjects()
+    {
+        tracked_objects.clear();
+        for(const auto& object : builtScene.objects)
+        {
+            const auto cls = ParseObjectClass(object.cls.c_str());
+            if(!cls) continue;
+            auto* entity = getEntity(object.name);
+            if(entity == nullptr) continue;
+            const auto identity = object.id.empty() ? object.name : object.id;
+            const auto [id, inserted] = trackedIds.emplace(identity, nextTrackedId);
+            if(inserted) ++nextTrackedId;
+            if(tracked_objects.size() < AUV_FRAME_MAX_OBJECTS)
+                tracked_objects.push_back({entity, id->second, *cls});
+        }
+    }
+
     void setThrustorValues(const float* thrustor_values, uint8_t thrustor_values_len)
     {
-        for(uint8_t i = 0; i < thrustor_values_len; ++i)
+        const uint8_t count = std::min(thrustor_values_len, static_cast<uint8_t>(thrusters.size()));
+        for(uint8_t i = 0; i < count; ++i)
             thrusters[i]->setSetpoint(thrustor_values[i]);
+    }
+
+    void presentCameraPreview()
+    {
+        if(cameraPreviewCloseRequested.exchange(false))
+        {
+            destroyCameraPreview();
+            return;
+        }
+        if(cameraPreviewWindow == nullptr)
+            return;
+        if(!cameraPreviewFrameDirty.exchange(false))
+            return;
+
+        std::lock_guard<std::mutex> lock(cameraPreviewFrameMutex);
+        if(cameraPreviewFrame.empty() || cameraPreviewWidth == 0 || cameraPreviewHeight == 0)
+            return;
+
+        if(SDL_GL_MakeCurrent(cameraPreviewWindow, cameraPreviewContext) != 0)
+            return;
+        glViewport(0, 0, static_cast<GLsizei>(cameraPreviewWidth), static_cast<GLsizei>(cameraPreviewHeight));
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(cameraPreviewProgram);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, cameraPreviewTexture);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGB8,
+            static_cast<GLsizei>(cameraPreviewWidth),
+            static_cast<GLsizei>(cameraPreviewHeight),
+            0,
+            GL_RGB,
+            GL_UNSIGNED_BYTE,
+            cameraPreviewFrame.data());
+        glBindVertexArray(cameraPreviewVao);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        SDL_GL_SwapWindow(cameraPreviewWindow);
+        SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
     }
 
     bool getThrusterGeometry(AuvThrusterGeometry& geometry)
@@ -396,6 +762,7 @@ public:
             frame.camera_pose.quat.buf[2] = static_cast<float>(odometry->getLastValue(8));
             frame.camera_pose.quat.buf[3] = static_cast<float>(odometry->getLastValue(9));
         }
+
         if(imu != nullptr)
         {
             const auto sample = imu->getLastSample();
@@ -403,6 +770,10 @@ public:
             {
                 sf::Quaternion q;
                 q.setEulerZYX(sample.getValue(2), sample.getValue(1), sample.getValue(0));
+                // Export IMU feedback in the odometry body axes for every robot.
+                const auto bodyFromImu = odometry != nullptr
+                    ? odometry->getSensorFrame().inverse() * imu->getSensorFrame() : sf::I4();
+                q = q * bodyFromImu.getRotation().inverse();
                 frame.imu_quat.buf[0] = static_cast<float>(q.x());
                 frame.imu_quat.buf[1] = static_cast<float>(q.y());
                 frame.imu_quat.buf[2] = static_cast<float>(q.z());
@@ -410,16 +781,24 @@ public:
                 frame.imu_ok = true;
                 frame.gyro_ok = true;
                 frame.imu_timestamp = static_cast<uint64_t>(sample.getTimestamp() * sf::Scalar(1e9));
+                const auto gyro = bodyFromImu.getBasis() * sf::Vector3(
+                    sample.getValue(3), sample.getValue(4), sample.getValue(5));
+                const auto accel = bodyFromImu.getBasis() * sf::Vector3(
+                    sample.getValue(6), sample.getValue(7), sample.getValue(8));
                 for(unsigned int axis = 0; axis < 3; ++axis)
                 {
-                    frame.gyro.buf[axis] = static_cast<float>(sample.getValue(axis + 3));
-                    frame.accel.buf[axis] = static_cast<float>(sample.getValue(axis + 6));
+                    frame.gyro.buf[axis] = static_cast<float>(gyro[axis]);
+                    frame.accel.buf[axis] = static_cast<float>(accel[axis]);
                 }
             }
         }
 
         for(const TrackedObject& tracked : tracked_objects)
         {
+            if(bboxOnlyInFrontOfCamera && !IsInFrontOfCamera(camera, tracked.entity))
+                continue;
+
+            if(frame.objects_len >= AUV_FRAME_MAX_OBJECTS) break;
             AuvObject object{};
             if(!FillObjectBBox(tracked.entity, object.bbox))
                 continue;
@@ -441,7 +820,8 @@ public:
         frame.image_height = image_height;
         frame.observations_timestamp = frame.timestamp;
         const auto now = getSimulationTime();
-        const bool trackingLoss = now >= trackingLossStart && now - trackingLossStart < trackingLossDuration;
+        const auto lossStart = trackingLossStartOverride.value_or(trackingOkSeconds);
+        const bool trackingLoss = now >= lossStart && now - lossStart < trackingLossDuration;
         frame.tracking_ok = have_odometry && !trackingLoss;
         const uint64_t odometryTimestamp = have_odometry
             ? static_cast<uint64_t>(odometry->getLastSample().getTimestamp() * sf::Scalar(1e9)) : 0;
@@ -449,7 +829,7 @@ public:
         if(!frame.tracking_ok && !logged_tracking_loss)
         {
             logged_tracking_loss = true;
-            std::cout << "[stonefish_sim] tracking_ok false after " << trackingLossStart << " s\n";
+            std::cout << "[stonefish_sim] tracking_ok false after " << trackingOkSeconds << " s" << std::endl;
         }
         if(have_odometry)
         {
@@ -457,11 +837,6 @@ public:
             frame.pressure_depth = static_cast<float>(odometry->getLastValue(2));
             frame.pressure_depth_ok = true;
             frame.pressure_timestamp = odometryTimestamp;
-        }
-        if(!frame.tracking_ok)
-        {
-            frame.camera_pose = IdentityPose();
-            frame.objects_len = 0;
         }
 
         return frame;
@@ -475,7 +850,11 @@ public:
         ObjectCls cls;
     };
 
-    std::filesystem::path scenarioPath;
+    std::filesystem::path dataPath;
+    std::filesystem::path blendPath;
+    std::string robotName;
+    sf::Scalar trackingOkSeconds = std::numeric_limits<uint32_t>::max();;
+    bool bboxOnlyInFrontOfCamera = false;
     bool have_odometry = false;
     sf::ScalarSensor* odometry = nullptr;
     sf::ScalarSensor* imu = nullptr;
@@ -485,7 +864,184 @@ public:
     float focal_px = 0.f;
     bool logged_tracking_loss = false;
     std::vector<TrackedObject> tracked_objects;
+    std::unordered_map<std::string, uint32_t> trackedIds;
+    uint32_t nextTrackedId = 0;
+    blender_stonefish_cpp::SceneSettings builtSettings, sceneDefaults;
     std::vector<sf::Thruster*> thrusters;
+    SDL_Window* cameraPreviewWindow = nullptr;
+    SDL_Window* mainGLWindow = nullptr;
+    SDL_GLContext mainGLContext = nullptr;
+    SDL_GLContext cameraPreviewContext = nullptr;
+    GLuint cameraPreviewTexture = 0;
+    GLuint cameraPreviewBuffer = 0;
+    GLuint cameraPreviewVao = 0;
+    GLuint cameraPreviewProgram = 0;
+    std::atomic<bool> cameraPreviewCloseRequested{false};
+    std::atomic<bool> cameraPreviewFrameDirty{false};
+    bool cameraPreviewEventWatchInstalled = false;
+    std::mutex cameraPreviewFrameMutex;
+    std::vector<uint8_t> cameraPreviewFrame;
+    unsigned int cameraPreviewWidth = 0;
+    unsigned int cameraPreviewHeight = 0;
+    struct ViewCamera
+    {
+        std::string name;
+        glm::vec3 eye{0.f};
+        glm::vec3 forward{0.f, 1.f, 0.f};
+        glm::quat rotation{1.f, 0.f, 0.f, 0.f};
+    };
+    std::vector<ViewCamera> viewCameras;
+
+    static int WatchCameraPreviewEvent(void* userdata, SDL_Event* event)
+    {
+        auto* self = static_cast<SimManager*>(userdata);
+        if(self != nullptr && self->cameraPreviewWindow != nullptr
+           && event->type == SDL_WINDOWEVENT
+           && event->window.event == SDL_WINDOWEVENT_CLOSE
+           && event->window.windowID == SDL_GetWindowID(self->cameraPreviewWindow))
+            self->cameraPreviewCloseRequested.store(true);
+        return 1;
+    }
+
+    void createCameraPreviewWindow()
+    {
+        if(cameraPreviewWindow != nullptr)
+            return;
+        mainGLWindow = SDL_GL_GetCurrentWindow();
+        mainGLContext = SDL_GL_GetCurrentContext();
+        const std::string title = robotName + " Camera";
+        cameraPreviewWindow = SDL_CreateWindow(
+            title.c_str(),
+            SDL_WINDOWPOS_UNDEFINED,
+            SDL_WINDOWPOS_UNDEFINED,
+            static_cast<int>(image_width),
+            static_cast<int>(image_height),
+            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+        if(cameraPreviewWindow == nullptr)
+        {
+            std::cerr << "[stonefish_sim] could not create camera preview window: " << SDL_GetError() << std::endl;
+            return;
+        }
+        cameraPreviewContext = SDL_GL_CreateContext(cameraPreviewWindow);
+        if(cameraPreviewContext == nullptr)
+        {
+            std::cerr << "[stonefish_sim] could not create camera preview context: " << SDL_GetError() << std::endl;
+            SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+            return;
+        }
+        static constexpr char vertexShaderSource[] =
+            "#version 430 core\n"
+            "layout(location=0) in vec2 position;\n"
+            "layout(location=1) in vec2 texCoordIn;\n"
+            "out vec2 texCoord;\n"
+            "void main(){ gl_Position=vec4(position,0.0,1.0); texCoord=texCoordIn; }\n";
+        static constexpr char fragmentShaderSource[] =
+            "#version 430 core\n"
+            "in vec2 texCoord;\n"
+            "uniform sampler2D cameraImage;\n"
+            "out vec4 color;\n"
+            "void main(){ color=vec4(texture(cameraImage,texCoord).rgb,1.0); }\n";
+        auto compileShader = [](GLenum type, const char* source) -> GLuint {
+            const GLuint shader = glCreateShader(type);
+            glShaderSource(shader, 1, &source, nullptr);
+            glCompileShader(shader);
+            GLint compiled = GL_FALSE;
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+            if(compiled == GL_FALSE)
+            {
+                glDeleteShader(shader);
+                return 0;
+            }
+            return shader;
+        };
+        const GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexShaderSource);
+        const GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
+        if(vertexShader == 0 || fragmentShader == 0)
+        {
+            std::cerr << "[stonefish_sim] could not compile camera preview shaders" << std::endl;
+            if(vertexShader != 0)
+                glDeleteShader(vertexShader);
+            if(fragmentShader != 0)
+                glDeleteShader(fragmentShader);
+            SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_GL_DeleteContext(cameraPreviewContext);
+            cameraPreviewContext = nullptr;
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+            return;
+        }
+        cameraPreviewProgram = glCreateProgram();
+        glAttachShader(cameraPreviewProgram, vertexShader);
+        glAttachShader(cameraPreviewProgram, fragmentShader);
+        glLinkProgram(cameraPreviewProgram);
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(cameraPreviewProgram, GL_LINK_STATUS, &linked);
+        if(linked == GL_FALSE)
+        {
+            std::cerr << "[stonefish_sim] could not link camera preview shader program" << std::endl;
+            glDeleteProgram(cameraPreviewProgram);
+            cameraPreviewProgram = 0;
+            SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+            SDL_GL_DeleteContext(cameraPreviewContext);
+            cameraPreviewContext = nullptr;
+            SDL_DestroyWindow(cameraPreviewWindow);
+            cameraPreviewWindow = nullptr;
+            return;
+        }
+        static constexpr GLfloat vertices[] = {
+            -1.f, -1.f, 0.f, 1.f,
+             1.f, -1.f, 1.f, 1.f,
+             1.f,  1.f, 1.f, 0.f,
+            -1.f, -1.f, 0.f, 1.f,
+             1.f,  1.f, 1.f, 0.f,
+            -1.f,  1.f, 0.f, 0.f,
+        };
+        glGenVertexArrays(1, &cameraPreviewVao);
+        glBindVertexArray(cameraPreviewVao);
+        glGenBuffers(1, &cameraPreviewBuffer);
+        glBindBuffer(GL_ARRAY_BUFFER, cameraPreviewBuffer);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), nullptr);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), reinterpret_cast<void*>(2 * sizeof(GLfloat)));
+        glGenTextures(1, &cameraPreviewTexture);
+        glBindTexture(GL_TEXTURE_2D, cameraPreviewTexture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glUseProgram(cameraPreviewProgram);
+        glUniform1i(glGetUniformLocation(cameraPreviewProgram, "cameraImage"), 0);
+        SDL_GL_SetSwapInterval(0);
+        SDL_GL_MakeCurrent(mainGLWindow, mainGLContext);
+        SDL_AddEventWatch(WatchCameraPreviewEvent, this);
+        cameraPreviewEventWatchInstalled = true;
+    }
+
+    void RememberViewCamera(const std::string& name, const double location[3], const double rotation[3])
+    {
+        for(const auto& camera : viewCameras)
+        {
+            if(camera.name != name)
+                continue;
+            std::cerr << "[stonefish_sim] duplicate view camera '" << name << "'" << std::endl;
+            return;
+        }
+        ViewCamera camera;
+        camera.name = name;
+        if(!ViewRotation(location, rotation, camera.eye, camera.forward, camera.rotation))
+        {
+            std::cerr << "[stonefish_sim] skipping view camera '" << name << "': look direction and up are parallel"
+                      << std::endl;
+            return;
+        }
+        viewCameras.push_back(std::move(camera));
+    }
+    // Snapshot of the static scene currently committed to the live world.
+    blender_stonefish_cpp::Scene builtScene;
 };
 
 class SimApp : public sf::GraphicalSimulationApp
@@ -510,7 +1066,7 @@ public:
             return;
 
         const auto now = std::chrono::steady_clock::now();
-        if(lastRender.has_value() && now - *lastRender < kMinRenderInterval)
+        if(lastRender.has_value() && now - *lastRender < minRenderInterval)
             return;
         else{
         lastRender = now;
@@ -524,6 +1080,12 @@ public:
         }
     }
 
+    void stop()
+    {
+        StopSimulation();
+        Quit();
+    }
+
     void shutdown()
     {
         if(cleaned)
@@ -532,6 +1094,13 @@ public:
             Quit();
         CleanUp();
         cleaned = true;
+    }
+
+    std::chrono::milliseconds minRenderInterval{0};
+
+    void setTimeStep(sf::Scalar timeStep)
+    {
+        timeStep_ = timeStep;
     }
 
 private:
@@ -555,6 +1124,12 @@ public:
         StartSimulation();
     }
 
+    void stop()
+    {
+        StopSimulation();
+        Quit();
+    }
+
     void shutdown()
     {
         if(cleaned)
@@ -565,6 +1140,11 @@ public:
         cleaned = true;
     }
 
+    void setTimeStep(sf::Scalar timeStep)
+    {
+        timeStep_ = timeStep;
+    }
+
 private:
     bool cleaned = false;
 };
@@ -573,7 +1153,7 @@ struct RealtimeThrottle
 {
     void wait(sf::Scalar sim_time)
     {
-        if(kRealtimeFactorCap <= sf::Scalar(0))
+        if(realtimeFactorCap <= sf::Scalar(0))
             return;
 
         const auto wall = std::chrono::steady_clock::now();
@@ -588,7 +1168,7 @@ struct RealtimeThrottle
         const sf::Scalar sim_elapsed = sim_time - base_sim;
         const sf::Scalar wall_elapsed =
             std::chrono::duration<sf::Scalar>(wall - base_wall).count();
-        const sf::Scalar wall_budget = sim_elapsed / kRealtimeFactorCap;
+        const sf::Scalar wall_budget = sim_elapsed / realtimeFactorCap;
 
         if(wall_budget > wall_elapsed)
         {
@@ -605,18 +1185,402 @@ struct RealtimeThrottle
         }
     }
 
+    sf::Scalar realtimeFactorCap = 0;
     bool base_set = false;
     sf::Scalar base_sim = 0;
     std::chrono::steady_clock::time_point base_wall{};
 };
 
+constexpr unsigned kReloadPlatform = 1u << 0;
+constexpr unsigned kReloadBlend = 1u << 1;
+constexpr unsigned kReloadYaml = 1u << 2;
+constexpr unsigned kReloadTextures = 1u << 3;
+constexpr unsigned kReloadAll = kReloadPlatform | kReloadBlend | kReloadYaml | kReloadTextures;
+constexpr auto kReloadDebounce = std::chrono::milliseconds(200);
+
 struct SimulationContext
 {
+    PlatformConfig config;
     SimManager* sim = nullptr;
     SimApp* graphical = nullptr;
     ConsoleSimApp* console = nullptr;
     RealtimeThrottle realtime;
+    std::atomic<bool> watcherStop{false};
+    std::atomic<bool> scenarioReload{false};
+    std::atomic<unsigned> reloadReasons{0};
+    std::atomic<bool> watchPathsChanged{false};
+    std::mutex watchMutex;
+    std::filesystem::path watchedBlend;
+    std::filesystem::path watchedTextures;
+    std::thread watcher;
 };
+
+struct DirWatch
+{
+    int wd = -1;
+    std::filesystem::path dir;
+    struct Rule
+    {
+        std::string name;
+        unsigned reason = 0;
+        bool any_file = false;
+    };
+    std::vector<Rule> rules;
+};
+
+std::filesystem::path WatchDir(const std::filesystem::path& path)
+{
+    const auto dir = path.parent_path();
+    return dir.empty() ? std::filesystem::path(".") : dir;
+}
+
+void AddFileRule(std::vector<DirWatch>& watches, const std::filesystem::path& file, unsigned reason)
+{
+    const auto dir = WatchDir(file);
+    for(auto& watch : watches)
+    {
+        if(watch.dir != dir)
+            continue;
+        watch.rules.push_back({file.filename().string(), reason, false});
+        return;
+    }
+    DirWatch watch;
+    watch.dir = dir;
+    watch.rules.push_back({file.filename().string(), reason, false});
+    watches.push_back(std::move(watch));
+}
+
+void ArmWatches(int fd, std::vector<DirWatch>& watches, const std::filesystem::path& blend, const std::filesystem::path& textures)
+{
+    for(const auto& watch : watches)
+        if(watch.wd >= 0)
+            inotify_rm_watch(fd, watch.wd);
+    watches.clear();
+
+    AddFileRule(watches, kPlatformConfigPath, kReloadPlatform);
+    if(!blend.empty())
+        AddFileRule(watches, blend, kReloadBlend);
+    AddFileRule(watches, BLENDER_STONEFISH_CONFIG, kReloadYaml);
+    AddFileRule(watches, textures, kReloadTextures);
+    const auto addTextureDirectory = [&](const std::filesystem::path& dir) {
+        for(auto& watch : watches)
+            if(watch.dir == dir) { watch.rules.push_back({{}, kReloadTextures, true}); return; }
+        DirWatch watch; watch.dir = dir;
+        watch.rules.push_back({{}, kReloadTextures, true});
+        watches.push_back(std::move(watch));
+    };
+    std::error_code textures_error;
+    if(std::filesystem::is_directory(textures, textures_error))
+    {
+        addTextureDirectory(textures);
+        for(std::filesystem::recursive_directory_iterator it(textures, std::filesystem::directory_options::skip_permission_denied, textures_error), end;
+            !textures_error && it != end; it.increment(textures_error))
+            if(it->is_directory()) addTextureDirectory(it->path());
+    }
+
+    static std::unordered_set<std::string> logged_failures;
+    for(auto& watch : watches)
+    {
+        watch.wd = inotify_add_watch(fd, watch.dir.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_MOVED_FROM | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF);
+        if(watch.wd < 0)
+        {
+            if(logged_failures.insert(watch.dir.string()).second)
+                std::cerr << "[stonefish_sim] inotify watch failed for " << watch.dir.string() << ": " << std::strerror(errno) << std::endl;
+        }
+        else
+            logged_failures.erase(watch.dir.string());
+    }
+}
+
+bool AllWatchesArmed(const std::vector<DirWatch>& watches)
+{
+    if(watches.empty())
+        return false;
+    for(const auto& watch : watches)
+        if(watch.wd < 0)
+            return false;
+    return true;
+}
+
+unsigned ReasonsForEvent(const std::vector<DirWatch>& watches, const inotify_event* event)
+{
+    if((event->mask & IN_Q_OVERFLOW) != 0)
+        return kReloadAll;
+    if((event->mask & IN_CREATE) != 0 && (event->mask & IN_ISDIR) == 0) return 0;
+    if((event->mask & (IN_DELETE_SELF | IN_MOVE_SELF)) != 0) return kReloadAll;
+    if((event->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_CREATE)) == 0 || event->len == 0)
+        return 0;
+    const std::string name(event->name);
+    for(const auto& watch : watches)
+    {
+        if(watch.wd != event->wd)
+            continue;
+        unsigned reasons = 0;
+        for(const auto& rule : watch.rules)
+            if(rule.any_file || rule.name == name)
+                reasons |= rule.reason;
+        return reasons;
+    }
+    return 0;
+}
+
+void scenarioWatchLoop(SimulationContext* ctx)
+{
+    const int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if(fd < 0)
+    {
+        std::cerr << "[stonefish_sim] inotify_init failed: " << std::strerror(errno) << std::endl;
+        return;
+    }
+    const struct CloseFd
+    {
+        int fd;
+        ~CloseFd() { if(fd >= 0) close(fd); }
+    } close_fd{fd};
+
+    std::vector<DirWatch> watches;
+    unsigned pending = 0;
+    auto deadline = std::chrono::steady_clock::time_point::max();
+    alignas(inotify_event) char buffer[16 * 1024];
+
+    while(!ctx->watcherStop.load())
+    {
+        if(ctx->watchPathsChanged.exchange(false) || !AllWatchesArmed(watches))
+        {
+            std::filesystem::path blend;
+            std::filesystem::path textures;
+            {
+                std::lock_guard<std::mutex> lock(ctx->watchMutex);
+                blend = ctx->watchedBlend;
+                textures = ctx->watchedTextures;
+            }
+            ArmWatches(fd, watches, blend, textures);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if(pending != 0 && now >= deadline)
+        {
+            ctx->reloadReasons.fetch_or(pending);
+            ctx->scenarioReload.store(true);
+            pending = 0;
+            deadline = std::chrono::steady_clock::time_point::max();
+        }
+
+        int timeout_ms = 50;
+        if(pending != 0)
+        {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+            if(remaining < timeout_ms)
+                timeout_ms = remaining < 0 ? 0 : static_cast<int>(remaining);
+        }
+        pollfd poll_fd{fd, POLLIN, 0};
+        const int polled = poll(&poll_fd, 1, timeout_ms);
+        if(ctx->watcherStop.load())
+            break;
+        if(polled < 0)
+        {
+            if(errno == EINTR)
+                continue;
+            std::cerr << "[stonefish_sim] inotify poll failed: " << std::strerror(errno) << std::endl;
+            break;
+        }
+        if(polled == 0 || (poll_fd.revents & POLLIN) == 0)
+            continue;
+
+        while(true)
+        {
+            const ssize_t bytes = read(fd, buffer, sizeof(buffer));
+            if(bytes < 0)
+            {
+                if(errno == EAGAIN || errno == EINTR)
+                    break;
+                std::cerr << "[stonefish_sim] inotify read failed: " << std::strerror(errno) << std::endl;
+                break;
+            }
+            if(bytes == 0)
+                break;
+            for(ssize_t offset = 0; offset < bytes;)
+            {
+                const auto* event = reinterpret_cast<const inotify_event*>(buffer + offset);
+                if((event->mask & (IN_ISDIR | IN_DELETE_SELF | IN_MOVE_SELF)) != 0)
+                    ctx->watchPathsChanged.store(true);
+                const unsigned reasons = ReasonsForEvent(watches, event);
+                if(reasons != 0)
+                {
+                    pending |= reasons;
+                    deadline = std::chrono::steady_clock::now() + kReloadDebounce;
+                }
+                offset += static_cast<ssize_t>(sizeof(inotify_event) + event->len);
+            }
+        }
+    }
+}
+
+void noteWatchedFiles(SimulationContext* ctx)
+{
+    std::lock_guard<std::mutex> lock(ctx->watchMutex);
+    ctx->watchedBlend = ctx->sim->blendPath;
+    ctx->watchedTextures = ctx->sim->dataPath / "textures";
+    ctx->watchPathsChanged.store(true);
+}
+
+void startScenarioWatcher(SimulationContext* ctx)
+{
+    ctx->watcherStop.store(false);
+    ctx->scenarioReload.store(false);
+    ctx->reloadReasons.store(0);
+    noteWatchedFiles(ctx);
+    ctx->watcher = std::thread(scenarioWatchLoop, ctx);
+}
+
+void stopScenarioWatcher(SimulationContext* ctx)
+{
+    if(!ctx->watcher.joinable())
+        return;
+    ctx->watcherStop.store(true);
+    ctx->watcher.join();
+}
+
+void ApplyViewCamera(SimulationContext* ctx)
+{
+    if(ctx == nullptr || ctx->graphical == nullptr || ctx->config.viewCamera.empty())
+        return;
+    auto* trackball = ctx->sim->getTrackball();
+    if(trackball == nullptr)
+        return;
+    const SimManager::ViewCamera* selected = nullptr;
+    for(const auto& camera : ctx->sim->viewCameras)
+    {
+        if(camera.name == ctx->config.viewCamera)
+            selected = &camera;
+    }
+    if(selected == nullptr)
+    {
+        std::cerr << "[stonefish_sim] view camera '" << ctx->config.viewCamera << "' was not found. Blender cameras:";
+        if(ctx->sim->viewCameras.empty())
+            std::cerr << " (none)";
+        for(const auto& camera : ctx->sim->viewCameras)
+            std::cerr << ' ' << camera.name;
+        std::cerr << std::endl;
+        return;
+    }
+    glm::vec3 center(0.f);
+    glm::quat rotation(1.f, 0.f, 0.f, 0.f);
+    GLfloat radius = 5.f;
+    trackball->getOrbit(center, rotation, radius);
+    center = selected->eye + selected->forward * radius;
+    trackball->setOrbit(center, selected->rotation, radius);
+    std::cout << "[stonefish_sim] view camera " << selected->name << std::endl;
+}
+
+void ApplyRuntimeGraphics(SimulationContext* ctx, const PlatformConfig& loaded, bool force = false)
+{
+    if(ctx->graphical == nullptr) return;
+    const auto& graphics = loaded.graphics;
+    if(auto* ocean = ctx->sim->getOcean()) ocean->setRenderable(graphics.oceanVisible);
+    if(force || graphics.viewerExposure != ctx->config.graphics.viewerExposure)
+        if(auto* viewer = ctx->sim->getTrackball()) viewer->setExposureCompensation(graphics.viewerExposure);
+    if(force || graphics.cameraExposure != ctx->config.graphics.cameraExposure)
+        for(unsigned i = 0; auto* sensor = ctx->sim->getSensor(i); ++i)
+            if(auto* camera = dynamic_cast<sf::ColorCamera*>(sensor)) camera->setExposureCompensation(graphics.cameraExposure);
+    auto* pipeline = ctx->graphical->getGLPipeline();
+    pipeline->SetPostprocessing(graphics.aa, graphics.ao, graphics.ssr);
+    if((force && graphics.rtx) || graphics.rtx != ctx->config.graphics.rtx)
+    {
+        const RtxConfig rtx = graphics.rtx.value_or(RtxConfig{});
+#ifdef STONEFISH_HAS_RTX
+        pipeline->ConfigureRTX(rtx.enabled, rtx.dlss, rtx.spp, rtx.bounces, rtx.quality, rtx.debugAlbedo);
+#else
+        if(rtx.enabled) std::cerr << "[stonefish_sim] graphics.rtx requires the RTX build; using OpenGL" << std::endl;
+#endif
+    }
+}
+
+void ApplySceneGraphics(SimulationContext* ctx, const PlatformConfig& loaded)
+{
+    auto settings = ctx->sim->sceneDefaults;
+    OverrideSceneGraphics(loaded.graphics, settings);
+    if(settings.looks != ctx->sim->builtSettings.looks || settings.environment != ctx->sim->builtSettings.environment)
+    {
+        blender_stonefish_cpp::UpdateScene(*ctx->sim, ctx->sim->builtScene, ctx->sim->builtScene,
+            ctx->sim->builtSettings, settings, loaded.dataPath, false);
+        ctx->sim->builtSettings = std::move(settings);
+    }
+}
+
+void ApplyRuntimeParams(SimulationContext* ctx, const PlatformConfig& loaded)
+{
+    ctx->config.kPhysicsDt = loaded.kPhysicsDt;
+    ctx->config.kStepsPerSecond = loaded.kStepsPerSecond;
+    ctx->config.kRealtimeFactorCap = loaded.kRealtimeFactorCap;
+    ctx->config.kTrackingOkSeconds = loaded.kTrackingOkSeconds;
+    ctx->config.kMinRenderInterval = loaded.kMinRenderInterval;
+    const bool camera_changed = ctx->config.viewCamera != loaded.viewCamera;
+    ctx->config.viewCamera = loaded.viewCamera;
+    ctx->config.kBBoxOnlyInFrontOfCamera = loaded.kBBoxOnlyInFrontOfCamera;
+    ctx->sim->trackingOkSeconds = loaded.kTrackingOkSeconds;
+    ctx->sim->bboxOnlyInFrontOfCamera = loaded.kBBoxOnlyInFrontOfCamera;
+    ctx->sim->setStepsPerSecond(loaded.kStepsPerSecond);
+    ctx->realtime.realtimeFactorCap = loaded.kRealtimeFactorCap;
+    ctx->realtime.base_set = false;
+    if(ctx->graphical != nullptr)
+    {
+        ctx->graphical->minRenderInterval = loaded.kMinRenderInterval;
+        ctx->graphical->setTimeStep(loaded.kPhysicsDt);
+    }
+    if(ctx->console != nullptr)
+        ctx->console->setTimeStep(loaded.kPhysicsDt);
+    if(camera_changed)
+        ApplyViewCamera(ctx);
+}
+
+void reloadScenario(SimulationContext* ctx)
+{
+    // A save arriving during decode stays queued for the next frame.
+    const unsigned reasons = ctx->reloadReasons.exchange(0);
+    if(reasons == 0) return;
+    try
+    {
+        auto loaded = loadPlatformConfig(kPlatformConfigPath);
+        if(!loaded) throw std::runtime_error("invalid platform configuration");
+        if(loaded->robot != ctx->config.robot || loaded->kConsoleApp != ctx->config.kConsoleApp)
+            throw std::runtime_error("robot/console changes require a manual restart; live world kept");
+        const bool source_changed = loaded->dataPath != ctx->config.dataPath || loaded->blendFile != ctx->config.blendFile;
+        if(source_changed || (reasons & (kReloadBlend | kReloadYaml | kReloadTextures)) != 0)
+        {
+            // Validate all controller-facing classes before mutating any live entity.
+            auto settings = blender_stonefish_cpp::ReadSceneSettings(BLENDER_STONEFISH_CONFIG, loaded->dataPath);
+            const auto defaults = settings;
+            OverrideSceneGraphics(loaded->graphics, settings);
+            auto scene = blender_stonefish_cpp::ReadScene(loaded->dataPath / loaded->blendFile, BLENDER_STONEFISH_CONFIG);
+            for(const auto& object : scene.objects)
+                if(!object.cls.empty() && object.cls != "scenery" && !ParseObjectClass(object.cls.c_str()))
+                    throw std::runtime_error("unknown object class " + object.cls + " for " + object.name);
+            blender_stonefish_cpp::UpdateScene(*ctx->sim, ctx->sim->builtScene, scene,
+                ctx->sim->builtSettings, settings, loaded->dataPath, source_changed || (reasons & kReloadTextures) != 0);
+            ctx->sim->builtScene = std::move(scene);
+            ctx->sim->builtSettings = std::move(settings);
+            ctx->sim->sceneDefaults = defaults;
+            ctx->sim->RefreshTrackedObjects();
+            ctx->sim->viewCameras.clear();
+            for(const auto& camera : ctx->sim->builtScene.cameras)
+                ctx->sim->RememberViewCamera(camera.name, camera.location.data(), camera.rotation.data());
+        }
+        else ApplySceneGraphics(ctx, *loaded);
+        ApplyRuntimeGraphics(ctx, *loaded);
+        ApplyRuntimeParams(ctx, *loaded);
+        ctx->config = *loaded;
+        ctx->sim->dataPath = loaded->dataPath;
+        ctx->sim->blendPath = loaded->dataPath / loaded->blendFile;
+        if(source_changed) noteWatchedFiles(ctx);
+        if((source_changed || (reasons & kReloadBlend) != 0) && !ctx->config.viewCamera.empty()) ApplyViewCamera(ctx);
+        std::cout << "[stonefish_sim] live reload applied; simulation time=" << ctx->sim->getSimulationTime() << std::endl;
+    }
+    catch(const std::exception& ex)
+    {
+        std::cerr << "[stonefish_sim] live reload rejected; keeping running scene: " << ex.what() << std::endl;
+    }
+}
 
 SimulationContext* g_simulation_context = nullptr;
 
@@ -649,35 +1613,66 @@ sf::HelperSettings DefaultHelperSettings()
 
 void auv_init(void)
 {
-    g_stop_requested = 0;
-    std::signal(SIGINT, requestStop);
+    try
+    {
     auv_deinit();
+    // SDL otherwise installs its own SIGINT handler and Ctrl+C never returns the terminal.
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+    std::signal(SIGINT, requestStop);
+    std::signal(SIGTERM, requestStop);
+
+    const std::optional<PlatformConfig> loadedJson = loadPlatformConfig(kPlatformConfigPath);
+    if(!loadedJson)
+    {
+        std::cerr << "[stonefish_sim] platform config failed; simulation not started" << std::endl;
+        return;
+    }
+
     ++localizationEpoch;
-    const auto readDuration = [](const char* name, sf::Scalar fallback) {
+    trackingLossStartOverride.reset();
+    trackingLossDuration = std::numeric_limits<sf::Scalar>::infinity();
+    const auto readDuration = [](const char* name) -> std::optional<sf::Scalar> {
         const char* value = std::getenv(name);
-        if(value == nullptr) return fallback;
+        if(value == nullptr) return {};
         char* end = nullptr;
         const double parsed = std::strtod(value, &end);
-        return end != value && *end == '\0' && std::isfinite(parsed) && parsed >= 0
-            ? static_cast<sf::Scalar>(parsed) : fallback;
+        if(end == value || *end != '\0' || !std::isfinite(parsed) || parsed < 0) return {};
+        return static_cast<sf::Scalar>(parsed);
     };
-    trackingLossStart = readDuration("AUV_SIM_TRACKING_LOSS_START", kTrackingOkSeconds);
-    trackingLossDuration = readDuration("AUV_SIM_TRACKING_LOSS_DURATION", std::numeric_limits<sf::Scalar>::infinity());
-
+    trackingLossStartOverride = readDuration("AUV_SIM_TRACKING_LOSS_START");
+    if(auto duration = readDuration("AUV_SIM_TRACKING_LOSS_DURATION")) trackingLossDuration = *duration;
+    g_seed_goal_pending = true;
     g_simulation_context = new SimulationContext();
-    g_simulation_context->sim = new SimManager(kStepsPerSecond, dataPath / scenario_file);
-    if(kConsoleApp)
+    g_simulation_context->config = *loadedJson;
+    const PlatformConfig& config = g_simulation_context->config;
+    g_simulation_context->sim = new SimManager(
+        config.kStepsPerSecond, config.dataPath, config.blendFile, config.robot);
+    g_simulation_context->sim->trackingOkSeconds = config.kTrackingOkSeconds;
+    g_simulation_context->sim->bboxOnlyInFrontOfCamera = config.kBBoxOnlyInFrontOfCamera;
+    g_simulation_context->realtime.realtimeFactorCap = config.kRealtimeFactorCap;
+    if(config.kConsoleApp)
     {
-        std::cout << "[stonefish_sim] app=console\n";
-        g_simulation_context->console = new ConsoleSimApp(dataPath.string(), g_simulation_context->sim);
-        g_simulation_context->console->start(kPhysicsDt);
+        std::cout << "[stonefish_sim] app=console" << std::endl;
+        g_simulation_context->console = new ConsoleSimApp(config.dataPath.string(), g_simulation_context->sim);
+        g_simulation_context->console->start(config.kPhysicsDt);
     }
     else
     {
-        std::cout << "[stonefish_sim] app=graphical\n";
+        std::cout << "[stonefish_sim] app=graphical" << std::endl;
         g_simulation_context->graphical = new SimApp(
-            dataPath.string(), DefaultRenderSettings(), DefaultHelperSettings(), g_simulation_context->sim);
-        g_simulation_context->graphical->start(kPhysicsDt);
+            config.dataPath.string(), DefaultRenderSettings(), DefaultHelperSettings(), g_simulation_context->sim);
+        g_simulation_context->graphical->minRenderInterval = config.kMinRenderInterval;
+        g_simulation_context->graphical->start(config.kPhysicsDt);
+        ApplyViewCamera(g_simulation_context);
+    }
+    ApplySceneGraphics(g_simulation_context, config);
+    ApplyRuntimeGraphics(g_simulation_context, config, true);
+    startScenarioWatcher(g_simulation_context);
+    }
+    catch(const std::exception& ex)
+    {
+        std::cerr << "[stonefish_sim] native initialization failed: " << ex.what() << std::endl;
+        auv_deinit();
     }
 }
 
@@ -691,14 +1686,25 @@ bool auv_get_thruster_geometry(AuvThrusterGeometry* geometry)
 
 void auv_yield_until_next_frame(AuvFrame* frame)
 {
-
     stopIfRequested();
+    if(frame == nullptr) return;
+    *frame = {};
     if(g_simulation_context == nullptr)
+    {
+        frame->error = AUV_ERROR_NONE;
         return;
+    }
 
-    g_simulation_context->sim->StepSimulation(kPhysicsDt);
+    if(g_simulation_context->scenarioReload.exchange(false))
+        reloadScenario(g_simulation_context);
+    stopIfRequested();
+
+    g_simulation_context->sim->StepSimulation(g_simulation_context->config.kPhysicsDt);
     if(g_simulation_context->graphical != nullptr)
+    {
         g_simulation_context->graphical->updateGraphics();
+        g_simulation_context->sim->presentCameraPreview();
+    }
     g_simulation_context->realtime.wait(g_simulation_context->sim->getSimulationTime());
 
     const bool finished =
@@ -706,13 +1712,21 @@ void auv_yield_until_next_frame(AuvFrame* frame)
          && g_simulation_context->graphical->getState() == sf::SimulationState::FINISHED)
         || (g_simulation_context->console != nullptr
             && g_simulation_context->console->getState() == sf::SimulationState::FINISHED);
+    stopIfRequested();
     if(finished)
     {
-        std::cerr << "[stonefish_sim] simulation finished; restart for another run\n";
+        std::cerr << "[stonefish_sim] simulation finished; shutting down" << std::endl;
         auv_deinit();
         std::exit(0);
     }
     *frame = g_simulation_context->sim->getAuvFrame();
+    if(g_seed_goal_pending)
+    {
+        g_seed_goal_pending = false;
+        frame->error = AUV_ERROR_SEED_GOAL;
+    }
+    else
+        frame->error = AUV_ERROR_NONE;
 }
 
 
@@ -729,6 +1743,21 @@ void auv_deinit(void)
     if(g_simulation_context == nullptr)
         return;
 
+    stopScenarioWatcher(g_simulation_context);
+
+    if(g_simulation_context->graphical != nullptr)
+    {
+        g_simulation_context->graphical->stop();
+        g_simulation_context->sim->destroyCameraPreview();
+    }
+    if(g_simulation_context->console != nullptr)
+    {
+        g_simulation_context->console->stop();
+    }
+    // Bodies now release their graphics objects during destruction. Keep the
+    // app, content manager and GL context alive until the scenario is gone.
+    delete g_simulation_context->sim;
+    g_simulation_context->sim = nullptr;
     if(g_simulation_context->graphical != nullptr)
     {
         g_simulation_context->graphical->shutdown();
@@ -739,7 +1768,6 @@ void auv_deinit(void)
         g_simulation_context->console->shutdown();
         delete g_simulation_context->console;
     }
-    delete g_simulation_context->sim;
 
     delete g_simulation_context;
     g_simulation_context = nullptr;

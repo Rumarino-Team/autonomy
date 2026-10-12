@@ -1,0 +1,4112 @@
+{
+  "model": "Proteus photo reference v1",
+  "date": "2026-10-09",
+  "coordinate_frame": {
+    "units": "metres",
+    "body_forward": "+Y",
+    "body_down": "+Z",
+    "body_to_blender": "(-x, y, -z)"
+  },
+  "accuracy": "Photo-based proportions, anchored to existing simulator dimensions; not a measured CAD reconstruction.",
+  "physics_policy": "Six original external body proxies supply mass, inertia, collision, drag and buoyancy. Appearance groups are zero-mass non-buoyant internal parts. No electronics mass or thruster-duct displacement is invented.",
+  "dimensions": {
+    "upper_cabin_radius_m": 0.1,
+    "upper_cabin_length_m": 0.3,
+    "lower_cabin_radius_m": 0.05,
+    "lower_cabin_length_m": 0.31,
+    "cabin_wall_m": 0.005,
+    "rail_length_m": 0.45,
+    "photo_duct_outer_diameter_m": 0.108,
+    "photo_propeller_diameter_m": 0.09
+  },
+  "dimension_sources": {
+    "ducts_frame_cradle_connectors_internal_layout": "estimated from six supplied photographs",
+    "cabins_and_vertical_mounts": "inherited from robot.cpp and proteus_auv.scn",
+    "horizontal_mounts": "photo estimate: side pods below rails at body z=0.13 m, x=+/-0.205 m"
+  },
+  "thrusters": [
+    {
+      "index": 0,
+      "name": "thruster_0_left",
+      "position_body_m": [
+        0.205,
+        0,
+        0.13
+      ],
+      "rpy_rad": [
+        0,
+        0,
+        4.7123
+      ],
+      "effective_diameter_m": 0.18,
+      "visual_diameter_m": 0.09,
+      "max_rpm": 1000,
+      "normalized": true,
+      "inverted": true,
+      "right_handed": true,
+      "time_constant_s": 0.2,
+      "thrust_coeff_forward": 0.48,
+      "thrust_coeff_reverse": 0.48,
+      "torque_coeff": 0.05,
+      "source": "inherited dynamics; photo-estimated visual mesh and horizontal mount positions"
+    },
+    {
+      "index": 1,
+      "name": "thruster_1_right",
+      "position_body_m": [
+        -0.205,
+        0,
+        0.13
+      ],
+      "rpy_rad": [
+        0,
+        0,
+        4.7123
+      ],
+      "effective_diameter_m": 0.18,
+      "visual_diameter_m": 0.09,
+      "max_rpm": 1000,
+      "normalized": true,
+      "inverted": true,
+      "right_handed": true,
+      "time_constant_s": 0.2,
+      "thrust_coeff_forward": 0.48,
+      "thrust_coeff_reverse": 0.48,
+      "torque_coeff": 0.05,
+      "source": "inherited dynamics; photo-estimated visual mesh and horizontal mount positions"
+    },
+    {
+      "index": 2,
+      "name": "thruster_2_depth_front_left",
+      "position_body_m": [
+        0.165,
+        0.265,
+        0
+      ],
+      "rpy_rad": [
+        0,
+        -1.571,
+        0
+      ],
+      "effective_diameter_m": 0.18,
+      "visual_diameter_m": 0.09,
+      "max_rpm": 1000,
+      "normalized": true,
+      "inverted": true,
+      "right_handed": true,
+      "time_constant_s": 0.2,
+      "thrust_coeff_forward": 0.48,
+      "thrust_coeff_reverse": 0.48,
+      "torque_coeff": 0.05,
+      "source": "inherited dynamics, photo-estimated visual mesh"
+    },
+    {
+      "index": 3,
+      "name": "thruster_3_depth_front_right",
+      "position_body_m": [
+        -0.165,
+        0.265,
+        0
+      ],
+      "rpy_rad": [
+        0,
+        -1.571,
+        0
+      ],
+      "effective_diameter_m": 0.18,
+      "visual_diameter_m": 0.09,
+      "max_rpm": 1000,
+      "normalized": true,
+      "inverted": true,
+      "right_handed": true,
+      "time_constant_s": 0.2,
+      "thrust_coeff_forward": 0.48,
+      "thrust_coeff_reverse": 0.48,
+      "torque_coeff": 0.05,
+      "source": "inherited dynamics, photo-estimated visual mesh"
+    },
+    {
+      "index": 4,
+      "name": "thruster_4_depth_back_left",
+      "position_body_m": [
+        0.165,
+        -0.265,
+        0
+      ],
+      "rpy_rad": [
+        0,
+        -1.571,
+        0
+      ],
+      "effective_diameter_m": 0.18,
+      "visual_diameter_m": 0.09,
+      "max_rpm": 1000,
+      "normalized": true,
+      "inverted": true,
+      "right_handed": true,
+      "time_constant_s": 0.2,
+      "thrust_coeff_forward": 0.48,
+      "thrust_coeff_reverse": 0.48,
+      "torque_coeff": 0.05,
+      "source": "inherited dynamics, photo-estimated visual mesh"
+    },
+    {
+      "index": 5,
+      "name": "thruster_5_depth_back_right",
+      "position_body_m": [
+        -0.165,
+        -0.265,
+        0
+      ],
+      "rpy_rad": [
+        0,
+        -1.571,
+        0
+      ],
+      "effective_diameter_m": 0.18,
+      "visual_diameter_m": 0.09,
+      "max_rpm": 1000,
+      "normalized": true,
+      "inverted": true,
+      "right_handed": true,
+      "time_constant_s": 0.2,
+      "thrust_coeff_forward": 0.48,
+      "thrust_coeff_reverse": 0.48,
+      "torque_coeff": 0.05,
+      "source": "inherited dynamics, photo-estimated visual mesh"
+    }
+  ],
+  "sensors": {
+    "Odometry": {
+      "rate_hz": 30,
+      "position_body_m": [
+        0,
+        0,
+        0
+      ]
+    },
+    "ProteusCameraIMU": {
+      "rate_hz": 200,
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "angular_velocity_range_rad_s": [
+        20,
+        20,
+        20
+      ],
+      "acceleration_range_m_s2": 30,
+      "angle_noise_rad": [
+        0.00016968,
+        0.00016968,
+        0.00016968
+      ],
+      "angular_velocity_noise_rad_s": 0.00016968,
+      "yaw_drift_rad_s": 0.000019393,
+      "acceleration_noise_m_s2": 0.002
+    },
+    "Camera": {
+      "rate_hz": 21,
+      "resolution": [
+        800,
+        600
+      ],
+      "horizontal_fov_deg": 60,
+      "position_body_m": [
+        0,
+        0.3,
+        0
+      ],
+      "rpy_rad": [
+        1.5708,
+        0,
+        3.14
+      ],
+      "note": "legacy simulation camera retained; photographed lower optical housing is visual only"
+    }
+  },
+  "appearance_groups": [
+    {
+      "name": "acrylic",
+      "mesh": "models/proteus_photo/acrylic.obj",
+      "material": "acrylic",
+      "look": "proteus_acrylic",
+      "rgb": [
+        0.65,
+        0.79,
+        0.86
+      ],
+      "roughness": 0.06,
+      "metalness": 0,
+      "triangles": 1024,
+      "component_count": 2
+    },
+    {
+      "name": "endplates",
+      "mesh": "models/proteus_photo/endplates.obj",
+      "material": "aluminium",
+      "look": "proteus_endplates",
+      "rgb": [
+        0.52,
+        0.095,
+        0.065
+      ],
+      "roughness": 0.3,
+      "metalness": 0.65,
+      "triangles": 376,
+      "component_count": 2
+    },
+    {
+      "name": "thrusters",
+      "mesh": "models/proteus_photo/thrusters.obj",
+      "material": "pvc",
+      "look": "proteus_thrusters",
+      "rgb": [
+        0.009,
+        0.012,
+        0.017
+      ],
+      "roughness": 0.26,
+      "metalness": 0.08,
+      "triangles": 15520,
+      "component_count": 70
+    },
+    {
+      "name": "frame",
+      "mesh": "models/proteus_photo/frame.obj",
+      "material": "abs",
+      "look": "proteus_frame",
+      "rgb": [
+        0.008,
+        0.075,
+        0.72
+      ],
+      "roughness": 0.38,
+      "metalness": 0,
+      "triangles": 2752,
+      "component_count": 18
+    },
+    {
+      "name": "metal",
+      "mesh": "models/proteus_photo/metal.obj",
+      "material": "aluminium",
+      "look": "proteus_metal",
+      "rgb": [
+        0.62,
+        0.65,
+        0.67
+      ],
+      "roughness": 0.3,
+      "metalness": 0.82,
+      "triangles": 5024,
+      "component_count": 44
+    },
+    {
+      "name": "white",
+      "mesh": "models/proteus_photo/white.obj",
+      "material": "abs",
+      "look": "proteus_white",
+      "rgb": [
+        0.78,
+        0.8,
+        0.75
+      ],
+      "roughness": 0.5,
+      "metalness": 0,
+      "triangles": 1452,
+      "component_count": 9
+    },
+    {
+      "name": "boards",
+      "mesh": "models/proteus_photo/boards.obj",
+      "material": "abs",
+      "look": "proteus_boards",
+      "rgb": [
+        0.015,
+        0.14,
+        0.055
+      ],
+      "roughness": 0.6,
+      "metalness": 0,
+      "triangles": 324,
+      "component_count": 3
+    },
+    {
+      "name": "connectors",
+      "mesh": "models/proteus_photo/connectors.obj",
+      "material": "aluminium",
+      "look": "proteus_connectors",
+      "rgb": [
+        0.67,
+        0.035,
+        0.065
+      ],
+      "roughness": 0.28,
+      "metalness": 0.6,
+      "triangles": 2196,
+      "component_count": 55
+    },
+    {
+      "name": "red_wire",
+      "mesh": "models/proteus_photo/red_wire.obj",
+      "material": "pvc",
+      "look": "proteus_red_wire",
+      "rgb": [
+        0.65,
+        0.018,
+        0.012
+      ],
+      "roughness": 0.5,
+      "metalness": 0,
+      "triangles": 1440,
+      "component_count": 2
+    },
+    {
+      "name": "cables",
+      "mesh": "models/proteus_photo/cables.obj",
+      "material": "pvc",
+      "look": "proteus_cables",
+      "rgb": [
+        0.008,
+        0.009,
+        0.012
+      ],
+      "roughness": 0.55,
+      "metalness": 0,
+      "triangles": 5280,
+      "component_count": 8
+    },
+    {
+      "name": "lens",
+      "mesh": "models/proteus_photo/lens.obj",
+      "material": "acrylic",
+      "look": "proteus_lens",
+      "rgb": [
+        0.02,
+        0.065,
+        0.095
+      ],
+      "roughness": 0.06,
+      "metalness": 0.3,
+      "triangles": 188,
+      "component_count": 1
+    },
+    {
+      "name": "labels",
+      "mesh": "models/proteus_photo/labels.obj",
+      "material": "abs",
+      "look": "proteus_labels",
+      "rgb": [
+        0.85,
+        0.85,
+        0.8
+      ],
+      "roughness": 0.65,
+      "metalness": 0,
+      "triangles": 3632,
+      "component_count": 2
+    }
+  ],
+  "components": [
+    {
+      "name": "Upper acrylic pressure tube",
+      "group": "acrylic",
+      "dimensions_m": {
+        "outer_radius": 0.1,
+        "wall": 0.005,
+        "length": 0.3
+      },
+      "position_body_m": [
+        0,
+        0,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower acrylic pressure tube",
+      "group": "acrylic",
+      "dimensions_m": {
+        "outer_radius": 0.05,
+        "wall": 0.005,
+        "length": 0.31
+      },
+      "position_body_m": [
+        0,
+        0,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper red endplate -0.155",
+      "group": "endplates",
+      "dimensions_m": {
+        "radius": 0.103,
+        "length": 0.01
+      },
+      "position_body_m": [
+        0,
+        -0.1550000011920929,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper black O-ring -0.155",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.1005,
+        "length": 0.003
+      },
+      "position_body_m": [
+        0,
+        -0.14957499504089355,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower black endcap -0.155",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.051,
+        "length": 0.009
+      },
+      "position_body_m": [
+        0,
+        -0.16120000183582306,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper red endplate 0.155",
+      "group": "endplates",
+      "dimensions_m": {
+        "radius": 0.103,
+        "length": 0.01
+      },
+      "position_body_m": [
+        0,
+        0.1550000011920929,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper black O-ring 0.155",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.1005,
+        "length": 0.003
+      },
+      "position_body_m": [
+        0,
+        0.14957499504089355,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower black endcap 0.155",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.051,
+        "length": 0.009
+      },
+      "position_body_m": [
+        0,
+        0.16120000183582306,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Blue split rail",
+      "group": "frame",
+      "dimensions_m": [
+        0.045,
+        0.45,
+        0.039
+      ],
+      "position_body_m": [
+        -0.17000000178813934,
+        0,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Blue split rail",
+      "group": "frame",
+      "dimensions_m": [
+        0.045,
+        0.45,
+        0.039
+      ],
+      "position_body_m": [
+        -0.17000000178813934,
+        0,
+        -0.00800000037997961
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        -0.17000000178813934,
+        -0.15000000596046448,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        -0.17000000178813934,
+        -0.05000000074505806,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        -0.17000000178813934,
+        0.05000000074505806,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        -0.17000000178813934,
+        0.15000000596046448,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail retaining bolt",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.003
+      },
+      "position_body_m": [
+        -0.17000000178813934,
+        -0.20499999821186066,
+        -0.07100000232458115
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail retaining bolt",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.003
+      },
+      "position_body_m": [
+        -0.17000000178813934,
+        0.20499999821186066,
+        -0.07100000232458115
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side aluminium mounting plate",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.095,
+        0.064
+      ],
+      "position_body_m": [
+        -0.19464999437332153,
+        0,
+        0.024000000208616257
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        -0.1988999992609024,
+        -0.03400000184774399,
+        0.004999999888241291
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        -0.1988999992609024,
+        -0.03400000184774399,
+        0.0430000014603138
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        -0.1988999992609024,
+        0.03400000184774399,
+        0.004999999888241291
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        -0.1988999992609024,
+        0.03400000184774399,
+        0.0430000014603138
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Blue split rail",
+      "group": "frame",
+      "dimensions_m": [
+        0.045,
+        0.45,
+        0.039
+      ],
+      "position_body_m": [
+        0.17000000178813934,
+        0,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Blue split rail",
+      "group": "frame",
+      "dimensions_m": [
+        0.045,
+        0.45,
+        0.039
+      ],
+      "position_body_m": [
+        0.17000000178813934,
+        0,
+        -0.00800000037997961
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        0.17000000178813934,
+        -0.15000000596046448,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        0.17000000178813934,
+        -0.05000000074505806,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        0.17000000178813934,
+        0.05000000074505806,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail segment seam",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.0455,
+        0.001,
+        0.079
+      ],
+      "position_body_m": [
+        0.17000000178813934,
+        0.15000000596046448,
+        -0.028999999165534973
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail retaining bolt",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.003
+      },
+      "position_body_m": [
+        0.17000000178813934,
+        -0.20499999821186066,
+        -0.07100000232458115
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Rail retaining bolt",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.003
+      },
+      "position_body_m": [
+        0.17000000178813934,
+        0.20499999821186066,
+        -0.07100000232458115
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side aluminium mounting plate",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.095,
+        0.064
+      ],
+      "position_body_m": [
+        0.19464999437332153,
+        0,
+        0.024000000208616257
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        0.1988999992609024,
+        -0.03400000184774399,
+        0.004999999888241291
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        0.1988999992609024,
+        -0.03400000184774399,
+        0.0430000014603138
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        0.1988999992609024,
+        0.03400000184774399,
+        0.004999999888241291
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Side plate fastener",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.004,
+        "length": 0.004
+      },
+      "position_body_m": [
+        0.1988999992609024,
+        0.03400000184774399,
+        0.0430000014603138
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Blue upper clamp saddle",
+      "group": "frame",
+      "dimensions_m": {
+        "outer_radius": 0.114,
+        "wall": 0.012,
+        "length": 0.023
+      },
+      "position_body_m": [
+        0,
+        -0.13500000536441803,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Clamp lifting tab",
+      "group": "frame",
+      "dimensions_m": [
+        0.042,
+        0.027,
+        0.016
+      ],
+      "position_body_m": [
+        0,
+        -0.13500000536441803,
+        -0.17000000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Angled saddle brace",
+      "group": "frame",
+      "dimensions_m": [
+        0.061,
+        0.023,
+        0.028
+      ],
+      "position_body_m": [
+        -0.13199999928474426,
+        -0.13500000536441803,
+        -0.06800000369548798
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Angled saddle brace",
+      "group": "frame",
+      "dimensions_m": [
+        0.061,
+        0.023,
+        0.028
+      ],
+      "position_body_m": [
+        0.13199999928474426,
+        -0.13500000536441803,
+        -0.06800000369548798
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Blue upper clamp saddle",
+      "group": "frame",
+      "dimensions_m": {
+        "outer_radius": 0.114,
+        "wall": 0.012,
+        "length": 0.023
+      },
+      "position_body_m": [
+        0,
+        0.13500000536441803,
+        -0.05000000074505806
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Clamp lifting tab",
+      "group": "frame",
+      "dimensions_m": [
+        0.042,
+        0.027,
+        0.016
+      ],
+      "position_body_m": [
+        0,
+        0.13500000536441803,
+        -0.17000000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Angled saddle brace",
+      "group": "frame",
+      "dimensions_m": [
+        0.061,
+        0.023,
+        0.028
+      ],
+      "position_body_m": [
+        -0.13199999928474426,
+        0.13500000536441803,
+        -0.06800000369548798
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Angled saddle brace",
+      "group": "frame",
+      "dimensions_m": [
+        0.061,
+        0.023,
+        0.028
+      ],
+      "position_body_m": [
+        0.13199999928474426,
+        0.13500000536441803,
+        -0.06800000369548798
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle top rail",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.315,
+        0.014
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0,
+        0.18000000715255737
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle bottom rail",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.315,
+        0.014
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0,
+        0.25200000405311584
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle middle rail",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.315,
+        0.01
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        -0.15000000596046448,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        -0.10000000149011612,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        -0.05000000074505806,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0.05000000074505806,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0.10000000149011612,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0.15000000596046448,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower cabin hanger",
+      "group": "metal",
+      "dimensions_m": [
+        0.007,
+        0.105,
+        0.105
+      ],
+      "position_body_m": [
+        -0.06300000101327896,
+        0,
+        0.11299999803304672
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle top rail",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.315,
+        0.014
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0,
+        0.18000000715255737
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle bottom rail",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.315,
+        0.014
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0,
+        0.25200000405311584
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle middle rail",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.315,
+        0.01
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        -0.15000000596046448,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        -0.10000000149011612,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        -0.05000000074505806,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0.05000000074505806,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0.10000000149011612,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle slot web",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.014,
+        0.066
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0.15000000596046448,
+        0.2150000035762787
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower cabin hanger",
+      "group": "metal",
+      "dimensions_m": [
+        0.007,
+        0.105,
+        0.105
+      ],
+      "position_body_m": [
+        0.06300000101327896,
+        0,
+        0.11299999803304672
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle cross tie",
+      "group": "metal",
+      "dimensions_m": [
+        0.132,
+        0.013,
+        0.009
+      ],
+      "position_body_m": [
+        0,
+        -0.14000000059604645,
+        0.2529999911785126
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Cradle cross tie",
+      "group": "metal",
+      "dimensions_m": [
+        0.132,
+        0.013,
+        0.009
+      ],
+      "position_body_m": [
+        0,
+        0.14000000059604645,
+        0.2529999911785126
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper electronics tray",
+      "group": "white",
+      "dimensions_m": [
+        0.135,
+        0.265,
+        0.006
+      ],
+      "position_body_m": [
+        0,
+        0,
+        -0.004999999888241291
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper tray tie rod",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.278
+      },
+      "position_body_m": [
+        -0.06199999898672104,
+        0,
+        -0.04500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper tray tie rod",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.278
+      },
+      "position_body_m": [
+        0.06199999898672104,
+        0,
+        -0.04500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Electronics PCB",
+      "group": "boards",
+      "dimensions_m": [
+        0.105,
+        0.068,
+        0.003
+      ],
+      "position_body_m": [
+        0,
+        -0.08500000089406967,
+        -0.024000000208616257
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "PCB component",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.024,
+        0.033,
+        0.012
+      ],
+      "position_body_m": [
+        -0.03200000151991844,
+        -0.08500000089406967,
+        -0.03200000151991844
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "PCB component",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.024,
+        0.033,
+        0.012
+      ],
+      "position_body_m": [
+        0.02500000037252903,
+        -0.08500000089406967,
+        -0.03200000151991844
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Electronics PCB",
+      "group": "boards",
+      "dimensions_m": [
+        0.105,
+        0.068,
+        0.003
+      ],
+      "position_body_m": [
+        0,
+        0,
+        -0.024000000208616257
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "PCB component",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.024,
+        0.033,
+        0.012
+      ],
+      "position_body_m": [
+        -0.03200000151991844,
+        0,
+        -0.03200000151991844
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "PCB component",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.024,
+        0.033,
+        0.012
+      ],
+      "position_body_m": [
+        0.02500000037252903,
+        0,
+        -0.03200000151991844
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Electronics PCB",
+      "group": "boards",
+      "dimensions_m": [
+        0.105,
+        0.068,
+        0.003
+      ],
+      "position_body_m": [
+        0,
+        0.08299999684095383,
+        -0.024000000208616257
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "PCB component",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.024,
+        0.033,
+        0.012
+      ],
+      "position_body_m": [
+        -0.03200000151991844,
+        0.08299999684095383,
+        -0.03200000151991844
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "PCB component",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.024,
+        0.033,
+        0.012
+      ],
+      "position_body_m": [
+        0.02500000037252903,
+        0.08299999684095383,
+        -0.03200000151991844
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper internal end support",
+      "group": "white",
+      "dimensions_m": [
+        0.137,
+        0.012,
+        0.092
+      ],
+      "position_body_m": [
+        0,
+        -0.10499999672174454,
+        -0.052000001072883606
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Upper internal end support",
+      "group": "white",
+      "dimensions_m": [
+        0.137,
+        0.012,
+        0.092
+      ],
+      "position_body_m": [
+        0,
+        0.10999999940395355,
+        -0.052000001072883606
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Heatsink fin",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.074,
+        0.026
+      ],
+      "position_body_m": [
+        -0.035999998450279236,
+        0.00800000037997961,
+        -0.09000000357627869
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Heatsink fin",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.074,
+        0.026
+      ],
+      "position_body_m": [
+        -0.017999999225139618,
+        0.00800000037997961,
+        -0.09000000357627869
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Heatsink fin",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.074,
+        0.026
+      ],
+      "position_body_m": [
+        0,
+        0.00800000037997961,
+        -0.09000000357627869
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Heatsink fin",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.074,
+        0.026
+      ],
+      "position_body_m": [
+        0.017999999225139618,
+        0.00800000037997961,
+        -0.09000000357627869
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Heatsink fin",
+      "group": "metal",
+      "dimensions_m": [
+        0.006,
+        0.074,
+        0.026
+      ],
+      "position_body_m": [
+        0.035999998450279236,
+        0.00800000037997961,
+        -0.09000000357627869
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower battery placeholder",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.058,
+        0.2,
+        0.044
+      ],
+      "position_body_m": [
+        0,
+        0,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Battery red terminal block",
+      "group": "connectors",
+      "dimensions_m": [
+        0.056,
+        0.012,
+        0.026
+      ],
+      "position_body_m": [
+        0,
+        -0.10700000077486038,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Internal power wire",
+      "group": "red_wire",
+      "dimensions_m": {
+        "radius": 0.0015,
+        "path_body_m": [
+          [
+            -0.025,
+            -0.105,
+            -0.019
+          ],
+          [
+            -0.025,
+            -0.06,
+            -0.078
+          ],
+          [
+            -0.025,
+            0.05,
+            -0.064
+          ],
+          [
+            -0.025,
+            0.105,
+            -0.036
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Internal power wire",
+      "group": "red_wire",
+      "dimensions_m": {
+        "radius": 0.0015,
+        "path_body_m": [
+          [
+            0.025,
+            -0.105,
+            -0.019
+          ],
+          [
+            0.025,
+            -0.06,
+            -0.078
+          ],
+          [
+            0.025,
+            0.05,
+            -0.064
+          ],
+          [
+            0.025,
+            0.105,
+            -0.036
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Internal signal loom",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0012,
+        "path_body_m": [
+          [
+            -0.044,
+            -0.1,
+            -0.01
+          ],
+          [
+            -0.044,
+            0,
+            -0.06
+          ],
+          [
+            -0.044,
+            0.1,
+            -0.01
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Internal signal loom",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0012,
+        "path_body_m": [
+          [
+            0.038,
+            -0.1,
+            -0.01
+          ],
+          [
+            0.038,
+            0,
+            -0.06
+          ],
+          [
+            0.038,
+            0.1,
+            -0.01
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Bulkhead penetrator 0",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0085,
+        "length": 0.018
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.17000000178813934,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Penetrator seal 0",
+      "group": "white",
+      "dimensions_m": {
+        "radius": 0.0045,
+        "length": 0.005
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.18199999630451202,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.04349999874830246,
+        -0.17000000178813934,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.045989591628313065,
+        -0.17000000178813934,
+        -0.08898959308862686
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.17000000178813934,
+        -0.08649999648332596
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.05801040679216385,
+        -0.17000000178813934,
+        -0.08898959308862686
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.060499999672174454,
+        -0.17000000178813934,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.05801040679216385,
+        -0.17000000178813934,
+        -0.10101040452718735
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.17000000178813934,
+        -0.10350000113248825
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.045989591628313065,
+        -0.17000000178813934,
+        -0.10101040452718735
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Bulkhead penetrator 1",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0085,
+        "length": 0.018
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.17000000178813934,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Penetrator seal 1",
+      "group": "white",
+      "dimensions_m": {
+        "radius": 0.0045,
+        "length": 0.005
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.18199999630451202,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.060499999672174454,
+        -0.17000000178813934,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.05801040679216385,
+        -0.17000000178813934,
+        -0.08898959308862686
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.17000000178813934,
+        -0.08649999648332596
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.045989591628313065,
+        -0.17000000178813934,
+        -0.08898959308862686
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.04349999874830246,
+        -0.17000000178813934,
+        -0.0949999988079071
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.045989591628313065,
+        -0.17000000178813934,
+        -0.10101040452718735
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.17000000178813934,
+        -0.10350000113248825
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.05801040679216385,
+        -0.17000000178813934,
+        -0.10101040452718735
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Bulkhead penetrator 2",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0085,
+        "length": 0.018
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.17000000178813934,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Penetrator seal 2",
+      "group": "white",
+      "dimensions_m": {
+        "radius": 0.0045,
+        "length": 0.005
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.18199999630451202,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.04349999874830246,
+        -0.17000000178813934,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.045989591628313065,
+        -0.17000000178813934,
+        -0.014989592134952545
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.17000000178813934,
+        -0.012500000186264515
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.05801040679216385,
+        -0.17000000178813934,
+        -0.014989592134952545
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.060499999672174454,
+        -0.17000000178813934,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.05801040679216385,
+        -0.17000000178813934,
+        -0.02701040729880333
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.052000001072883606,
+        -0.17000000178813934,
+        -0.029500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.045989591628313065,
+        -0.17000000178813934,
+        -0.02701040729880333
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Bulkhead penetrator 3",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0085,
+        "length": 0.018
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.17000000178813934,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Penetrator seal 3",
+      "group": "white",
+      "dimensions_m": {
+        "radius": 0.0045,
+        "length": 0.005
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.18199999630451202,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.060499999672174454,
+        -0.17000000178813934,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.05801040679216385,
+        -0.17000000178813934,
+        -0.014989592134952545
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.17000000178813934,
+        -0.012500000186264515
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.045989591628313065,
+        -0.17000000178813934,
+        -0.014989592134952545
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.04349999874830246,
+        -0.17000000178813934,
+        -0.020999999716877937
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.045989591628313065,
+        -0.17000000178813934,
+        -0.02701040729880333
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.052000001072883606,
+        -0.17000000178813934,
+        -0.029500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.05801040679216385,
+        -0.17000000178813934,
+        -0.02701040729880333
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Bulkhead penetrator 4",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0085,
+        "length": 0.018
+      },
+      "position_body_m": [
+        0,
+        -0.17000000178813934,
+        -0.125
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Penetrator seal 4",
+      "group": "white",
+      "dimensions_m": {
+        "radius": 0.0045,
+        "length": 0.005
+      },
+      "position_body_m": [
+        0,
+        -0.18199999630451202,
+        -0.125
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.008500000461935997,
+        -0.17000000178813934,
+        -0.125
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.006010407581925392,
+        -0.17000000178813934,
+        -0.11898959428071976
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        5.204749144166479e-19,
+        -0.17000000178813934,
+        -0.11649999767541885
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.006010407581925392,
+        -0.17000000178813934,
+        -0.11898959428071976
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.008500000461935997,
+        -0.17000000178813934,
+        -0.125
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.006010407581925392,
+        -0.17000000178813934,
+        -0.13101041316986084
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -1.5614246915511553e-18,
+        -0.17000000178813934,
+        -0.13349999487400055
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.006010407581925392,
+        -0.17000000178813934,
+        -0.13101041316986084
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Bulkhead penetrator 5",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0085,
+        "length": 0.018
+      },
+      "position_body_m": [
+        0,
+        -0.17000000178813934,
+        0.032999999821186066
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Penetrator seal 5",
+      "group": "white",
+      "dimensions_m": {
+        "radius": 0.0045,
+        "length": 0.005
+      },
+      "position_body_m": [
+        0,
+        -0.18199999630451202,
+        0.032999999821186066
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.008500000461935997,
+        -0.17000000178813934,
+        0.032999999821186066
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.006010407581925392,
+        -0.17000000178813934,
+        0.03901040926575661
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        5.204749144166479e-19,
+        -0.17000000178813934,
+        0.04149999842047691
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.006010407581925392,
+        -0.17000000178813934,
+        0.03901040926575661
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.008500000461935997,
+        -0.17000000178813934,
+        0.032999999821186066
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -0.006010407581925392,
+        -0.17000000178813934,
+        0.026989592239260674
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        -1.5614246915511553e-18,
+        -0.17000000178813934,
+        0.02449999935925007
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Connector knurl",
+      "group": "connectors",
+      "dimensions_m": {
+        "radius": 0.0007,
+        "length": 0.014
+      },
+      "position_body_m": [
+        0.006010407581925392,
+        -0.17000000178813934,
+        0.026989592239260674
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left black open duct",
+      "group": "thrusters",
+      "dimensions_m": {
+        "outer_radius": 0.054,
+        "wall": 0.006,
+        "length": 0.059
+      },
+      "position_body_m": [
+        0.2050000067949295,
+        0,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left motor hub",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.016,
+        "length": 0.085
+      },
+      "position_body_m": [
+        0.2050000067949295,
+        0,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        0.2050000067949295,
+        0.04600000008940697,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        0.2050000067949295,
+        -0.04600000008940697,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.005,
+        0.004
+      ],
+      "position_body_m": [
+        0.2360000100135803,
+        0.023000000044703484,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.005,
+        0.004
+      ],
+      "position_body_m": [
+        0.1894999977350235,
+        0.023000000044703484,
+        0.1568467876315117
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.005,
+        0.004
+      ],
+      "position_body_m": [
+        0.1894999977350235,
+        0.023000000044703484,
+        0.10315321370959282
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left blue mounting lug",
+      "group": "frame",
+      "dimensions_m": [
+        0.036,
+        0.026,
+        0.02
+      ],
+      "position_body_m": [
+        0.2050000067949295,
+        0,
+        0.17499999966472388
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left fastening screw",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.004
+      },
+      "position_body_m": [
+        0.2520000126361847,
+        0,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_0_left cable",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0025,
+        "path_body_m": [
+          [
+            -0.052,
+            -0.184,
+            -0.095
+          ],
+          [
+            0.1,
+            -0.24,
+            0.1
+          ],
+          [
+            0.19,
+            -0.13,
+            0.17
+          ],
+          [
+            0.205,
+            0,
+            0.17
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right black open duct",
+      "group": "thrusters",
+      "dimensions_m": {
+        "outer_radius": 0.054,
+        "wall": 0.006,
+        "length": 0.059
+      },
+      "position_body_m": [
+        -0.2050000067949295,
+        0,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right motor hub",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.016,
+        "length": 0.085
+      },
+      "position_body_m": [
+        -0.2050000067949295,
+        0,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        -0.2050000067949295,
+        0.04600000008940697,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        -0.2050000067949295,
+        -0.04600000008940697,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.005,
+        0.004
+      ],
+      "position_body_m": [
+        -0.17400000357627868,
+        0.023000000044703484,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.005,
+        0.004
+      ],
+      "position_body_m": [
+        -0.2205000009536743,
+        0.023000000044703484,
+        0.1568467876315117
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.005,
+        0.004
+      ],
+      "position_body_m": [
+        -0.2205000009536743,
+        0.023000000044703484,
+        0.10315321370959282
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right blue mounting lug",
+      "group": "frame",
+      "dimensions_m": [
+        0.036,
+        0.026,
+        0.02
+      ],
+      "position_body_m": [
+        -0.2050000067949295,
+        0,
+        0.17499999966472388
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right fastening screw",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.004
+      },
+      "position_body_m": [
+        -0.1580000009536743,
+        0,
+        0.13000000067055226
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_1_right cable",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0025,
+        "path_body_m": [
+          [
+            0.052,
+            -0.184,
+            -0.095
+          ],
+          [
+            -0.1,
+            -0.24,
+            0.1
+          ],
+          [
+            -0.19,
+            -0.13,
+            0.17
+          ],
+          [
+            -0.205,
+            0,
+            0.17
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left black open duct",
+      "group": "thrusters",
+      "dimensions_m": {
+        "outer_radius": 0.054,
+        "wall": 0.006,
+        "length": 0.059
+      },
+      "position_body_m": [
+        0.16500000655651093,
+        0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left motor hub",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.016,
+        "length": 0.085
+      },
+      "position_body_m": [
+        0.16500000655651093,
+        0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        0.16500000655651093,
+        0.26499998569488525,
+        -0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        0.16500000655651093,
+        0.26499998569488525,
+        0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        0.19599999487400055,
+        0.26499998569488525,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        0.14949999749660492,
+        0.29184678196907043,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        0.14949999749660492,
+        0.23815321922302246,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left blue mounting lug",
+      "group": "frame",
+      "dimensions_m": [
+        0.036,
+        0.026,
+        0.02
+      ],
+      "position_body_m": [
+        0.16500000655651093,
+        0.26499998569488525,
+        0.04500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left fastening screw",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.004
+      },
+      "position_body_m": [
+        0.21199999749660492,
+        0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_2_depth_front_left cable",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0025,
+        "path_body_m": [
+          [
+            -0.052,
+            -0.184,
+            -0.021
+          ],
+          [
+            0.1,
+            -0.24,
+            0.1
+          ],
+          [
+            0.19,
+            -0.13,
+            0.17
+          ],
+          [
+            0.165,
+            0.265,
+            0.04
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right black open duct",
+      "group": "thrusters",
+      "dimensions_m": {
+        "outer_radius": 0.054,
+        "wall": 0.006,
+        "length": 0.059
+      },
+      "position_body_m": [
+        -0.16500000655651093,
+        0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right motor hub",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.016,
+        "length": 0.085
+      },
+      "position_body_m": [
+        -0.16500000655651093,
+        0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        -0.16500000655651093,
+        0.26499998569488525,
+        -0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        -0.16500000655651093,
+        0.26499998569488525,
+        0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        -0.1340000033378601,
+        0.26499998569488525,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        -0.18050000071525574,
+        0.29184678196907043,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        -0.18050000071525574,
+        0.23815321922302246,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right blue mounting lug",
+      "group": "frame",
+      "dimensions_m": [
+        0.036,
+        0.026,
+        0.02
+      ],
+      "position_body_m": [
+        -0.16500000655651093,
+        0.26499998569488525,
+        0.04500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right fastening screw",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.004
+      },
+      "position_body_m": [
+        -0.11800000071525574,
+        0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_3_depth_front_right cable",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0025,
+        "path_body_m": [
+          [
+            0.052,
+            -0.184,
+            -0.021
+          ],
+          [
+            -0.1,
+            -0.24,
+            0.1
+          ],
+          [
+            -0.19,
+            -0.13,
+            0.17
+          ],
+          [
+            -0.165,
+            0.265,
+            0.04
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left black open duct",
+      "group": "thrusters",
+      "dimensions_m": {
+        "outer_radius": 0.054,
+        "wall": 0.006,
+        "length": 0.059
+      },
+      "position_body_m": [
+        0.16500000655651093,
+        -0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left motor hub",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.016,
+        "length": 0.085
+      },
+      "position_body_m": [
+        0.16500000655651093,
+        -0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        0.16500000655651093,
+        -0.26499998569488525,
+        -0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        0.16500000655651093,
+        -0.26499998569488525,
+        0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        0.19599999487400055,
+        -0.26499998569488525,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        0.14949999749660492,
+        -0.23815321922302246,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        0.14949999749660492,
+        -0.29184678196907043,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left blue mounting lug",
+      "group": "frame",
+      "dimensions_m": [
+        0.036,
+        0.026,
+        0.02
+      ],
+      "position_body_m": [
+        0.16500000655651093,
+        -0.26499998569488525,
+        0.04500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left fastening screw",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.004
+      },
+      "position_body_m": [
+        0.21199999749660492,
+        -0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_4_depth_back_left cable",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0025,
+        "path_body_m": [
+          [
+            0,
+            -0.184,
+            -0.125
+          ],
+          [
+            0.1,
+            -0.24,
+            0.1
+          ],
+          [
+            0.19,
+            -0.13,
+            0.17
+          ],
+          [
+            0.165,
+            -0.265,
+            0.04
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right black open duct",
+      "group": "thrusters",
+      "dimensions_m": {
+        "outer_radius": 0.054,
+        "wall": 0.006,
+        "length": 0.059
+      },
+      "position_body_m": [
+        -0.16500000655651093,
+        -0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right motor hub",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.016,
+        "length": 0.085
+      },
+      "position_body_m": [
+        -0.16500000655651093,
+        -0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        -0.16500000655651093,
+        -0.26499998569488525,
+        -0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right streamlined spinner",
+      "group": "thrusters",
+      "dimensions_m": null,
+      "position_body_m": [
+        -0.16500000655651093,
+        -0.26499998569488525,
+        0.04600000008940697
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        -0.1340000033378601,
+        -0.26499998569488525,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        -0.18050000071525574,
+        -0.23815321922302246,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right stator",
+      "group": "thrusters",
+      "dimensions_m": [
+        0.048,
+        0.004,
+        0.005
+      ],
+      "position_body_m": [
+        -0.18050000071525574,
+        -0.29184678196907043,
+        0.023000000044703484
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right blue mounting lug",
+      "group": "frame",
+      "dimensions_m": [
+        0.036,
+        0.026,
+        0.02
+      ],
+      "position_body_m": [
+        -0.16500000655651093,
+        -0.26499998569488525,
+        0.04500000178813934
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right fastening screw",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.003,
+        "length": 0.004
+      },
+      "position_body_m": [
+        -0.11800000071525574,
+        -0.26499998569488525,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "thruster_5_depth_back_right cable",
+      "group": "cables",
+      "dimensions_m": {
+        "radius": 0.0025,
+        "path_body_m": [
+          [
+            0,
+            -0.184,
+            0.033
+          ],
+          [
+            -0.1,
+            -0.24,
+            0.1
+          ],
+          [
+            -0.19,
+            -0.13,
+            0.17
+          ],
+          [
+            -0.165,
+            -0.265,
+            0.04
+          ]
+        ]
+      },
+      "position_body_m": [
+        0,
+        0,
+        0
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower optical retaining ring",
+      "group": "metal",
+      "dimensions_m": {
+        "radius": 0.043,
+        "length": 0.015
+      },
+      "position_body_m": [
+        0,
+        0.16899999976158142,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Lower optical window",
+      "group": "lens",
+      "dimensions_m": {
+        "radius": 0.036,
+        "length": 0.007
+      },
+      "position_body_m": [
+        0,
+        0.17900000512599945,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Camera lens proxy",
+      "group": "thrusters",
+      "dimensions_m": {
+        "radius": 0.013,
+        "length": 0.009
+      },
+      "position_body_m": [
+        0,
+        0.18400000035762787,
+        0.12999999523162842
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Proteus identification",
+      "group": "labels",
+      "dimensions_m": null,
+      "position_body_m": [
+        0,
+        0.03500000014901161,
+        -0.15299999713897705
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    },
+    {
+      "name": "Reference scale label",
+      "group": "labels",
+      "dimensions_m": null,
+      "position_body_m": [
+        0,
+        -0.04500000178813934,
+        -0.15299999713897705
+      ],
+      "source": "photo estimate",
+      "physics": "visual only; no independent mass or displacement"
+    }
+  ],
+  "pending_measurements": [
+    "overall dimensions",
+    "dry mass",
+    "mass distribution and CG",
+    "sealed displaced volume",
+    "thruster identity, diameter, thrust curves and poses",
+    "battery type and mass",
+    "camera and IMU extrinsics"
+  ],
+  "limitations": [
+    "Stonefish standard looks are opaque; Blender supports transparent acrylic",
+    "Internal electronic identities and wiring topology are illustrative",
+    "Visual envelope differs from legacy collision proxies",
+    "Hardware controller file lists eight thrusters; the selected simulation and visible layout use six"
+  ],
+  "physics_proxies": [
+    {
+      "name": "TopCabin",
+      "type": "cylinder",
+      "radius_m": 0.1,
+      "height_m": 0.3,
+      "thickness_m": 0.005,
+      "material": "acrylic",
+      "density_kg_m3": 1200,
+      "position_body_m": [
+        0,
+        0,
+        -0.05
+      ],
+      "rpy_rad": [
+        1.5708,
+        0,
+        0
+      ],
+      "buoyant": true,
+      "mass_source": "Stonefish shell geometry and material"
+    },
+    {
+      "name": "BottomCabin",
+      "type": "cylinder",
+      "radius_m": 0.05,
+      "height_m": 0.31,
+      "thickness_m": 0.005,
+      "material": "acrylic",
+      "density_kg_m3": 1200,
+      "position_body_m": [
+        0,
+        0,
+        0.13
+      ],
+      "rpy_rad": [
+        1.5708,
+        0,
+        0
+      ],
+      "buoyant": true,
+      "mass_source": "Stonefish shell geometry and material"
+    },
+    {
+      "name": "LeftRail",
+      "type": "box",
+      "dimensions_m": [
+        0.04,
+        0.45,
+        0.04
+      ],
+      "thickness_m": -1,
+      "material": "abs",
+      "density_kg_m3": 1040,
+      "position_body_m": [
+        0.17,
+        0,
+        -0.03
+      ],
+      "rpy_rad": [
+        0,
+        0,
+        0
+      ],
+      "buoyant": true,
+      "mass_source": "solid box in native C++ builder; XML reference differs"
+    },
+    {
+      "name": "RightRail",
+      "type": "box",
+      "dimensions_m": [
+        0.04,
+        0.45,
+        0.04
+      ],
+      "thickness_m": -1,
+      "material": "abs",
+      "density_kg_m3": 1040,
+      "position_body_m": [
+        -0.17,
+        0,
+        -0.03
+      ],
+      "rpy_rad": [
+        0,
+        0,
+        0
+      ],
+      "buoyant": true,
+      "mass_source": "solid box in native C++ builder; XML reference differs"
+    },
+    {
+      "name": "ProtySupport1",
+      "type": "mesh",
+      "mesh": "models/protysupport.obj",
+      "scale": 0.001,
+      "material": "abs",
+      "density_kg_m3": 1040,
+      "position_body_m": [
+        0,
+        0.135,
+        -0.012
+      ],
+      "rpy_rad": [
+        1.5708,
+        0,
+        0
+      ],
+      "thickness_m": -1,
+      "buoyant": true,
+      "mass_source": "existing mesh volume and ABS density"
+    },
+    {
+      "name": "ProtySupport2",
+      "type": "mesh",
+      "mesh": "models/protysupport.obj",
+      "scale": 0.001,
+      "material": "abs",
+      "density_kg_m3": 1040,
+      "position_body_m": [
+        0,
+        -0.135,
+        -0.012
+      ],
+      "rpy_rad": [
+        1.5708,
+        0,
+        0
+      ],
+      "thickness_m": -1,
+      "buoyant": true,
+      "mass_source": "existing mesh volume and ABS density"
+    }
+  ],
+  "controller": {
+    "path": "auvs/stonefish_sim/proteus.json",
+    "tam": [
+      [
+        0,
+        1,
+        0,
+        0,
+        0,
+        1
+      ],
+      [
+        0,
+        1,
+        0,
+        0,
+        0,
+        -1
+      ],
+      [
+        0,
+        0,
+        -1,
+        1,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        -1,
+        1,
+        -1,
+        0
+      ],
+      [
+        0,
+        0,
+        -1,
+        -1,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        -1,
+        -1,
+        -1,
+        0
+      ]
+    ],
+    "note": "Original sign-based TAM and PID gains retained; not a measured force/moment allocation matrix."
+  }
+}

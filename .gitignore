@@ -1,7 +1,13 @@
 zig-out/
 .zig-cache/
-.cache/
-build
 tmp/
-build-rtx
-frames
+.cache/
+build/
+auvs/stonefish_sim/blender_stonefish_addon/__pycache__/
+rl/runs/
+__pycache__/
+MUJOCO_LOG.TXT
+.deps/
+vendor/
+build-rtx/
+frames/

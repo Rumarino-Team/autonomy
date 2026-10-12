@@ -1,3 +1,34 @@
+# Experimental integration
+
+This branch combines the Motion API and cascaded Zig controllers from
+`teleop_mission` with `simulator_improvements`: native Blender scenes and live
+updates, Stonefish/RTX graphics, voice configuration editing, MuJoCo physics,
+RL tooling, PID tuning, and keyboard teleoperation.
+
+The C and Zig frame layout is ABI **3**; rebuild simulator and hardware plugins
+with this branch before loading them. Both Stonefish and MuJoCo export geometry
+in the reported body axes and fresh sensor timestamps. The Stonefish IMU is
+converted into those body axes, so its default `body_from_imu` is identity.
+
+Initialize the tracked dependencies with `git submodule update --init --recursive`.
+Engine changes are preserved in [vendor_patches](vendor_patches/README.md) and
+prepared automatically by the simulator CMake configure.
+
+Match the controller file to the selected robot. `platform.json` currently
+selects Proteus. Stonefish `hydrus.json`, `proteus.json`, `bluerov2.json`, and
+`girona500.json` use backend geometry and nominal force models. Proteus and
+Girona allow underactuated geometry; allocation cannot supply a missing force
+or torque axis. Gains and thrust limits are initial values that need tuning.
+
+For MuJoCo, select `AUV_MJCF` and use the matching `hydrus.json`, `proteus.json`,
+or `bluerov.json` under `auvs/hydrus_mujoco`. The default `auv.json` selects
+Hydrus control and preserves legacy tuner baseline parameters.
+
+The voice demo in `demo/voice.py` still edits `platform.json` and the selected
+Stonefish robot config. It now exposes active `control` gains and limits;
+legacy `odometry` gains and the unused TAM are hidden when the new loops and
+geometry allocation are configured. Its existing speech and Decisions service
+credentials and Python dependencies are still required.
 
 ## Build & Run: libauv_stationary_sim
 ```sh
@@ -33,12 +64,52 @@ In another terminal, start the sender:
 
 ## Build & Run: libauv_stonefish_sim
 
+`auvs/stonefish_sim/platform.json` selects the vehicle with `robot`: `hydrus`, `proteus`, `bluerov2`, or `girona500`. Pass the matching controller file.
+
 ```sh
 zig build -Dstonefish run -- \
     ./zig-out/lib/libauv_stonefish_sim.so  \
     prequalify \
-    ./auvs/stonefish_sim/auv.json
+    ./auvs/stonefish_sim/proteus.json
 ```
+
+
+## Blender scene loading
+
+The Stonefish simulator reads Blender scenes with CBlend and builds the
+environment through Stonefish's C++ API. Build it with `zig build -Dstonefish`
+and use the same vehicle settings. See [native Blender loader](auvs/stonefish_sim/blender_stonefish_cpp/README.md)
+for CMake setup and validation checks.
+
+## MuJoCo
+
+Requires MuJoCo. `MUJOCO_PREFIX` is an install prefix (`include/` and `lib/`) or a MuJoCo source tree with `build/lib/libmujoco.so`. The window is Stonefish's ocean view, built with the in-tree Stonefish library and loaded from `libauv_mujoco_view.so` beside the plugin.
+
+```sh
+zig build -Dmujoco -DMUJOCO_PREFIX=/usr/local
+./zig-out/bin/src_3 ./zig-out/lib/libauv_mujoco.so prequalify auvs/hydrus_mujoco/auv.json
+```
+
+`AUV_MJCF` selects the model. The default is `auvs/hydrus_mujoco/hydrus.xml`. `proteus.xml` and `bluerov.xml` use the same physics. The window loads the matching Stonefish robot: Hydrus from `open_space_env.scn`, Proteus from `open_space_proteus.scn`, and BlueROV2 from `pool_bluerov2.scn`. Set `HYDRUS_MUJOCO_HEADLESS=1` to skip it.
+
+## Hydrus PID tuning (MuJoCo)
+
+Build with `-Dmujoco` so `libauv_mujoco_rl.so` and `hydrus_tune_pid` are installed, then from the repo root:
+
+```sh
+zig build -Dmujoco -DMUJOCO_PREFIX=/usr/local
+./zig-out/bin/hydrus_tune_pid --randomize
+```
+
+Options: `--episodes`, `--seconds`, `--generations`, `--population`, `--elite`, `--seed`, `--threads`, `--config`, `--xml`, `--randomize`. `AUV_MJCF` overrides the default MJCF.
+
+The preserved tuner optimizes the legacy single pose PID and prints `odometry`
+`kp` / `ki` / `kd` arrays. Its model and held-out baseline do not use the new Zig
+velocity and angular-rate loops. The live controller on `experimental` uses
+`control.velocity_*`, `control.rate_*`, `position_gain`, and `attitude_gain`;
+pasting legacy tuning output into `odometry` does not tune those loops.
+`rl/tune_pid.py` and `rl/pid_baseline.py` also retain their legacy model.
+Source: `auvs/hydrus_mujoco/tune_pid.cpp`.
 
 ## Movement and facing
 
@@ -224,7 +295,7 @@ heuristic and requires tuning; it is not a covariance or a guaranteed bound.
 Prediction is an opt-in bridge for short outages, and cannot confirm arrival.
 It requires fresh, aligned orientation and excludes excessive frame gaps.
 
-Backend ABI version 2 adds per-sensor timestamps, IMU/gyro validity and a
+Backend ABI version 3 adds per-sensor timestamps, IMU/gyro validity and a
 localization epoch. The loader rejects older libraries: rebuild the Zig app
 and the selected backend together. ZED uses actual SDK acquisition timestamps
 and converts gyro degrees/s into radians/s. Stonefish uses its independent IMU
@@ -386,4 +457,4 @@ gains continue to set visual force feedback and image-centering rate gain.
 The simulator's `control` gains are initial values for tuning, not validated
 maneuver performance. Build the app with `zig build` and the simulator library
 with `cmake --build build --target auv_stonefish_sim`. The optional geometry export
-does not change ABI version 2 or the frame layout.
+does not change ABI version 3 or the frame layout.

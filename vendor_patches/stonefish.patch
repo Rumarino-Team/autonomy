@@ -1,0 +1,1166 @@
+diff --git a/Library/include/core/GraphicalSimulationApp.h b/Library/include/core/GraphicalSimulationApp.h
+index 2d89703..df60a33 100644
+--- a/Library/include/core/GraphicalSimulationApp.h
++++ b/Library/include/core/GraphicalSimulationApp.h
+@@ -147,6 +147,12 @@ namespace sf
+ 
+         //! A method returning a pointer to the selected entity.
+         std::pair<Entity*, int> getSelectedEntity();
++
++        //! A method forgetting the picked entity and trackball follow target.
++        /*!
++         Call this when the scenario is destroyed. Those pointers belong to the old entities.
++         */
++        void ClearEntitySelection();
+         
+         //! A method informing if the application is graphical.
+         bool hasGraphics();
+diff --git a/Library/include/core/MaterialManager.h b/Library/include/core/MaterialManager.h
+index bc2c9f0..169a22a 100644
+--- a/Library/include/core/MaterialManager.h
++++ b/Library/include/core/MaterialManager.h
+@@ -108,6 +108,9 @@ namespace sf
+          \param magnetic a factor defining magnetic properties
+          \return a name of the created material
+          */
++        //! Replace an existing material in place, retaining its index.
++        bool UpdateMaterial(const Material& material);
++
+         std::string CreateMaterial(const std::string& uniqueName, Scalar density, Scalar restitution, Scalar magnetic = Scalar(0));
+         
+         //! A method that sets interaction between a pair of materials.
+diff --git a/Library/include/core/NameManager.h b/Library/include/core/NameManager.h
+index 78d7ef5..875f7d4 100644
+--- a/Library/include/core/NameManager.h
++++ b/Library/include/core/NameManager.h
+@@ -55,6 +55,7 @@ namespace sf
+         
+         //! A method used to clear the pool of names.
+         void ClearNames();
++        bool HasName(const std::string& name) const;
+         
+     private:
+         std::vector<std::string> names;
+diff --git a/Library/include/core/SimulationManager.h b/Library/include/core/SimulationManager.h
+index 3f6aa1e..0ffd3d5 100644
+--- a/Library/include/core/SimulationManager.h
++++ b/Library/include/core/SimulationManager.h
+@@ -147,6 +147,11 @@ namespace sf
+          \param origin a pose of the body in the world frame
+          */
+         void AddStaticEntity(StaticEntity* ent, const Transform& origin);
++        //! Detach a static at a step boundary. Caller owns and deletes it afterwards.
++        bool RemoveStaticEntity(StaticEntity* ent);
++        //! Update water resources without resetting the world or clock.
++        void UpdateOcean(Scalar waves, Fluid fluid);
++        void DisableOcean();
+         
+         //! A method that adds an animated rigid body to the simulation world.
+         /*!
+diff --git a/Library/include/entities/Entity.h b/Library/include/entities/Entity.h
+index 1093713..4b5f214 100644
+--- a/Library/include/entities/Entity.h
++++ b/Library/include/entities/Entity.h
+@@ -98,6 +98,8 @@ namespace sf
+         
+         //! A method returning the name of the entity.
+         std::string getName() const;
++        //! Rename at a simulation step boundary, after checking name collisions.
++        void Rename(const std::string& newName);
+         
+         //! A method returning the type of the entity.
+         virtual EntityType getType() const = 0;
+diff --git a/Library/include/entities/StaticEntity.h b/Library/include/entities/StaticEntity.h
+index 2fdba02..a681776 100644
+--- a/Library/include/entities/StaticEntity.h
++++ b/Library/include/entities/StaticEntity.h
+@@ -84,6 +84,12 @@ namespace sf
+         
+         //! A method returning the material of the entity.
+         Material getMaterial() const;
++        //! Update surface properties without replacing a collision body.
++        void setSurface(const Material& material, int look);
++        //! Release a detached rigid body and its collision storage.
++        void ReleasePhysics();
++        //! Release GPU objects; safe to call more than once.
++        virtual void ReleaseGraphics();
+         
+         //! A method returning the rigid body associated with the entity.
+         btRigidBody* getRigidBody();
+diff --git a/Library/include/entities/forcefields/Ocean.h b/Library/include/entities/forcefields/Ocean.h
+index 327ccdb..3a270b4 100644
+--- a/Library/include/entities/forcefields/Ocean.h
++++ b/Library/include/entities/forcefields/Ocean.h
+@@ -125,6 +125,16 @@ namespace sf
+         //! A method to enable rendering of suspended particles (underwater snow).
+         void setParticles(bool enabled);
+ 
++        //! A method to set the suspended-particle field. Stored until graphics init.
++        /*!
++         \param count number of particles around the camera
++         \param range distance at which particles are recycled [m]
++         \param sizeMin smallest flake [m]
++         \param sizeMax largest flake [m]
++         \param drift strength of the random drift
++         */
++        void setParticleField(size_t count, Scalar range, Scalar sizeMin, Scalar sizeMax, Scalar drift);
++
+         //! A method informing if the particles are enabled.
+         bool hasParticles() const;
+ 
+@@ -136,6 +146,9 @@ namespace sf
+         
+         //! A method returning a pointer to the fluid filling the ocean.
+         Fluid getLiquid() const;
++        void setLiquid(const Fluid& fluid) { liquid = fluid; }
++        //! Recreate only the wave renderer when needed; returns whether it changed.
++        bool setWaves(Scalar waves, SDL_mutex* hydrodynamics);
+         
+         //! A method returning a pointer to the OpenGL object implementing the ocean.
+         OpenGLOcean* getOpenGLOcean();
+@@ -169,8 +182,16 @@ namespace sf
+         OceanCurrentsUBO glOceanCurrentsUBOData;
+         Scalar depth;
+         Scalar waterType;
++        Scalar waterTemperature;
+         Scalar salinity;
+         Scalar oceanState;
++        bool waterTypeSet;
++        bool particlesEnabled;
++        size_t particleCount;
++        Scalar particleRange;
++        Scalar particleSizeMin;
++        Scalar particleSizeMax;
++        Scalar particleDrift;
+         bool currentsEnabled;
+         Renderable wavesDebug;
+     };
+diff --git a/Library/include/entities/statics/Obstacle.h b/Library/include/entities/statics/Obstacle.h
+index d3efd2b..71203b8 100644
+--- a/Library/include/entities/statics/Obstacle.h
++++ b/Library/include/entities/statics/Obstacle.h
+@@ -63,6 +63,16 @@ namespace sf
+          \param look the name of the graphical material used for rendering
+          */
+         Obstacle(std::string uniqueName, std::string modelFilename, Scalar scale, const Transform& origin, bool convexHull, std::string material, std::string look = "");
++
++        //! A constructor building an obstacle from an in-memory triangle mesh.
++        /*!
++         \param uniqueName a name for the body
++         \param mesh geometry used for both physics and rendering; the obstacle takes ownership
++         \param convexHull a flag determining if the physics mesh should be treated as convex (faster collision)
++         \param material the name of the material the body is made of
++         \param look the name of the graphical material used for rendering
++         */
++        Obstacle(std::string uniqueName, Mesh* mesh, bool convexHull, std::string material, std::string look = "");
+         
+         //! A constructor building a spherical obstacle.
+         /*!
+@@ -101,12 +111,14 @@ namespace sf
+         
+         //! A method implementing the rendering of the entity.
+         std::vector<Renderable> Render();
++        void ReleaseGraphics() override;
+         
+         //! A method that returns the static body type.
+         StaticEntityType getStaticType();
+         
+     private:
+         void BuildGraphicalObject();
++        void BuildCollisionShape(bool convexHull);
+         Mesh* graMesh;
+         int graObjectId;
+     };
+diff --git a/Library/include/graphics/OpenGLCamera.h b/Library/include/graphics/OpenGLCamera.h
+index d9035d6..0854e44 100644
+--- a/Library/include/graphics/OpenGLCamera.h
++++ b/Library/include/graphics/OpenGLCamera.h
+@@ -197,6 +197,8 @@ namespace sf
+          \param ec exposure compensation factor
+          */
+         void setExposureCompensation(GLfloat ec);
++        //! Toggle FXAA when shaders were initialized with AA available.
++        void setAntiAliasing(bool enabled) { antiAliasing = enabled; }
+ 
+         //! A method returning the exposure compensation factor.
+         GLfloat getExposureCompensation();
+diff --git a/Library/include/graphics/OpenGLContent.h b/Library/include/graphics/OpenGLContent.h
+index 42980fc..04971be 100644
+--- a/Library/include/graphics/OpenGLContent.h
++++ b/Library/include/graphics/OpenGLContent.h
+@@ -106,6 +106,11 @@ namespace sf
+         
+         //! A method that destroys all created OpenGL content.
+         void DestroyContent();
++        //! Live scene edits are committed on the thread owning the GL context.
++        void ReleaseObject(size_t id);
++        void SetLook(Look look);
++        void NotifySceneChanged() { ++sceneRevision; }
++        size_t getSceneRevision() const { return sceneRevision; }
+         
+         //! A method to set the current rendering viewport size.
+         /*!
+@@ -543,6 +548,7 @@ namespace sf
+         std::vector<OpenGLLight*> lights;
+         std::vector<Object> objects; // Rigid meshes (static)
+         std::vector<Cable> cables;   // Cables (dynamic)
++        size_t sceneRevision = 0;
+         std::vector<Look> looks;     // OpenGL materials
+         NameManager lookNameManager;
+         std::string currentLookName;
+diff --git a/Library/include/graphics/OpenGLOcean.h b/Library/include/graphics/OpenGLOcean.h
+index df9d857..e8bf746 100644
+--- a/Library/include/graphics/OpenGLOcean.h
++++ b/Library/include/graphics/OpenGLOcean.h
+@@ -202,6 +202,12 @@ namespace sf
+          */
+         void setParticles(bool enabled);
+ 
++        //! A method to set the particle field used by later allocations.
++        void setParticleField(size_t count, GLfloat range, GLfloat sizeMin, GLfloat sizeMax, GLfloat drift);
++
++        //! A method allocating one particle system from the current field settings.
++        std::shared_ptr<OpenGLOceanParticles> CreateParticles();
++
+         //! A method returning informing if the particles are enabled.
+         bool getParticlesEnabled();
+ 
+@@ -257,6 +263,11 @@ namespace sf
+ 
+         int oceanBoxObj;
+         bool particlesEnabled;
++        size_t particleCount;
++        GLfloat particleRange;
++        GLfloat particleSizeMin;
++        GLfloat particleSizeMax;
++        GLfloat particleDrift;
+     };
+ }
+ 
+diff --git a/Library/include/graphics/OpenGLOceanParticles.h b/Library/include/graphics/OpenGLOceanParticles.h
+index a5ccc66..95d3b31 100644
+--- a/Library/include/graphics/OpenGLOceanParticles.h
++++ b/Library/include/graphics/OpenGLOceanParticles.h
+@@ -45,7 +45,8 @@ namespace sf
+          \param numOfParticles the number of simulated particles
+ 		 \param visibleRange a distance at which particles are destroyed/created
+          */
+-        OpenGLOceanParticles(size_t numOfParticles, GLfloat visibleRange);
++        OpenGLOceanParticles(size_t numOfParticles, GLfloat visibleRange,
++                             GLfloat minSize = 0.002f, GLfloat maxSize = 0.007f, GLfloat drift = 0.02f);
+ 		
+         //! A destructor.
+         ~OpenGLOceanParticles();	
+@@ -85,6 +86,9 @@ namespace sf
+ 		std::normal_distribution<GLfloat> normald;
+ 		bool initialised;
+ 		GLfloat range;
++		GLfloat sizeMin;
++		GLfloat sizeMax;
++		GLfloat drift;
+ 		glm::vec3 lastEyePos;
+ 
+ 		static GLuint flakeTexture;
+diff --git a/Library/include/graphics/OpenGLPipeline.h b/Library/include/graphics/OpenGLPipeline.h
+index 89b4531..43d1fb2 100644
+--- a/Library/include/graphics/OpenGLPipeline.h
++++ b/Library/include/graphics/OpenGLPipeline.h
+@@ -98,6 +98,8 @@ namespace sf
+         
+         //! A method returning a copy of the render settings.
+         RenderSettings getRenderSettings() const;
++        //! Runtime toggles; initialize with HIGH quality so resources are available.
++        void SetPostprocessing(bool aa, bool ambientOcclusion, bool reflections);
+         
+         //! A method returning a reference to the helper object settings.
+         HelperSettings& getHelperSettings();
+diff --git a/Library/include/graphics/OpenGLTrackball.h b/Library/include/graphics/OpenGLTrackball.h
+index ac7fc37..376fc7c 100644
+--- a/Library/include/graphics/OpenGLTrackball.h
++++ b/Library/include/graphics/OpenGLTrackball.h
+@@ -78,6 +78,22 @@ namespace sf
+ 
+         //! A method used to update the trasformation of the trackball.
+         void UpdateTransform();
++
++        //! A method reading the orbit used by the trackball.
++        /*!
++         \param centerPosition the position of the camera orbit center in world space [m]
++         \param orbitRotation the orientation of the camera
++         \param orbitRadius the radius of the camera orbit [m]
++         */
++        void getOrbit(glm::vec3& centerPosition, glm::quat& orbitRotation, GLfloat& orbitRadius) const;
++
++        //! A method setting the orbit used by the trackball.
++        /*!
++         \param centerPosition the position of the camera orbit center in world space [m]
++         \param orbitRotation the orientation of the camera
++         \param orbitRadius the radius of the camera orbit [m]
++         */
++        void setOrbit(const glm::vec3& centerPosition, const glm::quat& orbitRotation, GLfloat orbitRadius);
+         
+         //! A method servicing the mouse down event.
+         /*!
+diff --git a/Library/shaders/oceanParticle.comp b/Library/shaders/oceanParticle.comp
+index d103c64..e17f25f 100644
+--- a/Library/shaders/oceanParticle.comp
++++ b/Library/shaders/oceanParticle.comp
+@@ -23,9 +23,10 @@ layout(std140) buffer Velocities
+ };
+ 
+ const float noiseFrequency = 100.0;
+-const float noiseStrength = 0.02;
+ const float sizeFactor = 100.0;
+ 
++uniform float noiseStrength;
++
+ #inject "velocityField.glsl"
+ 
+ //Uniform random value in [-1, 1]
+diff --git a/Library/src/core/GraphicalSimulationApp.cpp b/Library/src/core/GraphicalSimulationApp.cpp
+index 03c7fbe..d28ac4d 100644
+--- a/Library/src/core/GraphicalSimulationApp.cpp
++++ b/Library/src/core/GraphicalSimulationApp.cpp
+@@ -1008,12 +1008,19 @@ void GraphicalSimulationApp::ResumeSimulation()
+     }
+ }
+ 
++void GraphicalSimulationApp::ClearEntitySelection()
++{
++    selectedEntity = std::make_pair(nullptr, -1);
++    trackballCenter = nullptr;
++    if(getSimulationManager() != nullptr && getSimulationManager()->getTrackball() != nullptr)
++        getSimulationManager()->getTrackball()->GlueToMoving(nullptr);
++}
++
+ void GraphicalSimulationApp::StopSimulation()
+ {
+ 	SimulationApp::StopSimulation();
+ 
+-    selectedEntity = std::make_pair(nullptr, -1);
+-	trackballCenter = nullptr;
++    ClearEntitySelection();
+     
+     if (autostep_ && simulationThread != nullptr)
+     {
+diff --git a/Library/src/core/MaterialManager.cpp b/Library/src/core/MaterialManager.cpp
+index 50c28f5..fb579bb 100644
+--- a/Library/src/core/MaterialManager.cpp
++++ b/Library/src/core/MaterialManager.cpp
+@@ -48,6 +48,17 @@ void MaterialManager::ClearMaterialsAndFluids()
+     fluidNameManager.ClearNames();
+ }
+ 
++bool MaterialManager::UpdateMaterial(const Material& material)
++{
++    for(auto& existing : materials)
++        if(existing.name == material.name)
++        {
++            existing = material;
++            return true;
++        }
++    return false;
++}
++
+ std::string MaterialManager::CreateMaterial(const std::string& uniqueName, Scalar density, Scalar restitution, Scalar magnetic)
+ {
+     //Create and add new material
+diff --git a/Library/src/core/NameManager.cpp b/Library/src/core/NameManager.cpp
+index c9bf676..d472036 100644
+--- a/Library/src/core/NameManager.cpp
++++ b/Library/src/core/NameManager.cpp
+@@ -69,6 +69,12 @@ void NameManager::RemoveName(std::string name)
+         }
+ }
+ 
++bool NameManager::HasName(const std::string& name) const
++{
++    for(const auto& existing : names) if(existing == name) return true;
++    return false;
++}
++
+ void NameManager::ClearNames()
+ {
+     names.clear();
+diff --git a/Library/src/core/ScenarioParser.cpp b/Library/src/core/ScenarioParser.cpp
+index 780b84b..d3943b6 100644
+--- a/Library/src/core/ScenarioParser.cpp
++++ b/Library/src/core/ScenarioParser.cpp
+@@ -674,6 +674,26 @@ bool ScenarioParser::ParseEnvironment(XMLElement* element)
+         if((item = ocean->FirstChildElement("particles")) != nullptr)
+         {
+             item->QueryAttribute("enabled", &particles);
++            unsigned int count = 0;
++            double range = 0.0;
++            double sizeMin = 0.0;
++            double sizeMax = 0.0;
++            double drift = -1.0;
++            const bool hasCount = item->QueryAttribute("count", &count) == XML_SUCCESS;
++            const bool hasRange = item->QueryAttribute("range", &range) == XML_SUCCESS;
++            const bool hasSizeMin = item->QueryAttribute("size_min", &sizeMin) == XML_SUCCESS;
++            const bool hasSizeMax = item->QueryAttribute("size_max", &sizeMax) == XML_SUCCESS;
++            const bool hasDrift = item->QueryAttribute("drift", &drift) == XML_SUCCESS;
++            const bool custom = hasCount || hasRange || hasSizeMin || hasSizeMax || hasDrift;
++            if(custom)
++            {
++                sm->getOcean()->setParticleField(
++                    count,
++                    range > 0.0 ? range : STD_OCEAN_PARTICLES_RADIUS,
++                    sizeMin > 0.0 ? sizeMin : 0.002,
++                    sizeMax > 0.0 ? sizeMax : 0.007,
++                    drift >= 0.0 ? drift : 0.02);
++            }
+         }
+         sm->getOcean()->setParticles(particles);
+ 
+diff --git a/Library/src/core/SimulationManager.cpp b/Library/src/core/SimulationManager.cpp
+index 27a1eba..cb4122a 100644
+--- a/Library/src/core/SimulationManager.cpp
++++ b/Library/src/core/SimulationManager.cpp
+@@ -160,6 +160,33 @@ void SimulationManager::AddStaticEntity(StaticEntity* ent, const Transform& orig
+     }
+ }
+ 
++bool SimulationManager::RemoveStaticEntity(StaticEntity* ent)
++{
++    auto it = std::find(entities.begin(), entities.end(), ent);
++    if(it == entities.end())
++        return false;
++    if(SimulationApp::getApp()->hasGraphics())
++    {
++        auto* app = static_cast<GraphicalSimulationApp*>(SimulationApp::getApp());
++        if(app->getSelectedEntity().first == ent)
++            app->ClearEntitySelection();
++    }
++    for(auto c = contacts.begin(); c != contacts.end();)
++        if((*c)->getEntityA() == ent || (*c)->getEntityB() == ent)
++        {
++            delete *c;
++            c = contacts.erase(c);
++        }
++        else ++c;
++    collisions.erase(std::remove_if(collisions.begin(), collisions.end(),
++        [ent](const Collision& c) { return c.A == ent || c.B == ent; }), collisions.end());
++    if(ent->getRigidBody() != nullptr)
++        dynamicsWorld->removeRigidBody(ent->getRigidBody());
++    entities.erase(it);
++    ent->ReleasePhysics();
++    return true;
++}
++
+ void SimulationManager::AddAnimatedEntity(AnimatedEntity* ent)
+ {
+     if(ent != nullptr)
+@@ -238,6 +265,34 @@ void SimulationManager::EnableOcean(Scalar waves, Fluid f)
+     }
+ }
+     
++void SimulationManager::DisableOcean()
++{
++    if(ocean == nullptr)
++        return;
++    auto* ghost = ocean->getGhost();
++    dynamicsWorld->removeCollisionObject(ghost);
++    delete ghost->getCollisionShape();
++    delete ghost;
++    delete ocean;
++    ocean = nullptr;
++}
++
++void SimulationManager::UpdateOcean(Scalar waves, Fluid fluid)
++{
++    const bool graphics = SimulationApp::getApp()->hasGraphics();
++    waves = graphics ? waves : Scalar(0);
++    bool allocate = ocean == nullptr;
++    if(ocean == nullptr)
++        EnableOcean(waves, fluid);
++    else
++    {
++        ocean->setLiquid(fluid);
++        allocate = ocean->setWaves(waves, simHydroMutex);
++    }
++    if(graphics && allocate)
++        ocean->getOpenGLOcean()->AllocateParticles(static_cast<GraphicalSimulationApp*>(SimulationApp::getApp())->getGLPipeline()->getContent()->getView(0));
++}
++
+ void SimulationManager::EnableAtmosphere()
+ {
+     if(atmosphere != nullptr)
+@@ -969,7 +1024,10 @@ void SimulationManager::DestroyScenario()
+ 
+     if(SimulationApp::getApp() != nullptr && SimulationApp::getApp()->hasGraphics())
+ 	{
+-        static_cast<GraphicalSimulationApp*>(SimulationApp::getApp())->getGLPipeline()->getContent()->DestroyContent();
++        auto* app = static_cast<GraphicalSimulationApp*>(SimulationApp::getApp());
++        // The picked entity and trackball target are destroyed with the scenario.
++        app->ClearEntitySelection();
++        app->getGLPipeline()->getContent()->DestroyContent();
+ 		trackball = nullptr;
+ 	}
+ }
+@@ -1149,10 +1207,19 @@ void SimulationManager::UpdateDrawingQueue()
+     for(size_t i=0; i<entities.size(); ++i)
+         glPipeline->AddToDrawingQueue(entities[i]->Render());
+ 
+-    std::pair<Entity*, int> selected = ((GraphicalSimulationApp*)SimulationApp::getApp())->getSelectedEntity();
++    auto* app = (GraphicalSimulationApp*)SimulationApp::getApp();
++    std::pair<Entity*, int> selected = app->getSelectedEntity();
+     if(selected.first != nullptr)
+     {
+-        if(selected.first->getType() == EntityType::SOLID && ((SolidEntity*)selected.first)->getSolidType() == SolidType::COMPOUND)
++        bool live = false;
++        for(size_t i = 0; i < entities.size() && !live; ++i)
++            live = entities[i] == selected.first;
++        for(size_t r = 0; r < robots.size() && !live; ++r)
++            for(size_t l = 0; robots[r]->getLink(l) != nullptr; ++l)
++                live = live || robots[r]->getLink(l) == selected.first;
++        if(!live)
++            app->ClearEntitySelection();
++        else if(selected.first->getType() == EntityType::SOLID && ((SolidEntity*)selected.first)->getSolidType() == SolidType::COMPOUND)
+             glPipeline->AddToSelectedDrawingQueue(((Compound*)selected.first)->Render(selected.second));
+         else
+             glPipeline->AddToSelectedDrawingQueue(selected.first->Render());
+diff --git a/Library/src/entities/Entity.cpp b/Library/src/entities/Entity.cpp
+index 064a397..9b7427b 100644
+--- a/Library/src/entities/Entity.cpp
++++ b/Library/src/entities/Entity.cpp
+@@ -44,6 +44,13 @@ Entity::~Entity(void)
+         SimulationApp::getApp()->getSimulationManager()->getNameManager()->RemoveName(name);
+ }
+ 
++void Entity::Rename(const std::string& newName)
++{
++    auto* names = SimulationApp::getApp()->getSimulationManager()->getNameManager();
++    names->RemoveName(name);
++    name = names->AddName(newName);
++}
++
+ void Entity::setRenderable(bool render)
+ {
+     renderable = render;
+diff --git a/Library/src/entities/MovingEntity.cpp b/Library/src/entities/MovingEntity.cpp
+index 348e8f5..0214484 100644
+--- a/Library/src/entities/MovingEntity.cpp
++++ b/Library/src/entities/MovingEntity.cpp
+@@ -29,6 +29,8 @@
+ #include "core/SimulationManager.h"
+ #include "graphics/OpenGLPipeline.h"
+ #include "graphics/OpenGLContent.h"
++#include "entities/forcefields/Ocean.h"
++#include "graphics/OpenGLOcean.h"
+ #include "graphics/OpenGLOceanParticles.h"
+ 
+ namespace sf
+@@ -92,7 +94,11 @@ const std::shared_ptr<OpenGLOceanParticles>& MovingEntity::getOceanParticles()
+         && SimulationApp::getApp()->hasGraphics() 
+         && SimulationApp::getApp()->getSimulationManager()->isOceanEnabled())
+     {
+-        particles = std::make_shared<OpenGLOceanParticles>(STD_OCEAN_PARTICLES_COUNT, STD_OCEAN_PARTICLES_RADIUS);
++        OpenGLOcean* glOcean = SimulationApp::getApp()->getSimulationManager()->getOcean()->getOpenGLOcean();
++        if(glOcean != nullptr)
++            particles = glOcean->CreateParticles();
++        else
++            particles = std::make_shared<OpenGLOceanParticles>(STD_OCEAN_PARTICLES_COUNT, STD_OCEAN_PARTICLES_RADIUS);
+     }
+ 
+     return particles;
+diff --git a/Library/src/entities/StaticEntity.cpp b/Library/src/entities/StaticEntity.cpp
+index 85c1566..bd85d83 100644
+--- a/Library/src/entities/StaticEntity.cpp
++++ b/Library/src/entities/StaticEntity.cpp
+@@ -48,6 +48,7 @@ StaticEntity::StaticEntity(std::string uniqueName, std::string material, std::st
+ 
+ StaticEntity::~StaticEntity()
+ {
++    ReleaseGraphics();
+     if(phyMesh != nullptr) 
+         delete phyMesh;
+ }
+@@ -62,6 +63,54 @@ Material StaticEntity::getMaterial() const
+     return mat;
+ }
+ 
++void StaticEntity::setSurface(const Material& material, int look)
++{
++    mat = material;
++    lookId = look;
++}
++
++namespace
++{
++void DeleteStaticShape(btCollisionShape* shape)
++{
++    if(auto* compound = dynamic_cast<btCompoundShape*>(shape))
++        for(int i = 0; i < compound->getNumChildShapes(); ++i)
++            DeleteStaticShape(compound->getChildShape(i));
++    if(auto* mesh = dynamic_cast<btBvhTriangleMeshShape*>(shape))
++    {
++        auto* array = dynamic_cast<btTriangleIndexVertexArray*>(mesh->getMeshInterface());
++        if(array != nullptr)
++        {
++            for(int i = 0; i < array->getIndexedMeshArray().size(); ++i)
++            {
++                const auto& part = array->getIndexedMeshArray()[i];
++                delete[] reinterpret_cast<const Scalar*>(part.m_vertexBase);
++                delete[] reinterpret_cast<const int*>(part.m_triangleIndexBase);
++            }
++            delete array;
++        }
++    }
++    delete shape;
++}
++}
++
++void StaticEntity::ReleasePhysics()
++{
++    if(rigidBody == nullptr)
++        return;
++    DeleteStaticShape(rigidBody->getCollisionShape());
++    delete rigidBody->getMotionState();
++    delete rigidBody;
++    rigidBody = nullptr;
++}
++
++void StaticEntity::ReleaseGraphics()
++{
++    if(phyObjectId >= 0 && SimulationApp::getApp()->hasGraphics())
++        static_cast<GraphicalSimulationApp*>(SimulationApp::getApp())->getGLPipeline()->getContent()->ReleaseObject(phyObjectId);
++    phyObjectId = -1;
++}
++
+ void StaticEntity::setTransform(const Transform& trans)
+ {
+     if(rigidBody != nullptr)
+@@ -155,6 +204,7 @@ void StaticEntity::AddToSimulation(SimulationManager* sm, const Transform& origi
+     if(rigidBody != nullptr)
+     {
+         btDefaultMotionState* motionState = new btDefaultMotionState(origin);
++        delete rigidBody->getMotionState();
+         rigidBody->setMotionState(motionState);
+         sm->getDynamicsWorld()->addRigidBody(rigidBody, MASK_STATIC, MASK_DYNAMIC);
+     }
+diff --git a/Library/src/entities/forcefields/Ocean.cpp b/Library/src/entities/forcefields/Ocean.cpp
+index c7f7037..032ad42 100644
+--- a/Library/src/entities/forcefields/Ocean.cpp
++++ b/Library/src/entities/forcefields/Ocean.cpp
+@@ -58,6 +58,14 @@ Ocean::Ocean(std::string uniqueName, Scalar waves, Fluid l) : ForcefieldEntity(u
+     wavesDebug.model = glm::mat4(1.f);
+     wavesDebug.data = std::make_shared<std::vector<glm::vec3>>();
+     waterType = Scalar(0.0);
++    waterTemperature = Scalar(15);
++    waterTypeSet = false;
++    particlesEnabled = true;
++    particleCount = STD_OCEAN_PARTICLES_COUNT;
++    particleRange = Scalar(STD_OCEAN_PARTICLES_RADIUS);
++    particleSizeMin = Scalar(0.002);
++    particleSizeMax = Scalar(0.007);
++    particleDrift = Scalar(0.02);
+     glOcean = nullptr;
+ }
+ 
+@@ -84,7 +92,7 @@ bool Ocean::hasParticles() const
+     if(glOcean != nullptr)
+         return glOcean->getParticlesEnabled();
+     else
+-        return false;
++        return particlesEnabled;
+ }
+ 
+ Scalar Ocean::getWaterType() const
+@@ -115,23 +123,60 @@ VelocityField* Ocean::getVelocityField(size_t index)
+         return nullptr;
+ }
+ 
+-void Ocean::setWaterType(Scalar jerlov)
+-{ 
++bool Ocean::setWaves(Scalar waves, SDL_mutex* hydrodynamics)
++{
++    waves = std::max(Scalar(0), std::min(Scalar(2), waves));
++    if(waves == oceanState)
++        return false;
++    oceanState = waves;
++    ghost->setWorldTransform(Transform(Quaternion::getIdentity(), Vector3(0, 0, depth/Scalar(2) - waves*Scalar(3))));
+     if(glOcean != nullptr)
+     {
+-        waterType = jerlov > Scalar(1) ? Scalar(1) : (jerlov < Scalar(0) ? Scalar(0) : jerlov);
+-        glOcean->setWaterType((float)waterType);
++        delete glOcean;
++        glOcean = nullptr;
++        InitGraphics(hydrodynamics);
+     }
++    return true;
++}
++
++void Ocean::setWaterType(Scalar jerlov)
++{
++    waterType = jerlov > Scalar(1) ? Scalar(1) : (jerlov < Scalar(0) ? Scalar(0) : jerlov);
++    waterTypeSet = true;
++    if(glOcean != nullptr)
++        glOcean->setWaterType((float)waterType);
+ }
+ 
+ void Ocean::setParticles(bool enabled)
+ {
++    particlesEnabled = enabled;
+     if(glOcean != nullptr)
+         glOcean->setParticles(enabled);
+ }
+ 
++void Ocean::setParticleField(size_t count, Scalar range, Scalar sizeMin, Scalar sizeMax, Scalar drift)
++{
++    if(count > 0)
++        particleCount = count;
++    if(range > Scalar(0))
++        particleRange = range;
++    if(sizeMax < sizeMin)
++        std::swap(sizeMin, sizeMax);
++    if(sizeMax > Scalar(0))
++    {
++        particleSizeMin = sizeMin;
++        particleSizeMax = sizeMax;
++    }
++    if(drift >= Scalar(0))
++        particleDrift = drift;
++    if(glOcean != nullptr)
++        glOcean->setParticleField(particleCount, (GLfloat)particleRange, (GLfloat)particleSizeMin,
++                                  (GLfloat)particleSizeMax, (GLfloat)particleDrift);
++}
++
+ void Ocean::SetConditions(Scalar waterTemp)
+ {
++    waterTemperature = waterTemp;
+     if(glOcean != nullptr)
+         glOcean->setWaterTemperature((float)waterTemp);
+ }
+@@ -273,7 +318,15 @@ void Ocean::InitGraphics(SDL_mutex* hydrodynamics)
+         glOcean = new OpenGLRealOcean(depth, oceanState, hydrodynamics);
+     else
+         glOcean = new OpenGLFlatOcean(depth);
+-    setWaterType(0.2);
++    // Scenario values are set before the GL ocean exists. Apply the stored
++    // ones here. 0.2 matches the previous hardcoded default when nothing was set.
++    if(!waterTypeSet)
++        waterType = Scalar(0.2);
++    glOcean->setWaterType((float)waterType);
++    glOcean->setWaterTemperature((float)waterTemperature);
++    glOcean->setParticles(particlesEnabled);
++    glOcean->setParticleField(particleCount, (GLfloat)particleRange, (GLfloat)particleSizeMin,
++                              (GLfloat)particleSizeMax, (GLfloat)particleDrift);
+ }
+ 
+ std::vector<Renderable> Ocean::Render()
+diff --git a/Library/src/entities/statics/Obstacle.cpp b/Library/src/entities/statics/Obstacle.cpp
+index da008ff..ca5313c 100644
+--- a/Library/src/entities/statics/Obstacle.cpp
++++ b/Library/src/entities/statics/Obstacle.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "entities/statics/Obstacle.h"
+ 
++#include <cstdlib>
+ #include "core/GraphicalSimulationApp.h"
+ #include "graphics/OpenGLPipeline.h"
+ #include "graphics/OpenGLContent.h"
+@@ -47,7 +48,22 @@ Obstacle::Obstacle(std::string uniqueName,
+     }
+     else
+         phyMesh = graMesh;
+-        
++
++    BuildCollisionShape(convexHull);
++}
++
++Obstacle::Obstacle(std::string uniqueName, Mesh* mesh, bool convexHull, std::string material, std::string look)
++    : StaticEntity(uniqueName, material, look)
++{
++    if(mesh == nullptr)
++        abort();
++    graMesh = mesh;
++    phyMesh = mesh;
++    BuildCollisionShape(convexHull);
++}
++
++void Obstacle::BuildCollisionShape(bool convexHull)
++{
+     graObjectId = -1;
+ 
+     //Buidling collision shape
+@@ -158,6 +174,7 @@ Obstacle::Obstacle(std::string uniqueName, Scalar cylinderRadius, Scalar cylinde
+     
+ Obstacle::~Obstacle()
+ {
++    ReleaseGraphics();
+     if(graMesh != nullptr && graMesh != phyMesh)
+         delete graMesh;
+ }
+@@ -167,13 +184,23 @@ StaticEntityType Obstacle::getStaticType()
+     return StaticEntityType::OBSTACLE;
+ }
+     
++void Obstacle::ReleaseGraphics()
++{
++    if(graObjectId >= 0 && SimulationApp::getApp()->hasGraphics())
++        static_cast<GraphicalSimulationApp*>(SimulationApp::getApp())->getGLPipeline()->getContent()->ReleaseObject(graObjectId);
++    if(phyObjectId == graObjectId)
++        phyObjectId = -1;
++    graObjectId = -1;
++    StaticEntity::ReleaseGraphics();
++}
++
+ void Obstacle::BuildGraphicalObject()
+ {
+     if(graMesh == nullptr || !SimulationApp::getApp()->hasGraphics())
+         return;
+         
+     graObjectId = ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BuildObject(graMesh);
+-    phyObjectId = ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BuildObject(phyMesh);
++    phyObjectId = phyMesh == graMesh ? graObjectId : ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BuildObject(phyMesh);
+ }
+ 
+ std::vector<Renderable> Obstacle::Render()
+diff --git a/Library/src/graphics/OpenGLContent.cpp b/Library/src/graphics/OpenGLContent.cpp
+index 3c9eaa3..4e4e083 100644
+--- a/Library/src/graphics/OpenGLContent.cpp
++++ b/Library/src/graphics/OpenGLContent.cpp
+@@ -27,6 +27,10 @@
+ 
+ #include <map>
+ #include <algorithm>
++#include <filesystem>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
+ #include "core/SimulationApp.h"
+ #include "core/SimulationManager.h"
+ #include "graphics/OpenGLState.h"
+@@ -578,6 +582,7 @@ void OpenGLContent::Finalize()
+ 
+ void OpenGLContent::DestroyContent()
+ {
++    NotifySceneChanged();
+     for(size_t i=0; i<looks.size(); ++i)
+     {
+         if(looks[i].albedoTexture != 0)
+@@ -874,7 +879,7 @@ void OpenGLContent::DrawObject(int objectId, int lookId, const glm::mat4& M)
+         case DrawingMode::TEMPERATURE:
+         {
+             if(lookId < 0)
+-                UseLook(getLook(looks.size()-1), false, M); // Use default look
++                UseLook(getLook(getLookId("__Default__")), false, M); // Use default look
+             else
+                 UseLook(getLook(lookId), objects[objectId].texturable, M); // Use user defined look
+         }
+@@ -957,7 +962,7 @@ void OpenGLContent::DrawCable(size_t cableId, GLfloat radius, const std::vector<
+         case DrawingMode::TEMPERATURE:
+         {
+             if (lookId < 0)
+-                UseCableLook(getLook(looks.size() - 1), radius); // Use default look
++                UseCableLook(getLook(getLookId("__Default__")), radius); // Use default look
+             else
+                 UseCableLook(getLook(lookId), radius); // Use user defined look
+         }
+@@ -1310,10 +1315,46 @@ unsigned int OpenGLContent::BuildObject(Mesh* mesh)
+     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(Face) * mesh->faces.size(), &mesh->faces[0].vertexID[0], GL_STATIC_DRAW);
+     OpenGLState::BindVertexArray(0);
+     
++    for(size_t i = 0; i < objects.size(); ++i)
++        if(objects[i].vao == 0)
++        {
++            objects[i] = obj;
++            return static_cast<unsigned int>(i);
++        }
+     objects.push_back(obj);
+     return (unsigned int)objects.size()-1;
+ }
+ 
++void OpenGLContent::ReleaseObject(size_t id)
++{
++    if(id >= objects.size() || objects[id].vao == 0)
++        return;
++    auto& obj = objects[id];
++    glDeleteBuffers(1, &obj.vboVertex);
++    glDeleteBuffers(1, &obj.vboIndex);
++    glDeleteVertexArrays(1, &obj.vao);
++    obj = Object{};
++}
++
++void OpenGLContent::SetLook(Look look)
++{
++    const int id = getLookId(look.name);
++    if(id < 0)
++    {
++        look.name = lookNameManager.AddName(look.name);
++        looks.push_back(std::move(look));
++    }
++    else
++    {
++        auto& old = looks[id];
++        if(old.albedoTexture) glDeleteTextures(1, &old.albedoTexture);
++        if(old.normalMap) glDeleteTextures(1, &old.normalMap);
++        if(old.temperatureMap) glDeleteTextures(1, &old.temperatureMap);
++        old = std::move(look);
++    }
++    currentLookName.clear();
++}
++
+ size_t OpenGLContent::BuildCable(size_t numNodes)
+ {
+     Cable cable;
+@@ -2556,8 +2597,87 @@ Mesh* OpenGLContent::BuildTerrain(GLfloat* heightfield, int sizeX, int sizeY, GL
+     return mesh;
+ }
+ 
++namespace
++{
++
++struct MeshCacheKey
++{
++    std::string path;
++    GLfloat scale;
++    bool smooth;
++    std::filesystem::file_time_type mtime;
++
++    bool operator==(const MeshCacheKey& other) const
++    {
++        return path == other.path && scale == other.scale && smooth == other.smooth && mtime == other.mtime;
++    }
++};
++
++struct MeshCacheKeyHash
++{
++    std::size_t operator()(const MeshCacheKey& key) const
++    {
++        std::size_t hash = std::hash<std::string>{}(key.path);
++        hash ^= std::hash<float>{}(key.scale) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
++        hash ^= std::hash<bool>{}(key.smooth) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
++        const auto ticks = key.mtime.time_since_epoch().count();
++        hash ^= static_cast<std::size_t>(ticks) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
++        return hash;
++    }
++};
++
++std::mutex gMeshCacheMutex;
++std::unordered_map<MeshCacheKey, std::unique_ptr<Mesh>, MeshCacheKeyHash> gMeshCache;
++
++Mesh* CloneMesh(const Mesh* source)
++{
++    if(source->isTexturable())
++    {
++        const auto* textured = static_cast<const TexturableMesh*>(source);
++        auto* copy = new TexturableMesh();
++        copy->vertices = textured->vertices;
++        copy->faces = textured->faces;
++        return copy;
++    }
++
++    const auto* plain = static_cast<const PlainMesh*>(source);
++    auto* copy = new PlainMesh();
++    copy->vertices = plain->vertices;
++    copy->faces = plain->faces;
++    return copy;
++}
++
++void DropStaleMeshCacheEntries(const MeshCacheKey& key)
++{
++    for(auto it = gMeshCache.begin(); it != gMeshCache.end();)
++    {
++        const bool sameMesh = it->first.path == key.path && it->first.scale == key.scale && it->first.smooth == key.smooth;
++        if(sameMesh && !(it->first.mtime == key.mtime))
++            it = gMeshCache.erase(it);
++        else
++            ++it;
++    }
++}
++
++}
++
+ Mesh* OpenGLContent::LoadMesh(const std::string& filename, GLfloat scale, bool smooth)
+ {
++    std::error_code pathError;
++    const std::filesystem::path absolute = std::filesystem::absolute(filename, pathError);
++    std::error_code timeError;
++    const auto mtime = std::filesystem::last_write_time(pathError ? std::filesystem::path(filename) : absolute, timeError);
++    const bool cacheable = !pathError && !timeError;
++    const MeshCacheKey key{cacheable ? absolute.string() : filename, scale, smooth, mtime};
++
++    if(cacheable)
++    {
++        std::lock_guard<std::mutex> lock(gMeshCacheMutex);
++        const auto found = gMeshCache.find(key);
++        if(found != gMeshCache.end())
++            return CloneMesh(found->second.get());
++    }
++
+     Mesh* mesh = LoadGeometryFromFile(filename, scale);
+     CheckAndRepairFaceVertexOrder(mesh);
+ 
+@@ -2567,6 +2687,14 @@ Mesh* OpenGLContent::LoadMesh(const std::string& filename, GLfloat scale, bool s
+         SmoothNormals(mesh);
+     if(mesh->isTexturable())
+         ComputeTangents((TexturableMesh*)mesh);
++
++    if(cacheable)
++    {
++        std::lock_guard<std::mutex> lock(gMeshCacheMutex);
++        DropStaleMeshCacheEntries(key);
++        if(gMeshCache.find(key) == gMeshCache.end())
++            gMeshCache.emplace(key, std::unique_ptr<Mesh>(CloneMesh(mesh)));
++    }
+     return mesh;
+ }
+ 
+diff --git a/Library/src/graphics/OpenGLOcean.cpp b/Library/src/graphics/OpenGLOcean.cpp
+index c8a0854..fdbcec4 100644
+--- a/Library/src/graphics/OpenGLOcean.cpp
++++ b/Library/src/graphics/OpenGLOcean.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "graphics/OpenGLOcean.h"
+ 
++#include <algorithm>
+ #include <iostream>
+ #include <fstream>
+ #include <unordered_set>
+@@ -73,6 +74,11 @@ OpenGLOcean::OpenGLOcean(GLfloat size)
+     GLint layers = 4;
+     oceanSize = size;
+     particlesEnabled = true;
++    particleCount = STD_OCEAN_PARTICLES_COUNT;
++    particleRange = STD_OCEAN_PARTICLES_RADIUS;
++    particleSizeMin = 0.002f;
++    particleSizeMax = 0.007f;
++    particleDrift = 0.02f;
+     waterTemperature = 15.f;
+ 
+     //Create simulation textures
+@@ -376,6 +382,28 @@ void OpenGLOcean::setParticles(bool enabled)
+     particlesEnabled = enabled;
+ }
+ 
++void OpenGLOcean::setParticleField(size_t count, GLfloat range, GLfloat sizeMin, GLfloat sizeMax, GLfloat drift)
++{
++    if(count > 0)
++        particleCount = count;
++    if(range > 0.f)
++        particleRange = range;
++    if(sizeMax < sizeMin)
++        std::swap(sizeMin, sizeMax);
++    if(sizeMax > 0.f)
++    {
++        particleSizeMin = sizeMin;
++        particleSizeMax = sizeMax;
++    }
++    if(drift >= 0.f)
++        particleDrift = drift;
++}
++
++std::shared_ptr<OpenGLOceanParticles> OpenGLOcean::CreateParticles()
++{
++    return std::make_shared<OpenGLOceanParticles>(particleCount, particleRange, particleSizeMin, particleSizeMax, particleDrift);
++}
++
+ bool OpenGLOcean::getParticlesEnabled()
+ {
+     return particlesEnabled;
+@@ -591,7 +619,7 @@ std::shared_ptr<OpenGLOceanParticles> OpenGLOcean::AllocateParticles(OpenGLView*
+     if(oceanParticles.find(view) != oceanParticles.end())
+         return oceanParticles.at(view);
+ 
+-    std::shared_ptr<OpenGLOceanParticles> particles = std::make_shared<OpenGLOceanParticles>(STD_OCEAN_PARTICLES_COUNT, STD_OCEAN_PARTICLES_RADIUS);
++    std::shared_ptr<OpenGLOceanParticles> particles = CreateParticles();
+     oceanParticles.insert({view, particles});
+     return particles;
+ }
+diff --git a/Library/src/graphics/OpenGLOceanParticles.cpp b/Library/src/graphics/OpenGLOceanParticles.cpp
+index 84cf093..7d5aeb3 100644
+--- a/Library/src/graphics/OpenGLOceanParticles.cpp
++++ b/Library/src/graphics/OpenGLOceanParticles.cpp
+@@ -46,10 +46,14 @@ GLSLShader* OpenGLOceanParticles::renderShader = nullptr;
+ GLSLShader* OpenGLOceanParticles::renderIdShader = nullptr;
+ GLSLShader* OpenGLOceanParticles::updateShader = nullptr;
+ 
+-OpenGLOceanParticles::OpenGLOceanParticles(size_t numOfParticles, GLfloat visibleRange) : OpenGLParticles(numOfParticles), uniformd(0, 1.f), normald(0, 1.f)
++OpenGLOceanParticles::OpenGLOceanParticles(size_t numOfParticles, GLfloat visibleRange, GLfloat minSize, GLfloat maxSize, GLfloat particleDrift)
++    : OpenGLParticles(numOfParticles), uniformd(0, 1.f), normald(0, 1.f)
+ {
+     initialised = false;
+     range = fabsf(visibleRange);
++    sizeMin = minSize;
++    sizeMax = maxSize > minSize ? maxSize : minSize;
++    drift = particleDrift >= 0.f ? particleDrift : 0.f;
+     lastEyePos = glm::vec3(0);
+ }
+     
+@@ -66,7 +70,8 @@ void OpenGLOceanParticles::Create(glm::vec3 eyePos)
+     for(GLuint i=0; i<nParticles; ++i) 
+     {
+         GLfloat r = cbrtf(uniformd(generator)) * range; //cbrtf for uniform distribution in sphere volume
+-        *(positions++) = glm::vec4(r * glm::normalize(glm::vec3(normald(generator), normald(generator), normald(generator))) + eyePos, uniformd(generator)*0.005f + 0.002f);
++        *(positions++) = glm::vec4(r * glm::normalize(glm::vec3(normald(generator), normald(generator), normald(generator))) + eyePos,
++                                   uniformd(generator) * (sizeMax - sizeMin) + sizeMin);
+     }
+     glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+ 
+@@ -96,6 +101,7 @@ void OpenGLOceanParticles::Update(OpenGLView* view, GLfloat dt)
+     updateShader->SetUniform("numParticles", nParticles);
+     updateShader->SetUniform("eyePos", eyePos);
+     updateShader->SetUniform("R", range);
++    updateShader->SetUniform("noiseStrength", drift);
+     OpenGLState::BindTexture(TEX_MAT_ALBEDO, GL_TEXTURE_3D, noiseTexture);
+     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, SSBO_PARTICLE_POS, particlePosSSBO);
+     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, SSBO_PARTICLE_VEL, particleVelSSBO);
+@@ -161,6 +167,7 @@ void OpenGLOceanParticles::Init()
+     updateShader->AddUniform("numParticles", ParameterType::UINT);
+     updateShader->AddUniform("eyePos", ParameterType::VEC3);
+     updateShader->AddUniform("R", ParameterType::FLOAT);
++    updateShader->AddUniform("noiseStrength", ParameterType::FLOAT);
+     updateShader->AddUniform("texNoise", ParameterType::INT);
+     updateShader->AddUniform("invNoiseSize", ParameterType::FLOAT);
+     updateShader->BindUniformBlock("OceanCurrents", UBO_OCEAN_CURRENTS);
+diff --git a/Library/src/graphics/OpenGLPipeline.cpp b/Library/src/graphics/OpenGLPipeline.cpp
+index fd2a706..47a3b09 100644
+--- a/Library/src/graphics/OpenGLPipeline.cpp
++++ b/Library/src/graphics/OpenGLPipeline.cpp
+@@ -113,6 +113,16 @@ RenderSettings OpenGLPipeline::getRenderSettings() const
+     return rSettings;
+ }
+     
++void OpenGLPipeline::SetPostprocessing(bool aa, bool ambientOcclusion, bool reflections)
++{
++    rSettings.aa = aa ? RenderQuality::HIGH : RenderQuality::DISABLED;
++    rSettings.ao = ambientOcclusion ? RenderQuality::HIGH : RenderQuality::DISABLED;
++    rSettings.ssr = reflections ? RenderQuality::HIGH : RenderQuality::DISABLED;
++    for(size_t i = 0; i < content->getViewsCount(); ++i)
++        if(auto* camera = dynamic_cast<OpenGLCamera*>(content->getView(i)))
++            camera->setAntiAliasing(aa);
++}
++
+ HelperSettings& OpenGLPipeline::getHelperSettings()
+ {
+     return hSettings;
+diff --git a/Library/src/graphics/OpenGLTrackball.cpp b/Library/src/graphics/OpenGLTrackball.cpp
+index fcd5a58..31a4929 100644
+--- a/Library/src/graphics/OpenGLTrackball.cpp
++++ b/Library/src/graphics/OpenGLTrackball.cpp
+@@ -117,6 +117,21 @@ void OpenGLTrackball::UpdateTransform()
+     ExtractFrustumFromVP(viewUBOData.frustum, viewUBOData.VP);
+ }
+ 
++void OpenGLTrackball::getOrbit(glm::vec3& centerPosition, glm::quat& orbitRotation, GLfloat& orbitRadius) const
++{
++    centerPosition = center;
++    orbitRotation = rotation;
++    orbitRadius = radius;
++}
++
++void OpenGLTrackball::setOrbit(const glm::vec3& centerPosition, const glm::quat& orbitRotation, GLfloat orbitRadius)
++{
++    center = tempCenter = centerPosition;
++    rotation = orbitRotation;
++    radius = orbitRadius < 0.05f ? 0.05f : orbitRadius;
++    UpdateTransform();
++}
++
+ GLfloat OpenGLTrackball::calculateZ(GLfloat x, GLfloat y)
+ {
+     if(x*x+y*y <= 0.5f)

@@ -1,0 +1,10 @@
+{
+  "stonefish": {
+    "url": "https://github.com/patrykcieslak/stonefish.git",
+    "commit": "b21eb8e194c570ff2f61e91aeffb38d73dc25f42"
+  },
+  "stonefish_rtx": {
+    "url": "https://github.com/Rumarino-Team/stonefish.git",
+    "commit": "0bd754b4e1a557d8e4c8d668f5b664381fb4302f"
+  }
+}

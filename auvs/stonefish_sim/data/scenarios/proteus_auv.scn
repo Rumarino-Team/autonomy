@@ -1,0 +1,202 @@
+<?xml version="1.0"?>
+<scenario>
+	<robot name="$(arg robot_name)" fixed="false" self_collisions="false">
+		<base_link name="Proteus" type="compound" physics="submerged">
+			<external_part name="TopCabin" type="cylinder" physics="submerged" buoyant="true">
+				<dimensions radius="0.1" height="0.3" thickness="0.005" />
+				<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+				<material name="acrylic" />
+				<look name="clear" />
+				<compound_transform rpy="1.5708 0.0 0.0" xyz="0.0 0.0 -0.05" />
+			</external_part>
+
+			<external_part name="BottomCabin" type="cylinder" physics="submerged" buoyant="true">
+				<dimensions radius="0.05" height="0.31" thickness="0.005" />
+				<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+				<material name="acrylic" />
+				<look name="clear" />
+				<compound_transform rpy="1.5708 0.0 0.0" xyz="0.0 0.0 0.13" />
+			</external_part>
+
+			<external_part name="LeftRail" type="box" physics="submerged" buoyant="true">
+				<dimensions xyz="0.04 0.45 0.04" thickness="0.003" />
+				<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+				<material name="abs" />
+				<look name="blue" />
+				<compound_transform rpy="0.0 0.0 0.0" xyz="0.17 0.0 -0.03" />
+			</external_part>
+
+			<external_part name="RightRail" type="box" physics="submerged" buoyant="true">
+				<dimensions xyz="0.04 0.45 0.04" thickness="0.003" />
+				<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+				<material name="abs" />
+				<look name="blue" />
+				<compound_transform rpy="0.0 0.0 0.0" xyz="-0.17 0.0 -0.03" />
+			</external_part>
+			<external_part name="ProtySupport1" type="model" physics="submerged" buoyant="true">
+				<physical>
+					<mesh filename="models/protysupport.obj" scale="0.001" />
+					<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+				</physical>
+				<material name="abs" />
+				<look name="blue" />
+				<compound_transform rpy="1.5708 0.0 0.0" xyz="0.0 0.135 -0.012" />
+			</external_part>
+			<external_part name="ProtySupport2" type="model" physics="submerged" buoyant="true">
+				<physical>
+					<mesh filename="models/protysupport.obj" scale="0.001" />
+					<origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+				</physical>
+				<material name="abs" />
+				<look name="blue" />
+				<compound_transform rpy="1.5708 0.0 0.0" xyz="0.0 -0.135 -0.012" />
+			</external_part>
+		</base_link>
+
+		<ros_subscriber thrusters="/bridge/thrusters" />
+
+		<actuator name="thruster_0_left" type="thruster">
+			<link name="Proteus" />
+			<origin rpy="0.0 0.0 4.7123" xyz="0.246 0.0 -0.03" />
+			<specs max_setpoint="${1000.0/60.0*2.0*pi}" inverted_setpoint="true"
+				normalized_setpoint="true" />
+			<propeller diameter="0.18" right="true">
+				<mesh filename="models/propeller.obj" scale="0.5" />
+				<material name="pvc" />
+				<look name="propeller" />
+			</propeller>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.2" />
+			</rotor_dynamics>
+			<thrust_model type="fluid_dynamics">
+				<thrust_coeff forward="0.48" reverse="0.48" />
+				<torque_coeff value="0.05" />
+			</thrust_model>
+		</actuator>
+
+		<actuator name="thruster_1_right" type="thruster">
+			<link name="Proteus" />
+			<origin rpy="0.0 0.0 4.7123" xyz="-0.246 0.0 -0.03" />
+			<specs max_setpoint="${1000.0/60.0*2.0*pi}" inverted_setpoint="true"
+				normalized_setpoint="true" />
+			<propeller diameter="0.18" right="true">
+				<mesh filename="models/propeller.obj" scale="0.5" />
+				<material name="pvc" />
+				<look name="propeller" />
+			</propeller>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.2" />
+			</rotor_dynamics>
+			<thrust_model type="fluid_dynamics">
+				<thrust_coeff forward="0.48" reverse="0.48" />
+				<torque_coeff value="0.05" />
+			</thrust_model>
+		</actuator>
+
+		<!-- Depth Thrusters -->
+
+		<actuator name="thruster_2_depth_front_left" type="thruster">
+			<link name="Proteus" />
+			<origin rpy="0.0 -1.571 0.0" xyz="0.165 0.265 0.0" />
+			<specs max_setpoint="${1000.0/60.0*2.0*pi}" inverted_setpoint="true"
+				normalized_setpoint="true" />
+			<propeller diameter="0.18" right="true">
+				<mesh filename="models/propeller.obj" scale="0.50" />
+				<material name="pvc" />
+				<look name="propeller" />
+			</propeller>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.2" />
+			</rotor_dynamics>
+			<thrust_model type="fluid_dynamics">
+				<thrust_coeff forward="0.48" reverse="0.48" />
+				<torque_coeff value="0.05" />
+			</thrust_model>
+		</actuator>
+
+		<actuator name="thruster_3_depth_front_right" type="thruster">
+			<link name="Proteus" />
+			<origin rpy="0.0 -1.571 0.0" xyz="-0.165 0.265 0.0" />
+			<specs max_setpoint="${1000.0/60.0*2.0*pi}" inverted_setpoint="true"
+				normalized_setpoint="true" />
+			<propeller diameter="0.18" right="true">
+				<mesh filename="models/propeller.obj" scale="0.50" />
+				<material name="pvc" />
+				<look name="propeller" />
+			</propeller>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.2" />
+			</rotor_dynamics>
+			<thrust_model type="fluid_dynamics">
+				<thrust_coeff forward="0.48" reverse="0.48" />
+				<torque_coeff value="0.05" />
+			</thrust_model>
+		</actuator>
+
+		<actuator name="thruster_4_depth_back_left" type="thruster">
+			<link name="Proteus" />
+			<origin rpy="0.0 -1.571 0.0" xyz="0.165 -0.265 0.0" />
+			<specs max_setpoint="${1000.0/60.0*2.0*pi}" inverted_setpoint="true"
+				normalized_setpoint="true" />
+			<propeller diameter="0.18" right="true">
+				<mesh filename="models/propeller.obj" scale="0.50" />
+				<material name="pvc" />
+				<look name="propeller" />
+			</propeller>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.2" />
+			</rotor_dynamics>
+			<thrust_model type="fluid_dynamics">
+				<thrust_coeff forward="0.48" reverse="0.48" />
+				<torque_coeff value="0.05" />
+			</thrust_model>
+		</actuator>
+
+		<actuator name="thruster_5_depth_back_right" type="thruster">
+			<link name="Proteus" />
+			<origin rpy="0.0 -1.571 0.0" xyz="-0.165 -0.265 0.0" />
+			<specs max_setpoint="${1000.0/60.0*2.0*pi}" inverted_setpoint="true"
+				normalized_setpoint="true" />
+			<propeller diameter="0.18" right="true">
+				<mesh filename="models/propeller.obj" scale="0.50" />
+				<material name="pvc" />
+				<look name="propeller" />
+			</propeller>
+			<rotor_dynamics type="first_order">
+				<time_constant value="0.2" />
+			</rotor_dynamics>
+			<thrust_model type="fluid_dynamics">
+				<thrust_coeff forward="0.48" reverse="0.48" />
+				<torque_coeff value="0.05" />
+			</thrust_model>
+		</actuator>
+
+		<sensor name="Odometry" type="odometry" rate="30.0">
+			<link name="Proteus" />
+			<origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+			<ros_publisher topic="/bridge/odometry" />
+		</sensor>
+
+		<sensor name="ProteusCameraIMU" rate="200.0" type="imu">
+			<range angular_velocity="20.0 20.0 20.0" linear_acceleration="30.0" />
+			<noise angle="0.00016968 0.00016968 0.00016968"
+				angular_velocity="0.00016968"
+				yaw_drift="0.000019393"
+				linear_acceleration="0.002" />
+			<history samples="1" />
+			<origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+			<link name="Proteus" />
+			<ros_publisher topic="/bridge/imu" />
+		</sensor>
+
+
+		<sensor name="Camera" rate="21.0" type="camera">
+			<specs resolution_x="800" resolution_y="600" horizontal_fov="60.0" />
+			<origin xyz="0.0 0.3 0.0" rpy="1.5708 0.0 3.14" />
+			<link name="Proteus" />
+			<ros_publisher topic="/bridge/camera" />
+		</sensor>
+
+		<world_transform rpy="$(arg robot_rpy)" xyz="$(arg robot_position)" />
+	</robot>
+</scenario>

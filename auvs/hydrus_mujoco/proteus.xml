@@ -1,0 +1,111 @@
+<mujoco model="proteus">
+  <!-- NED world: +X north, +Y east, +Z down. Gravity points down.
+       Hull constants are Stonefish 1.5 for proteus_auv.scn in proteus_env.scn. -->
+  <compiler angle="radian" meshdir="."/>
+  <option timestep="0.00277777777778" gravity="0 0 9.81" integrator="implicitfast">
+    <flag sleep="disable"/>
+  </option>
+  <!-- Hull geom user data: volume [m^3], then Stonefish form drag Cd (x y z) and skin
+       friction Cf (x y z) in the body frame. -->
+  <size nuser_geom="7"/>
+
+  <visual>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
+    <rgba haze="0.10 0.20 0.30 1"/>
+  </visual>
+
+  <asset>
+    <mesh name="gate" file="../stonefish_sim/data/models/gate.obj"/>
+    <mesh name="support" file="meshes/protysupport.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="propeller" file="../stonefish_sim/data/models/propeller.obj" scale="0.5 0.5 0.5"/>
+  </asset>
+
+  <!-- camera_spec: width, height, horizontal FOV in degrees. water_density in kg/m^3.
+       dry_mass is the real mass gravity acts on; the body inertial mass also carries
+       Stonefish added mass. volume and cb (body frame) set buoyancy when fully submerged.
+       hydro_rate is how often Stonefish recomputes fluid forces, in Hz.
+       thruster_spec: max rpm, diameter, thrust coeff, torque coeff, rotor inertia, kp, ki.
+       The rotor inertia is the 0.5-scale propeller plus its added inertia. -->
+  <custom>
+    <numeric name="camera_spec" size="3" data="800 600 60"/>
+    <numeric name="water_density" size="1" data="1025"/>
+    <numeric name="dry_mass" size="1" data="4.29466999"/>
+    <numeric name="inertia" size="3" data="0.64460719 0.67566181 1.12846747"/>
+    <numeric name="volume" size="1" data="0.00384910"/>
+    <numeric name="cb" size="3" data="0 0 -0.00564950"/>
+    <numeric name="hydro_rate" size="1" data="50"/>
+    <numeric name="thruster_spec" size="7" data="1000 0.18 0.48 0.05 0.00019288 1 10"/>
+  </custom>
+
+  <worldbody>
+    <light pos="0 -4 -6" dir="0 0.2 1" directional="true" diffuse="0.8 0.8 0.8"/>
+
+    <!-- Floor at 3 m depth. Local +Z is flipped to world -Z so the solid side faces the vehicle. -->
+    <geom name="floor" type="plane" pos="1 10 3" euler="3.141592653589793 0 0"
+          size="15 20 0.5" rgba="0.5 0.5 0.5 1"/>
+
+    <geom name="surface" type="plane" pos="1 10 0" euler="3.141592653589793 0 0"
+          size="15 20 0.5" rgba="0.15 0.40 0.65 0.25" contype="0" conaffinity="0"/>
+
+    <body name="gate" pos="1 8 3" mocap="true">
+      <geom name="gate" type="mesh" mesh="gate" contype="0" conaffinity="0" rgba="0.75 0.75 0.75 1"/>
+    </body>
+
+    <body name="marker" pos="1 20 2" mocap="true">
+      <geom name="marker" type="cylinder" size="0.1 2" rgba="1 1 0 1"/>
+    </body>
+
+    <!-- Start pose matches proteus_env.scn: xyz 0 -1 2, yaw 3.14. -->
+    <body name="proteus" pos="0 -1 2" euler="0 0 3.14">
+      <freejoint name="proteus_free"/>
+      <inertial pos="0 0 -0.00486738" quat="0.99994797 0.00135809 0.01004957 0.00110705"
+                mass="63.83969252" diaginertia="0.64460719 0.67566181 1.12846747"/>
+      <site name="imu" pos="0 0 0" size="0.01"/>
+      <site name="camera" pos="0 0.3 0" euler="1.5708 0 3.14" size="0.01"/>
+
+      <geom name="top_cabin" type="cylinder" size="0.1 0.15" pos="0 0 -0.05"
+            euler="1.5708 0 0" rgba="0.9 0.9 0.9 0.35"
+            user="0.00125683 0.5 1.0 0.5 0.05 0.1 0.05"/>
+      <geom name="bottom_cabin" type="cylinder" size="0.05 0.155" pos="0 0 0.13"
+            euler="1.5708 0 0" rgba="0.9 0.9 0.9 0.35"
+            user="0.00056568 0.5 1.0 0.5 0.05 0.1 0.05"/>
+      <geom name="left_rail" type="box" size="0.02 0.225 0.02" pos="0.17 0 -0.03"
+            rgba="0.1 0.25 0.7 1"
+            user="0.00022565 1.0 0.078900 0.990027 0.1 0.0078900 0.0990027"/>
+      <geom name="right_rail" type="box" size="0.02 0.225 0.02" pos="-0.17 0 -0.03"
+            rgba="0.1 0.25 0.7 1"
+            user="0.00022565 1.0 0.078900 0.990027 0.1 0.0078900 0.0990027"/>
+      <geom name="support_front" type="mesh" mesh="support" pos="0 0.135 -0.012"
+            euler="1.5708 0 0" rgba="0.1 0.25 0.7 1"
+            user="0.00078764 0.135441 1.001105 0.104978 0.0135441 0.1001105 0.0104978"/>
+      <geom name="support_back" type="mesh" mesh="support" pos="0 -0.135 -0.012"
+            euler="1.5708 0 0" rgba="0.1 0.25 0.7 1"
+            user="0.00078764 0.135441 1.001105 0.104978 0.0135441 0.1001105 0.0104978"/>
+
+      <site name="thruster_0" pos="0.246 0 -0.03" euler="0 0 4.7123" size="0.01"/>
+      <site name="thruster_1" pos="-0.246 0 -0.03" euler="0 0 4.7123" size="0.01"/>
+      <site name="thruster_2" pos="0.165 0.265 0" euler="0 -1.571 0" size="0.01"/>
+      <site name="thruster_3" pos="-0.165 0.265 0" euler="0 -1.571 0" size="0.01"/>
+      <site name="thruster_4" pos="0.165 -0.265 0" euler="0 -1.571 0" size="0.01"/>
+      <site name="thruster_5" pos="-0.165 -0.265 0" euler="0 -1.571 0" size="0.01"/>
+
+      <geom name="prop_0" type="mesh" mesh="propeller" pos="0.246 0 -0.03" euler="0 0 4.7123"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_1" type="mesh" mesh="propeller" pos="-0.246 0 -0.03" euler="0 0 4.7123"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_2" type="mesh" mesh="propeller" pos="0.165 0.265 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_3" type="mesh" mesh="propeller" pos="-0.165 0.265 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_4" type="mesh" mesh="propeller" pos="0.165 -0.265 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="prop_5" type="mesh" mesh="propeller" pos="-0.165 -0.265 0" euler="0 -1.571 0"
+            density="0" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <gyro name="gyro" site="imu"/>
+    <accelerometer name="accel" site="imu"/>
+  </sensor>
+</mujoco>

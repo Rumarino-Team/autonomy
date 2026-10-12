@@ -137,6 +137,21 @@ pub fn reset(ctx: *MissionContext) void {
 
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
+    switch (ctx.frame.@"error") {
+        .scenario_restart => {
+            ctx.stopThrusters();
+            ctx.reset();
+            try ctx.refreshAllocationGeometry();
+            return error.RestartMission;
+        },
+        .seed_goal => {
+            ctx.reset();
+            ctx.goal = math.poseTo6f(ctx.frame.camera_pose);
+            try ctx.refreshAllocationGeometry();
+            ctx.frame.@"error" = .none;
+        },
+        .none => {},
+    }
     const start = Io.Clock.Timestamp.now(ctx.io, .awake);
 
     ctx.execution_dt = if (ctx.last_execution_timestamp) |previous|

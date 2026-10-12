@@ -11,8 +11,11 @@ pub fn main(init: std.process.Init) !void {
 
     var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
 
-    while (true) {
-        try ctx.yieldUntilNextFrameAndUpdate();
+    mission_loop: while (true) {
+        ctx.yieldUntilNextFrameAndUpdate() catch |err| switch (err) {
+            error.RestartMission => continue,
+            else => return err,
+        };
         var warmup_seconds: f32 = 0;
         while (ctx.navigation.snapshot.orientation == null) {
             warmup_seconds += @max(ctx.controller_dt, ctx.execution_dt);
@@ -20,7 +23,10 @@ pub fn main(init: std.process.Init) !void {
                 ctx.stopThrusters();
                 return error.SensorUnavailable;
             }
-            try ctx.yieldUntilNextFrameAndUpdate();
+            ctx.yieldUntilNextFrameAndUpdate() catch |err| switch (err) {
+                error.RestartMission => continue :mission_loop,
+                else => return err,
+            };
         }
         ctx.holdPosition();
 
@@ -31,9 +37,9 @@ pub fn main(init: std.process.Init) !void {
 
         mission_result catch |err| switch (err) {
             error.RestartMission => {
-                std.log.info("restaring mission context", .{});
+                std.log.info("restarting mission context", .{});
                 ctx.reset();
-                std.log.info("restaring mission", .{});
+                std.log.info("restarting mission", .{});
                 continue;
             },
             else => {

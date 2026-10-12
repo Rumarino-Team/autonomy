@@ -142,11 +142,6 @@ pub fn build(b: *std.Build) !void {
         run_cmd.addArgs(args);
     }
 
-
-
-
-
-
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
@@ -186,8 +181,6 @@ pub fn build(b: *std.Build) !void {
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
 
-
-
     const lib_auv_stationary_sim = b.addLibrary(.{
         .name = "auv_stationary_sim",
         .root_module = b.createModule(.{
@@ -203,8 +196,6 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(lib_auv_stationary_sim);
 
-
-
     // the zed sdk exposes c++ types, so this one has to be built with the
     // system g++ to match its libstdc++ abi. off by default so that machines
     // without the sdk and cuda can still build everything else.
@@ -214,7 +205,7 @@ pub fn build(b: *std.Build) !void {
     const cuda_prefix = b.option([]const u8, "cuda-prefix", "CUDA install prefix") orelse "/usr/local/cuda";
     if (zed) {
         const lib_auv_proteus_hwd = b.addSystemCommand(&.{cxx});
-        lib_auv_proteus_hwd.addArgs(&.{"-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror"});
+        lib_auv_proteus_hwd.addArgs(&.{ "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror" });
         lib_auv_proteus_hwd.addArg(if (optimize == .Debug) "-O0" else "-O2");
         if (optimize == .Debug)
             lib_auv_proteus_hwd.addArg("-g");
@@ -244,13 +235,16 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(&install_lib_auv_proteus_hwd.step);
     }
 
+    const nlohmann_include = b.path("vendor/nlohmann_json/single_include").getPath(b);
     const cmake_configure = b.addSystemCommand(&.{
         "cmake",
         "-B",
         "build",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        b.fmt("-DCMAKE_CXX_FLAGS=-isystem{s}", .{nlohmann_include}),
     });
     try cmake_configure.step.addWatchInput(b.path("CMakeLists.txt"));
+    cmake_configure.addFileInput(b.path("vendor/nlohmann_json/single_include/nlohmann/json.hpp"));
 
     const cpu_count = std.Thread.getCpuCount() catch 1;
     const cmake_build = b.addSystemCommand(&.{
@@ -263,20 +257,78 @@ pub fn build(b: *std.Build) !void {
     });
     cmake_build.step.dependOn(&cmake_configure.step);
 
-    const stonefish = b.option(bool, "stonefish", "Build the Stonefish simulator plugin") orelse false;
+    const stonefish_cpp = b.option(bool, "stonefish-cpp", "Build the native C++ Blender Stonefish plugin") orelse false;
+    cmake_configure.addArg(if (stonefish_cpp) "-DAUTONOMY_BLEND_CPP=ON" else "-DAUTONOMY_BLEND_CPP=OFF");
+    const stonefish = b.option(bool, "stonefish", "Build the Stonefish AUV plugins") orelse false;
     if (stonefish) {
-        const cmake_target = "auv_stonefish_sim";
-        cmake_build.addArg(cmake_target);
+        const cmake_targets = [_][]const u8{
+            "auv_stonefish_sim",
+        };
+        for (cmake_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
 
         _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/stonefish_sim"));
 
-        const cmake_dynlib_file = b.fmt("lib{s}{s}", .{cmake_target, target.result.dynamicLibSuffix()});
-        const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
+        for (cmake_targets) |cmake_target| {
+            const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
+            const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
+            const install_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
+            install_sim.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_sim.step);
+        }
+    }
 
-        const install_stonefish_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
-        install_stonefish_sim.step.dependOn(&cmake_build.step);
+    if (stonefish_cpp) {
+        const native_target = "auv_stonefish_cpp_sim";
+        cmake_build.addArg(native_target);
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/stonefish_sim"));
+        const native_library = b.fmt("lib{s}{s}", .{ native_target, target.result.dynamicLibSuffix() });
+        const install_native = b.addInstallFileWithDir(b.path(b.fmt("build/{s}", .{native_library})), .lib, native_library);
+        install_native.step.dependOn(&cmake_build.step);
+        b.getInstallStep().dependOn(&install_native.step);
+    }
 
-        b.getInstallStep().dependOn(&install_stonefish_sim.step);
+    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo AUV plugin, Stonefish view, batched sim, and hydrus_tune_pid") orelse false;
+    const mujoco_prefix = b.option([]const u8, "MUJOCO_PREFIX", "MuJoCo install prefix or source tree");
+    if (mujoco) {
+        const prefix = mujoco_prefix orelse @panic("-Dmujoco requires -DMUJOCO_PREFIX");
+        cmake_configure.addArg(b.fmt("-DMUJOCO_PREFIX={s}", .{prefix}));
+
+        const cmake_dynlib_targets = [_][]const u8{
+            "auv_mujoco",
+            "auv_mujoco_view",
+            "auv_mujoco_rl",
+        };
+        const cmake_exe_targets = [_][]const u8{
+            "hydrus_tune_pid",
+        };
+        for (cmake_dynlib_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
+        for (cmake_exe_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
+
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/hydrus_mujoco"));
+
+        for (cmake_dynlib_targets) |cmake_target| {
+            const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
+            const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
+            const install_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
+            install_sim.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_sim.step);
+        }
+        for (cmake_exe_targets) |cmake_target| {
+            const cmake_exe_path = b.path(b.fmt("build/{s}", .{cmake_target}));
+            const install_exe = b.addInstallFileWithDir(cmake_exe_path, .bin, cmake_target);
+            install_exe.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_exe.step);
+        }
+    } else {
+        // A cached prefix survives in build/CMakeCache.txt. Clear it so a
+        // Stonefish-only configure does not fail looking for libmujoco.so.
+        cmake_configure.addArg("-DMUJOCO_PREFIX=");
     }
 
     cmake_build.step.dependOn(&cmake_configure.step);
