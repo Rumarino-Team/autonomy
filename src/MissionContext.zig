@@ -470,6 +470,13 @@ pub fn resumeMotion(ctx: *MissionContext) !void {
 
 fn checkMotionFailure(ctx: *MissionContext) !void {
     if (ctx.motion) |*motion| {
+        if (motion.failure == .move_timeout and motion.command == .route) {
+            const route = motion.command.route;
+            std.log.err(
+                "route timeout: elapsed={d:.2}s, route_progress={d:.2}/{d:.2}m, vehicle_position={any}, last_reference_pose={any}",
+                .{ motion.elapsed, route.distance, route.path.total_length, ctx.navigation.snapshot.position, ctx.goal },
+            );
+        }
         if (motion.failure) |failure| switch (failure) {
             .object_lost => return error.ObjectLost,
             .tracking_lost => return error.TrackingLost,
