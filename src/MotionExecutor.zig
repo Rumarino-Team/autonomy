@@ -146,6 +146,10 @@ fn recoveryTarget(state: *Motion.State, nav: *const Navigation, frame: *const Au
 /// Every command uses this executor. Only measured world pose can complete a
 /// route; recovery/search movement never increments its saved distance.
 pub fn update(state: *Motion.State, nav: *const Navigation, frame: *const Auv.Frame, goal: *math.Vector6f, tolerance: f32, elapsed: f32) Target {
+    if (state.operator_paused) {
+        state.mode = .paused;
+        return .{ .mode = .paused, .stop = true };
+    }
     const dt = std.math.clamp(elapsed, 0, 0.1);
     const snapshot = nav.snapshot;
     state.elapsed += @max(0, elapsed);

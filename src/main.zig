@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
         const mission_result = switch (args.mission_id) {
             .prequalify => @import("missions/prequalify.zig").mission(&ctx),
             .teleop => @import("missions/prequalify.zig").teleopMission(&ctx),
+            .teleop_command => @import("missions/teleop.zig").teleopCommandMission(&ctx),
         };
 
         mission_result catch |err| switch (err) {

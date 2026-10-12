@@ -1,6 +1,7 @@
 const std = @import("std");
 const math = @import("../math.zig");
 const MissionContext = @import("../MissionContext.zig");
+const Motion = @import("../Motion.zig");
 const MissionArgs = @import("../MissionArgs.zig");
 const Auv = @import("../Auv.zig");
 const net = std.Io.net;
@@ -68,6 +69,8 @@ pub fn mission(ctx: *MissionContext) !void {
     try ctx.startSearch(.{ .target_class = .gate, .require_position = true, .duration = 60 });
     const gate_object = try ctx.yieldUntilFirstObjectWithCls(.gate);
     try goThrough(ctx, gate_object);
+    try fullTurn(ctx, .pitch);
+    try fullTurn(ctx, .roll);
 
     try ctx.startSearch(.{ .duration = 60 });
     const cube_or_rect_object = try ctx.yieldUntilFirstObjectWithAnyCls(&.{ .cube, .rect });
@@ -82,6 +85,58 @@ pub fn mission(ctx: *MissionContext) !void {
 
 const FAR_ENOUGH: f64 = 2.0;
 const OVERSHOOT: f64 = 2.0;
+
+const RotationAxis = enum { pitch, roll };
+
+fn fullTurn(ctx: *MissionContext, axis: RotationAxis) !void {
+    errdefer |err| if (err != error.RestartMission) ctx.stopThrusters();
+    const position = ctx.navigation.snapshot.position orelse return error.TrackingUnavailable;
+    const initial = ctx.navigation.snapshot.orientation orelse return error.SensorUnavailable;
+    try ctx.startFollowPath(&.{position}, .{
+        .move = .{
+            .facing = .hold_current,
+            .attitude = initial,
+            .translation = .simultaneous,
+        },
+        .corner_radius = 0,
+    });
+
+    std.log.info("after gate: starting 360-degree {s} rotation", .{@tagName(axis)});
+    // A quaternion endpoint at 2*pi is identical to the initial orientation.
+    // Consecutive targets below pi preserve a positive turn about the chosen
+    // body axis: Y for pitch, X for roll, matching the controller convention.
+    for (1..9) |step| {
+        const angle = @as(f32, @floatFromInt(step)) * (std.math.pi / 4.0);
+        const sine = @sin(angle / 2);
+        const cosine = @cos(angle / 2);
+        const turn: math.Quaternionf = switch (axis) {
+            .pitch => .{ 0, sine, 0, cosine },
+            .roll => .{ sine, 0, 0, cosine },
+        };
+        const desired = math.normalize4f(math.quaternionMul(initial, turn));
+        ctx.motion.?.options.attitude = desired;
+        ctx.motion.?.completed = false;
+        ctx.motion.?.settling = .{};
+        var settling: Motion.Settling = .{};
+        while (true) {
+            try ctx.yieldUntilNextFrameAndUpdate();
+            try ctx.checkMotionFailure();
+            const snapshot = ctx.navigation.snapshot;
+            const actual = snapshot.orientation orelse continue;
+            const rate = snapshot.angular_velocity_body orelse continue;
+            const final = step == 8;
+            const tolerance: f32 = if (final) std.math.pi / 180.0 else std.math.pi / 36.0;
+            const aligned = math.length3f(math.quaternionError(actual, desired)) <= tolerance;
+            const slow = !final or math.length3f(rate) <= ctx.motion.?.options.angular_rate_tolerance;
+            if (settling.update(aligned, slow, ctx.controller_dt, if (final) 0.3 else 0)) break;
+        }
+        std.log.info("{s} rotation progress: {d}/360 degrees", .{ @tagName(axis), step * 45 });
+    }
+    // Position control is best effort while tilted: at some angles Proteus
+    // cannot supply world vertical force. Continue from the measured end pose.
+    ctx.holdPosition();
+    std.log.info("360-degree {s} rotation complete; continuing mission", .{@tagName(axis)});
+}
 
 fn goThrough(ctx: *MissionContext, object: *const Auv.Object) !void {
     const sub_pose: math.Pose = .{ .pos = ctx.navigation.snapshot.position orelse return error.TrackingUnavailable, .quat = ctx.navigation.snapshot.orientation orelse return error.SensorUnavailable };
@@ -124,6 +179,10 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object, options: MissionCon
 }
 
 fn orbitWaypoints(object: *const Auv.Object, initial_sub_pos: math.Vector3f) [6]math.Vector3f {
+    return orbitWaypointsWithClearance(object, initial_sub_pos, 2);
+}
+
+pub fn orbitWaypointsWithClearance(object: *const Auv.Object, initial_sub_pos: math.Vector3f, clearance: f32) [6]math.Vector3f {
     const object_pos = object.bbox.pose.pos;
     const object_rot = object.bbox.pose.quat;
 
@@ -137,7 +196,6 @@ fn orbitWaypoints(object: *const Auv.Object, initial_sub_pos: math.Vector3f) [6]
 
     // Expand each local side by 2m. Rounded corners then remain outside the
     // object, unlike an unconstrained spline through its original corners.
-    const clearance: f32 = 2.0;
 
     var corner_pluss: [4]math.Vector3f = undefined;
     var nearest_distance: f32 = std.math.inf(f32);

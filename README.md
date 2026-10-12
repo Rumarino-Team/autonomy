@@ -30,6 +30,12 @@ legacy `odometry` gains and the unused TAM are hidden when the new loops and
 geometry allocation are configured. Its existing speech and Decisions service
 credentials and Python dependencies are still required.
 
+It also supports `--mission` for spoken Motion/Navigation commands over UDP.
+Run the `teleop_command` mission, then `python demo/voice.py --mission --push-to-send`.
+The handshake discovers typed command schemas; movement runs while new commands
+remain receivable. Raw JSON commands require no OpenAI credentials. See the
+[command set, configuration options and protocol](docs/teleop_commands.md).
+
 ## Build & Run: libauv_stationary_sim
 ```sh
 zig build run -- \

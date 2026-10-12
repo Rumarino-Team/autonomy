@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-file Stonefish JSON voice demo (Python 3.10+).
+"""Stonefish settings and submarine mission voice demo (Python 3.10+).
 
 Install: python -m pip install httpx websocket-client
 Linux audio: parec and pactl (pulseaudio-utils; also works with PipeWire Pulse).
@@ -15,6 +15,11 @@ Set OPENAI_API_KEY in your environment, then:
     python demo/voice.py --two-step --text 'set real-time factor' --value 'one point five' --dry-run
     python demo/voice.py --controls              # offline field inventory
     python demo/voice.py --list-devices
+    python demo/voice.py --mission --push-to-send # speak movement instructions
+    python demo/voice.py --mission --text 'move forward two metres'
+    python demo/voice.py --mission --text 'pitch 360 degrees, then roll 360 degrees'
+    python demo/voice.py --command-json '{"search":{}}' # UDP, no OpenAI key needed
+    python demo/voice.py --mission --controls # live command schemas, no API calls
 
 Examples: camera three; set real-time factor to point five; turn particles off;
 set third velocity KP to five; increase second rate KD by ten percent.
@@ -44,6 +49,11 @@ Prototype confidence defaults: selected field and operation 0.5
 A command must identify one supported field and one compatible operation;
 ambiguous or unrelated speech leaves JSON unchanged.
 Timing covers command handling only, not the simulator's application of the file.
+Mission mode requires the teleop_command mission. It uses a UDP handshake,
+acknowledgements and the server's typed Motion/Navigation command schemas.
+Settings mode retains Decisions numeric scoring; mission arguments use exact
+structured extraction and local/server validation. --wait waits for a typed
+mission command to finish; without it the accepted motion continues after exit.
 """
 
 import argparse
@@ -64,6 +74,10 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+try:
+    from . import mission_commands
+except ImportError:
+    import mission_commands
 
 ROBOTS = {"hydrus", "proteus", "bluerov2", "girona500"}
 CAMERAS = tuple(f"Camera {n}" for n in range(1, 6))
@@ -672,6 +686,8 @@ def short_control_name(control):
 
 def process(transcript, args, client, speech_end=None, *, defer_numeric=False,
             pending=None, argument_transcript=None):
+    if getattr(args, "mission", False):
+        return mission_commands.process(transcript, args, client, choice, speech_end)
     if pending is None:
         print(f"Heard: {transcript}", flush=True)
         available = controls(args.repo, args.controller)
@@ -1034,7 +1050,7 @@ def listen(args, client, key):
                             else:
                                 print(f"Value not accepted: {exc}. Please say the value again.", flush=True)
                 except Exception as exc:
-                    print(f"No edit: {exc}", file=sys.stderr, flush=True)
+                    print(f"{'Mission command issue' if args.mission else 'No edit'}: {exc}", file=sys.stderr, flush=True)
     finally:
         transcriber.close()
 
@@ -1043,11 +1059,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--controller", choices=sorted(ROBOTS), help="Default is the platform-selected robot")
-    parser.add_argument("--text", help="Send a typed command through Decisions, without the microphone")
+    parser.add_argument("--mission", action="store_true", help="Send Motion/Navigation commands over UDP instead of editing settings")
+    parser.add_argument("--command-json", help="Single-key command JSON; implies --mission and requires no OpenAI key")
+    parser.add_argument("--host", default="127.0.0.1", help="Mission UDP server address")
+    parser.add_argument("--port", type=int, help="Mission UDP port; default is selected controller's teleop_port or 8080")
+    parser.add_argument("--mission-model", default="gpt-6-luna", help="Model for mission command interpretation")
+    parser.add_argument("--wait", action="store_true", help="Wait for a typed/raw mission command to complete")
+    parser.add_argument("--text", help="Interpret a typed settings or mission instruction without the microphone")
     parser.add_argument("--value", help="Second-step value for a typed --two-step command")
     parser.add_argument("--two-step", action="store_true",
                         help="For numeric edits, classify the command first, then listen for the value")
-    parser.add_argument("--dry-run", action="store_true", help="Transcribe and decide, but do not save JSON")
+    parser.add_argument("--dry-run", action="store_true", help="Interpret without editing files or sending a motion command")
     parser.add_argument("--controls", action="store_true", help="List allowed fields without API calls")
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--device", help="PulseAudio microphone source name; default is the desktop input")
@@ -1062,6 +1084,14 @@ def main():
     parser.add_argument("--debug-decisions", action="store_true",
                         help="Print selected choices, confidence, and the top three probabilities")
     args = parser.parse_args()
+    if args.command_json is not None:
+        args.mission = True
+        if args.text is not None:
+            parser.error("Use either --command-json or --text")
+    if args.mission and args.two_step:
+        parser.error("Mission mode uses complete instructions; --two-step is for settings edits")
+    if args.wait and (not args.mission or (args.text is None and args.command_json is None)):
+        parser.error("--wait requires a typed or raw mission command")
     if args.value is not None and (not args.two_step or args.text is None):
         parser.error("--value requires --two-step and --text")
     if args.push_to_send and args.text is not None:
@@ -1072,6 +1102,35 @@ def main():
         parser.error("Invalid silence, threshold, or confidence setting")
     if args.list_devices:
         subprocess.run(["pactl", "list", "short", "sources"], check=True)
+        return
+    if args.mission:
+        port = args.port
+        if port is None:
+            folder = args.repo / "auvs/stonefish_sim"
+            robot = args.controller or loads((folder / "platform.json").read_text())["robot"]
+            port = loads((folder / f"{robot}.json").read_text()).get("teleop_port", 8080)
+        with mission_commands.MissionClient(args.host, port) as connection:
+            args.mission_client = connection
+            if args.controls:
+                print(json.dumps(connection.commands, indent=2))
+                return
+            if args.command_json is not None:
+                print(json.dumps(mission_commands.execute(loads(args.command_json), args), allow_nan=False))
+                return
+            key = os.getenv("OPENAI_API_KEY")
+            if not key:
+                parser.error("Set OPENAI_API_KEY for voice/text interpretation, or use --command-json")
+            import httpx
+            with httpx.Client(headers={"Authorization": f"Bearer {key}"}, timeout=30) as client:
+                if args.text is not None:
+                    process(args.text, args, client)
+                else:
+                    def report_event(message):
+                        state = message["data"]
+                        print(json.dumps({"mission_event": state["state"], "operation_id": state["operation_id"],
+                                          "plan_step": state["plan_step"], "error": state["error"]}), flush=True)
+                    connection.on_event = report_event
+                    listen(args, client, key)
         return
     available = controls(args.repo, args.controller)
     if args.controls:

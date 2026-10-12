@@ -6,6 +6,7 @@ const MissionArgs = @This();
 pub const MissionId = enum {
     prequalify,
     teleop,
+    teleop_command,
 };
 
 goal_dist_threshold: f32,
@@ -14,7 +15,7 @@ mission_id: MissionId,
 live_config_path: []const u8,
 
 pub fn init(args_slice: []const [:0]const u8) !MissionArgs {
-    if (args_slice.len < 3) {
+    if (args_slice.len < 4) {
         std.log.err("usage: {s} <auv_dynlib_path> <mission_name> <live_config_path>", .{args_slice[0]});
         return error.MissingArgs;
     }

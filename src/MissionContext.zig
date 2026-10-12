@@ -470,6 +470,7 @@ pub fn reanchorLocalization(ctx: *MissionContext, tracking_to_mission: math.Pose
 /// budget. The route geometry and saved progress remain intact.
 pub fn resumeMotion(ctx: *MissionContext) !void {
     const motion = if (ctx.motion) |*motion| motion else return error.NoActiveMotion;
+    motion.operator_paused = false;
     motion.failure = null;
     motion.elapsed = 0;
     motion.recovery_seconds = 0;
@@ -481,7 +482,8 @@ pub fn resumeMotion(ctx: *MissionContext) !void {
     ctx.controller.reset();
 }
 
-fn checkMotionFailure(ctx: *MissionContext) !void {
+/// Report an active command's failure when a mission waits for custom progress.
+pub fn checkMotionFailure(ctx: *MissionContext) !void {
     if (ctx.motion) |*motion| {
         if (motion.failure == .move_timeout and motion.command == .route) {
             const route = motion.command.route;
@@ -518,10 +520,7 @@ pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f, option
 
 pub fn startFollowPath(ctx: *MissionContext, waypoints: []const math.Vector3f, options: PathOptions) !void {
     try options.validate();
-    if (options.move.attitude_policy == .allow_pitch) {
-        const allocator = if (ctx.allocator) |*allocator| allocator else return error.MissingThrusterGeometry;
-        if (!allocator.supportsPitchAdaptation() or @abs(ctx.goal[3]) > 0.05) return error.UnsupportedAttitudePolicy;
-    }
+    try ctx.validateWorldMove(options.move);
     if (!ctx.navigation.snapshot.measured_position) return error.TrackingUnavailable;
     const path = try Motion.Path.init(ctx.navigation.snapshot.position.?, waypoints, options.corner_radius);
     ctx.beginMotion(path.end, options.move);
@@ -531,6 +530,14 @@ pub fn startFollowPath(ctx: *MissionContext, waypoints: []const math.Vector3f, o
     ctx.goal[1] = initial.position[1];
     ctx.goal[2] = initial.position[2];
     ctx.motion.?.path_direction = initial.direction;
+}
+
+pub fn validateWorldMove(ctx: *const MissionContext, options: MoveOptions) !void {
+    try options.validate();
+    if (options.attitude_policy == .allow_pitch) {
+        const allocator = if (ctx.allocator) |*allocator| allocator else return error.MissingThrusterGeometry;
+        if (!allocator.supportsPitchAdaptation() or @abs(ctx.goal[3]) > 0.05) return error.UnsupportedAttitudePolicy;
+    }
 }
 
 pub fn yieldUntilFollowPath(ctx: *MissionContext, waypoints: []const math.Vector3f, options: PathOptions) !void {

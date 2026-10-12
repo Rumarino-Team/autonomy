@@ -238,6 +238,7 @@ pub const State = struct {
     missing_object_seconds: f64 = 0,
     missing_feedback_seconds: f64 = 0,
     paused: bool = false,
+    operator_paused: bool = false,
     failure: ?Failure = null,
 
     pub fn init(destination: math.Vector3f, yaw: f32, options: MoveOptions) State {
