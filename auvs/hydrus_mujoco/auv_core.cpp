@@ -1,11 +1,14 @@
 #include "auv_core.h"
 #include "hydrus_drag_mesh.h"
+#include "mujoco_platform.hpp"
+#include "mujoco_scene_builder.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 namespace auv {
@@ -410,15 +413,13 @@ double numericOr(const mjModel* model, const char* name, int index, double fallb
     return model->numeric_data[model->numeric_adr[id] + index];
 }
 
-AuvModel* AuvModel::load(const char* xml_path, std::string& error) {
-    char buffer[1024] = {};
-    mjModel* model = mj_loadXML(xml_path, nullptr, buffer, sizeof(buffer));
-    if (model == nullptr) {
-        error = buffer;
-        return nullptr;
-    }
-    auto* loaded = new AuvModel();
-    loaded->model = model;
+std::mutex& AuvModel::reloadMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool AuvModel::finalizeLoadedModel(AuvModel* loaded, std::string& error) {
+    mjModel* model = loaded->model;
     const char* body_name = nullptr;
     const char* body_candidates[] = {"auv", "hydrus", "proteus", "bluerov"};
     for (const char* candidate : body_candidates) {
@@ -430,14 +431,12 @@ AuvModel* AuvModel::load(const char* xml_path, std::string& error) {
     loaded->body = body_name == nullptr ? -1 : mj_name2id(model, mjOBJ_BODY, body_name);
     if (loaded->body < 0) {
         error = "missing body 'auv', 'hydrus', 'proteus', or 'bluerov'";
-        delete loaded;
-        return nullptr;
+        return false;
     }
     const int joint = model->body_jntadr[loaded->body];
     if (joint < 0 || model->jnt_type[joint] != mjJNT_FREE) {
         error = std::string("body '") + body_name + "' needs a free joint";
-        delete loaded;
-        return nullptr;
+        return false;
     }
     loaded->qpos_adr = model->jnt_qposadr[joint];
     loaded->qvel_adr = model->jnt_dofadr[joint];
@@ -469,8 +468,7 @@ AuvModel* AuvModel::load(const char* xml_path, std::string& error) {
         if (!thrusterPastGap(name, first_missing))
             continue;
         error = "missing site 'thruster_" + std::to_string(first_missing) + "'";
-        delete loaded;
-        return nullptr;
+        return false;
     }
     if (mj_name2id(model, mjOBJ_NUMERIC, "thruster_spec") >= 0) {
         ThrusterSpec& spec = loaded->thruster;
@@ -498,7 +496,41 @@ AuvModel* AuvModel::load(const char* xml_path, std::string& error) {
         loaded->cb[i] = numericAlias(model, "cb", "hydrus_cb", i, 0);
     loaded->dry_mass = numericAlias(model, "dry_mass", "hydrus_dry_mass", 0, model->body_mass[loaded->body]);
     buildHull(*loaded);
+    return true;
+}
+
+AuvModel* AuvModel::load(const char* xml_path, std::string& error) {
+    const mujoco_platform::Paths paths = mujoco_platform::ResolvePaths(xml_path, error);
+    if (!error.empty()) return nullptr;
+    if (!std::filesystem::is_regular_file(paths.blend_file)) {
+        error = "blend file not found: " + paths.blend_file.string();
+        return nullptr;
+    }
+    mjModel* model = mujoco_scene::ComposeModel(paths.skeleton_xml, paths.blend_file, paths.stonefish_config, error);
+    if (model == nullptr) return nullptr;
+    auto* loaded = new AuvModel();
+    loaded->model = model;
+    loaded->skeleton_path_ = paths.skeleton_xml;
+    loaded->blend_path_ = paths.blend_file;
+    loaded->config_path_ = paths.stonefish_config;
+    if (!finalizeLoadedModel(loaded, error)) {
+        delete loaded;
+        return nullptr;
+    }
     return loaded;
+}
+
+bool AuvModel::reloadScene(std::string& error) {
+    std::lock_guard<std::mutex> lock(reloadMutex());
+    mjModel* replacement =
+        mujoco_scene::ComposeModel(skeleton_path_, blend_path_, config_path_, error);
+    if (replacement == nullptr) return false;
+    if (model != nullptr) mj_deleteModel(model);
+    model = replacement;
+    thruster_site.clear();
+    hull.clear();
+    if (!finalizeLoadedModel(this, error)) return false;
+    return true;
 }
 
 AuvModel::~AuvModel() {
@@ -518,6 +550,23 @@ SimulationManager::SimulationManager(const AuvModel& model)
 
 SimulationManager::~SimulationManager() {
     mj_deleteData(data_);
+}
+
+void SimulationManager::rebindData(const mjModel* previous_model, mjData* previous_data) {
+    std::vector<mjtNum> state;
+    if (previous_model != nullptr && previous_data != nullptr) {
+        const int size = mj_stateSize(previous_model, mjSTATE_PHYSICS | mjSTATE_TIME);
+        state.resize(size);
+        mj_getState(previous_model, previous_data, state.data(), mjSTATE_PHYSICS | mjSTATE_TIME);
+    }
+    mj_deleteData(data_);
+    data_ = mj_makeData(model_.model);
+    if (!state.empty()) {
+        mj_setState(model_.model, data_, state.data(), mjSTATE_PHYSICS | mjSTATE_TIME);
+        mj_forward(model_.model, data_);
+    } else {
+        reset();
+    }
 }
 
 void SimulationManager::clearActuation() {

@@ -79,6 +79,9 @@ void auv_batch_camera(AuvBatch* batch, float* features);
 // Last raster of one env, row-major, AUV_CAM_W * AUV_CAM_H bytes. NULL if it has not rendered.
 void auv_batch_camera_image(const AuvBatch* batch, int env, uint8_t* pixels);
 
+// Re-read the blend file and recompile the shared model. Returns 0 on failure.
+int auv_batch_reload_scene(AuvBatch* batch);
+
 #ifdef __cplusplus
 }
 #endif

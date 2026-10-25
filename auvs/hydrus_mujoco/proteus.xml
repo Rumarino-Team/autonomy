@@ -15,9 +15,9 @@
   </visual>
 
   <asset>
-    <mesh name="gate" file="../stonefish_sim/data/models/gate.obj"/>
-    <mesh name="support" file="meshes/protysupport.obj" scale="0.001 0.001 0.001"/>
-    <mesh name="propeller" file="../stonefish_sim/data/models/propeller.obj" scale="0.5 0.5 0.5"/>
+    <mesh name="gate"/>
+    <mesh name="support"/>
+    <mesh name="propeller"/>
   </asset>
 
   <!-- camera_spec: width, height, horizontal FOV in degrees. water_density in kg/m^3.
@@ -35,9 +35,6 @@
     <numeric name="cb" size="3" data="0 0 -0.00564950"/>
     <numeric name="hydro_rate" size="1" data="50"/>
     <numeric name="thruster_spec" size="7" data="1000 0.18 0.48 0.05 0.00019288 1 10"/>
-    <!-- fuzz:<body> lists the axes a fuzzer may change, then the detection class. -->
-    <text name="fuzz:gate" data="pos yaw gate"/>
-    <text name="fuzz:marker" data="pos yaw cube"/>
   </custom>
 
   <worldbody>

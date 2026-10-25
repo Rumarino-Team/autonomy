@@ -80,6 +80,21 @@ void resetEnv(AuvBatch* batch, int i, const uint8_t* mask, const double* init_st
 
 extern "C" {
 
+int auv_batch_reload_scene(AuvBatch* batch) {
+    if (batch == nullptr || batch->model == nullptr) return 0;
+    std::string error;
+    std::vector<std::pair<const mjModel*, mjData*>> previous;
+    previous.reserve(batch->sims.size());
+    for (const auto& sim : batch->sims) previous.emplace_back(batch->model->model, sim->data());
+    if (!batch->model->reloadScene(error)) {
+        std::fprintf(stderr, "[auv_batch] reload failed: %s\n", error.c_str());
+        return 0;
+    }
+    batch->camera = auv::CameraModel::build(batch->model->model);
+    for (size_t i = 0; i < batch->sims.size(); ++i) batch->sims[i]->rebindData(previous[i].first, previous[i].second);
+    return 1;
+}
+
 AuvBatch* auv_batch_create(const char* xml_path, int num_envs, int num_threads) {
     (void)num_threads;
     if (xml_path == nullptr || num_envs <= 0) {

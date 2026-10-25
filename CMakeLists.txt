@@ -77,8 +77,21 @@ if(MUJOCO_PREFIX)
     message(FATAL_ERROR
       "libmujoco.so not found under ${MUJOCO_PREFIX}/lib or ${MUJOCO_PREFIX}/build/lib")
   endif()
-
   set(MUJOCO_INCLUDE_DIR "${MUJOCO_PREFIX}/include")
+  add_subdirectory(auvs/blender_scene_cpp)
+  add_library(autonomy_mujoco_compose STATIC
+    auvs/hydrus_mujoco/mujoco_scene_builder.cpp
+    auvs/hydrus_mujoco/mujoco_platform.cpp
+  )
+  set_target_properties(autonomy_mujoco_compose PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(autonomy_mujoco_compose PUBLIC
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${CMAKE_SOURCE_DIR}/auvs/blender_scene_cpp"
+    "${MUJOCO_INCLUDE_DIR}"
+    "${CMAKE_SOURCE_DIR}/vendor/nlohmann_json/single_include"
+  )
+  target_link_directories(autonomy_mujoco_compose PUBLIC "${MUJOCO_LIB_DIR}")
+  target_link_libraries(autonomy_mujoco_compose PUBLIC autonomy_blend_reader mujoco)
   enable_language(C)
 
   add_library(auv_mujoco SHARED
@@ -86,6 +99,7 @@ if(MUJOCO_PREFIX)
     auvs/hydrus_mujoco/auv_core.cpp
     auvs/hydrus_mujoco/auv_batch.cpp
     auvs/hydrus_mujoco/auv_camera.cpp
+    auvs/hydrus_mujoco/blend_watcher.cpp
     auvs/hydrus_mujoco/blender_link.cpp
     auvs/hydrus_mujoco/recorder.cpp
     auvs/hydrus_mujoco/hydrus_drag_mesh_data.c
@@ -96,7 +110,7 @@ if(MUJOCO_PREFIX)
     "${MUJOCO_INCLUDE_DIR}"
   )
   target_link_directories(auv_mujoco PRIVATE "${MUJOCO_LIB_DIR}")
-  target_link_libraries(auv_mujoco PRIVATE mujoco pthread)
+  target_link_libraries(auv_mujoco PRIVATE autonomy_mujoco_compose mujoco pthread)
   set_target_properties(auv_mujoco PROPERTIES BUILD_RPATH "${MUJOCO_LIB_DIR}")
 
   add_library(auv_mujoco_rl SHARED
@@ -110,7 +124,7 @@ if(MUJOCO_PREFIX)
     "${MUJOCO_INCLUDE_DIR}"
   )
   target_link_directories(auv_mujoco_rl PRIVATE "${MUJOCO_LIB_DIR}")
-  target_link_libraries(auv_mujoco_rl PRIVATE mujoco pthread)
+  target_link_libraries(auv_mujoco_rl PRIVATE autonomy_mujoco_compose mujoco pthread)
   set_target_properties(auv_mujoco_rl PROPERTIES BUILD_RPATH "${MUJOCO_LIB_DIR}")
 
   add_executable(hydrus_tune_pid auvs/hydrus_mujoco/tune_pid.cpp)
@@ -126,4 +140,6 @@ if(MUJOCO_PREFIX)
     INSTALL_RPATH "$ORIGIN/../lib"
   )
   install(TARGETS hydrus_tune_pid)
+  add_executable(mujoco_compose_smoke auvs/hydrus_mujoco/mujoco_compose_smoke.cpp)
+  target_link_libraries(mujoco_compose_smoke PRIVATE autonomy_mujoco_compose)
 endif()

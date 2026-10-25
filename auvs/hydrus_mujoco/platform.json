@@ -1,0 +1,6 @@
+{
+  "data_path": "auvs/stonefish_sim/data/",
+  "blend_file": "pool_scene.blend",
+  "stonefish_config": "auvs/stonefish_sim/stonefish_config.yaml",
+  "mjcf_default": "auvs/hydrus_mujoco/hydrus.xml"
+}

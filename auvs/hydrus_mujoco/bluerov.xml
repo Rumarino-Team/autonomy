@@ -20,10 +20,10 @@
   </visual>
 
   <asset>
-    <mesh name="hull" file="meshes/bluerov2_phy.obj"/>
-    <mesh name="ring" file="meshes/bluerov2_ring.obj"/>
-    <mesh name="prop_ccw" file="meshes/ccw.obj"/>
-    <mesh name="prop_cw" file="meshes/cw.obj"/>
+    <mesh name="hull"/>
+    <mesh name="ring"/>
+    <mesh name="prop_ccw"/>
+    <mesh name="prop_cw"/>
   </asset>
 
   <!-- camera_spec: width, height, horizontal FOV in degrees, from the left camera.

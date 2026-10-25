@@ -279,6 +279,7 @@ pub fn build(b: *std.Build) !void {
         }
 
         _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/hydrus_mujoco"));
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/blender_scene_cpp"));
 
         for (cmake_dynlib_targets) |cmake_target| {
             const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });

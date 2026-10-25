@@ -1,6 +1,6 @@
 <mujoco model="hydrus">
   <!-- NED world: +X north, +Y east, +Z down. Gravity points down. -->
-  <compiler angle="radian" meshdir="../stonefish_sim/data/models"/>
+  <compiler angle="radian"/>
   <option timestep="0.00277777777778" gravity="0 0 9.81" integrator="implicitfast">
     <flag sleep="disable"/>
   </option>
@@ -16,8 +16,8 @@
   </visual>
 
   <asset>
-    <mesh name="lowlegs" file="hydrus_lowlegs.obj" scale="0.01 0.01 0.01"/>
-    <mesh name="propeller" file="propeller.obj" scale="0.75 0.75 0.75"/>
+    <mesh name="lowlegs"/>
+    <mesh name="propeller"/>
   </asset>
 
   <!-- camera_spec: width, height, horizontal FOV in degrees. water_density in kg/m^3.
@@ -33,8 +33,6 @@
     <numeric name="hydrus_cb" size="3" data="-0.00014622 -0.00024171 0.00931505"/>
     <numeric name="hydro_rate" size="1" data="50"/>
   </custom>
-
-  <include file="pool_world.xml"/>
 
   <worldbody>
     <light pos="0 -4 -6" dir="0 0.2 1" directional="true" diffuse="0.8 0.8 0.8"/>

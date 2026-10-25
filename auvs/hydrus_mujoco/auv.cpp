@@ -7,6 +7,7 @@
 
 #include <mujoco/mujoco.h>
 
+#include "blend_watcher.hpp"
 #include "blender_link.h"
 #include "recorder.h"
 
@@ -611,6 +612,7 @@ bool createBatchLocked() {
     g_image_height = static_cast<unsigned>(auv::numericOr(model, "camera_spec", 1, 600));
     g_fov_h_deg = auv::numericOr(model, "camera_spec", 2, 60);
     buildFuzzCatalog(model);
+    blend_watcher::start(vehicle->blendPath());
     g_tracked_len = 0;
     for (int i = 0; i < g_fuzz_len; ++i) {
         if (g_fuzz[i].object.tracked == 0 || g_fuzz[i].geom < 0)
@@ -1039,6 +1041,48 @@ void finishFuzzFrame(int env, AuvFrame& frame) {
     fuzz.frame_waiting = true;
 }
 
+bool tryApplyBlendReload() {
+    if (!blend_watcher::reloadPending().exchange(false)) return false;
+    if (g_batch != nullptr) {
+        std::lock_guard<std::mutex> lock(g_batch_mu);
+        if (!auv_batch_reload_scene(g_batch)) return false;
+        buildFuzzCatalog(auv_batch_model(g_batch)->model);
+        return true;
+    }
+    if (g_sim == nullptr) return false;
+    std::string error;
+    const mjModel* old_model = g_sim->model;
+    mjData* old_data = g_sim->data;
+    {
+        std::lock_guard<std::mutex> lock(g_sim->mu);
+        if (!g_sim->vehicle->reloadScene(error)) {
+            std::fprintf(stderr, "[auv_mujoco] blend reload failed: %s\n", error.c_str());
+            return false;
+        }
+        g_sim->model = g_sim->vehicle->model;
+        g_sim->core->rebindData(old_model, old_data);
+        g_sim->data = g_sim->core->data();
+    }
+    buildFuzzCatalog(g_sim->model);
+    cacheCatalog(*g_sim);
+    std::fprintf(stdout, "[auv_mujoco] blend reload applied\n");
+    return true;
+}
+
+bool step_simulation() {
+    if (g_sim == nullptr) return false;
+    tryApplyBlendReload();
+    mjtNum sim_time = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_sim->mu);
+        g_sim->core->step();
+        syncView(*g_sim);
+        sim_time = g_sim->data->time;
+    }
+    g_sim->realtime.wait(sim_time);
+    return true;
+}
+
 }  // namespace
 
 void auv_init(void) {
@@ -1099,6 +1143,7 @@ void auv_init(void) {
     if (!headless && sim->blender == nullptr)
         std::fprintf(stderr, "[auv_mujoco] continuing without the Blender link\n");
     g_sim = sim;
+    blend_watcher::start(sim->vehicle->blendPath());
 }
 
 void auv_deinit(void) {
@@ -1108,6 +1153,7 @@ void auv_deinit(void) {
     }
     if (g_sim == nullptr)
         return;
+    blend_watcher::stop();
     Simulation* sim = g_sim;
     g_sim = nullptr;
     delete sim->blender;
@@ -1117,31 +1163,13 @@ void auv_deinit(void) {
     g_fuzz_len = 0;
 }
 
-namespace {
-
-bool step_simulation() {
-    if (g_sim == nullptr)
-        return false;
-
-    mjtNum sim_time = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_sim->mu);
-        g_sim->core->step();
-        syncView(*g_sim);
-        sim_time = g_sim->data->time;
-    }
-    g_sim->realtime.wait(sim_time);
-    return true;
-}
-
-}  // namespace
-
 void auv_yield_until_next_frame(AuvFrame* frame) {
     if (frame == nullptr) return;
     if (g_env >= 0) {
         *frame = {};
         if (g_batch == nullptr)
             return;
+        tryApplyBlendReload();
         const float* cmd = g_commands.data() + static_cast<std::ptrdiff_t>(g_env * g_nthr);
         auv_batch_step_env(g_batch, g_env, cmd, 1, nullptr);
         *frame = makeBatchFrame(g_env);

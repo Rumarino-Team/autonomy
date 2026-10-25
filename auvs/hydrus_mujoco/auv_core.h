@@ -3,6 +3,8 @@
 #include <mujoco/mujoco.h>
 
 #include <cstdint>
+#include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -57,6 +59,10 @@ struct Randomization {
 class AuvModel {
 public:
     static AuvModel* load(const char* xml_path, std::string& error);
+    bool reloadScene(std::string& error);
+    static std::mutex& reloadMutex();
+    const std::filesystem::path& skeletonPath() const { return skeleton_path_; }
+    const std::filesystem::path& blendPath() const { return blend_path_; }
     ~AuvModel();
     AuvModel(const AuvModel&) = delete;
     AuvModel& operator=(const AuvModel&) = delete;
@@ -80,8 +86,13 @@ public:
 
     int thrusterCount() const { return static_cast<int>(thruster_site.size()); }
 
+    std::filesystem::path skeleton_path_;
+    std::filesystem::path blend_path_;
+    std::filesystem::path config_path_;
+
 private:
     AuvModel() = default;
+    static bool finalizeLoadedModel(AuvModel* loaded, std::string& error);
 };
 
 struct Rotor {
@@ -110,6 +121,8 @@ public:
     void setRandomization(const Randomization& randomization);
     void setThrusters(const float* values, int count);
     void step();
+    // Recreate mjData after the shared AuvModel was recompiled. Optional state buffer from mj_getState.
+    void rebindData(const mjModel* previous_model, mjData* previous_data);
 
     const AuvModel& auvModel() const { return model_; }
     const mjModel* model() const { return model_.model; }
