@@ -57,6 +57,12 @@ auv_watcher: FileWatcher,
 config: ConfigLoader.Config,
 config_loader: ConfigLoader,
 config_watcher: FileWatcher,
+// Parallel MuJoCo worlds share one plugin. Reloading it would destroy every world,
+// and the mission clock is the simulator timestamp rather than wall time.
+batch: bool = false,
+// Fuzz also skips the live config watcher. A reload would make the same seed diverge.
+fuzz_mission: bool = false,
+arena: ?std.mem.Allocator = null,
 
 pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     var config_loader: ConfigLoader = try .init(arena, args.live_config_path);
@@ -117,6 +123,9 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         .config_watcher = try .init(arena, args.live_config_path),
 
         .io = io,
+        .batch = args.mission_id == .batch or args.mission_id == .fuzz or args.mission_id == .record,
+        .fuzz_mission = args.mission_id == .fuzz or args.mission_id == .record,
+        .arena = arena,
     };
 }
 
@@ -138,6 +147,8 @@ pub fn reset(ctx: *MissionContext) void {
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
     switch (ctx.frame.@"error") {
+        .surfaced => return error.Surfaced,
+        .non_finite => return error.NonFinite,
         .scenario_restart => {
             ctx.stopThrusters();
             ctx.reset();
@@ -180,10 +191,10 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }
     }
 
-    if (ctx.config_watcher.changed() catch |err| blk: {
+    if (!ctx.fuzz_mission and (ctx.config_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
-    }) {
+    })) {
         if (ctx.config_loader.load(ctx.io)) |config| {
             const allocator = if (config.allocation) |options| try ThrusterAllocator.init(options, ctx.backend_geometry) else null;
             if (print_stuff) {
@@ -201,10 +212,10 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }
     }
 
-    if (ctx.auv_watcher.changed() catch |err| blk: {
+    if (!ctx.batch and (ctx.auv_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
-    }) {
+    })) {
         ctx.auv.deinit();
         if (ctx.auv_loader.load(ctx.io)) |auv| {
             if (print_stuff) {
@@ -235,19 +246,24 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
 }
 
 const math = @import("math.zig");
+
+fn commitThrusters(ctx: *MissionContext, values: []const f32) void {
+    ctx.auv.setThrustorValues(values.ptr, @intCast(values.len));
+}
+
 fn setThrustersFromTamInput(ctx: *MissionContext, input: math.Vector6f, max_effort: f32) void {
     if (ctx.allocator) |*allocator| {
         if (!ctx.controller.feedback_available) {
             allocator.reset();
             ctx.allocation_result = null;
             var zero: [math.max_thrusters]f32 = @splat(0);
-            ctx.auv.setThrustorValues(&zero, @intCast(allocator.len));
+            commitThrusters(ctx, zero[0..allocator.len]);
             return;
         }
         const result = allocator.allocate(input, max_effort, ctx.controller_dt);
         ctx.allocation_result = result;
         ctx.controller.allocationFeedback(input, result.achieved, ctx.config, ctx.controller_dt);
-        ctx.auv.setThrustorValues(&result.commands, @intCast(result.len));
+        commitThrusters(ctx, result.commands[0..result.len]);
         return;
     }
     var thruster_buffer: [math.max_thrusters]f32 = undefined;
@@ -267,7 +283,12 @@ fn setThrustersFromTamInput(ctx: *MissionContext, input: math.Vector6f, max_effo
         &thruster_buffer,
     );
     ctx.controller.allocationFeedback(input, input * @as(math.Vector6f, @splat(scale)), ctx.config, ctx.controller_dt);
-    ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
+    commitThrusters(ctx, thruster_values);
+}
+
+/// A timeline marker while a recording is open. The plugin ignores it otherwise.
+pub fn recordEvent(ctx: *MissionContext, text: [:0]const u8) void {
+    if (ctx.auv.recordEvent) |record| record(text.ptr);
 }
 
 fn refreshAllocationGeometry(ctx: *MissionContext) !void {
@@ -291,7 +312,7 @@ fn ControllerStep(ctx: *MissionContext) void {
     if (ctx.frame_previous_timestamp == null or timestamp > ctx.frame_previous_timestamp.?) {
         ctx.frame_previous_timestamp = timestamp;
     } else ctx.controller.reset();
-    const elapsed = @max(ctx.controller_dt, ctx.execution_dt);
+    const elapsed = if (ctx.batch) ctx.controller_dt else @max(ctx.controller_dt, ctx.execution_dt);
     ctx.navigation.update(&ctx.frame, ctx.config.navigation, elapsed);
     const snapshot = ctx.navigation.snapshot;
     if (snapshot.measured_position and snapshot.orientation != null) {
@@ -303,7 +324,8 @@ fn ControllerStep(ctx: *MissionContext) void {
         .{ .stop = true };
     if (ctx.allocator) |*allocator| target.translation_plane_normal = allocator.translationPlaneNormal();
     const input = ctx.controller.calculate(&ctx.navigation, target, ctx.config, ctx.controller_dt);
-    setThrustersFromTamInput(ctx, input, target.max_effort);
+    const effort = if (ctx.config.control.max_effort > 0) ctx.config.control.max_effort else target.max_effort;
+    setThrustersFromTamInput(ctx, input, effort);
     if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         if (clear_print_stuff) std.debug.print("\x1b[2J\x1b[H", .{});
         std.log.debug("motion mode={s}, measured_position={}, estimated_position={}, orientation={}, observations={}", .{

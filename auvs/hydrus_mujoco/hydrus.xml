@@ -5,7 +5,9 @@
     <flag sleep="disable"/>
   </option>
   <!-- Hull geom user data: volume [m^3], then Stonefish form drag Cd (x y z) and skin
-       friction Cf (x y z) in the body frame. Values come from Stonefish 1.5 for hydrus_auv.scn. -->
+       friction Cf (x y z). Hydrus drag is integrated on the dumped Stonefish physics
+       mesh (hydrus_drag_mesh_data.c), in each part's origin frame. These geoms are the
+       visible hull; their user volumes match the five external parts. -->
   <size nuser_geom="7"/>
 
   <visual>
@@ -14,7 +16,6 @@
   </visual>
 
   <asset>
-    <mesh name="gate" file="gate.obj"/>
     <mesh name="lowlegs" file="hydrus_lowlegs.obj" scale="0.01 0.01 0.01"/>
     <mesh name="propeller" file="propeller.obj" scale="0.75 0.75 0.75"/>
   </asset>
@@ -33,23 +34,10 @@
     <numeric name="hydro_rate" size="1" data="50"/>
   </custom>
 
+  <include file="pool_world.xml"/>
+
   <worldbody>
     <light pos="0 -4 -6" dir="0 0.2 1" directional="true" diffuse="0.8 0.8 0.8"/>
-
-    <!-- Floor at 3 m depth. Local +Z is flipped to world -Z so the solid side faces the vehicle. -->
-    <geom name="floor" type="plane" pos="1 10 3" euler="3.141592653589793 0 0"
-          size="15 20 0.5" rgba="0.5 0.5 0.5 1"/>
-
-    <geom name="surface" type="plane" pos="1 10 0" euler="3.141592653589793 0 0"
-          size="15 20 0.5" rgba="0.15 0.40 0.65 0.25" contype="0" conaffinity="0"/>
-
-    <body name="gate" pos="1 8 3" mocap="true">
-      <geom name="gate" type="mesh" mesh="gate" contype="0" conaffinity="0" rgba="0.75 0.75 0.75 1"/>
-    </body>
-
-    <body name="marker" pos="1 20 2" mocap="true">
-      <geom name="marker" type="cylinder" size="0.1 2" rgba="1 1 0 1"/>
-    </body>
 
     <!-- Start pose matches hydrus_env.scn: xyz 0 -1 2, yaw 3.14. -->
     <body name="hydrus" pos="0 -1 2" euler="0 0 3.14">

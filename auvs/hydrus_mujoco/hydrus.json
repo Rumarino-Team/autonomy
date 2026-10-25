@@ -108,8 +108,8 @@
   },
   "control": {
     "position_gain": [
-      0.8,
-      0.8,
+      1.2,
+      1.2,
       0.8
     ],
     "max_velocity": [
@@ -118,13 +118,13 @@
       0.4
     ],
     "velocity_kp": [
-      12,
-      12,
+      100,
+      100,
       18
     ],
     "velocity_ki": [
-      0.2,
-      0.2,
+      25,
+      25,
       0.5
     ],
     "velocity_kd": [
@@ -150,7 +150,7 @@
     "rate_kp": [
       2,
       2,
-      2
+      16
     ],
     "rate_ki": [
       0.2,
@@ -163,6 +163,13 @@
       0.05
     ],
     "integral_limit": 3,
-    "anti_windup_gain": 2
+    "velocity_integral_limit": [
+      80,
+      80,
+      0
+    ],
+    "anti_windup_gain": 2,
+    "submerged_weight": 11.1885,
+    "max_effort": 0.45
   }
 }

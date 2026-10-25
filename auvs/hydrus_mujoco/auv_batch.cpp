@@ -2,98 +2,13 @@
 #include "auv_camera.h"
 #include "auv_core.h"
 
-#include <algorithm>
-#include <condition_variable>
 #include <cstdio>
 #include <cstring>
-#include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
-
-// Fixed workers that each run a contiguous slice of [0, count) and then park.
-class ThreadPool {
-public:
-    explicit ThreadPool(int threads) {
-        for (int i = 1; i < threads; ++i)
-            workers_.emplace_back([this, i] { workerMain(i); });
-    }
-
-    ~ThreadPool() {
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            stop_ = true;
-            ++generation_;
-        }
-        start_.notify_all();
-        for (std::thread& t : workers_)
-            t.join();
-    }
-
-    int size() const { return static_cast<int>(workers_.size()) + 1; }
-
-    void parallelFor(int count, const std::function<void(int)>& fn) {
-        if (workers_.empty() || count <= 1) {
-            for (int i = 0; i < count; ++i)
-                fn(i);
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            fn_ = &fn;
-            count_ = count;
-            pending_ = static_cast<int>(workers_.size());
-            ++generation_;
-        }
-        start_.notify_all();
-        runSlice(0);
-        std::unique_lock<std::mutex> lock(mu_);
-        done_.wait(lock, [this] { return pending_ == 0; });
-        fn_ = nullptr;
-    }
-
-private:
-    void runSlice(int worker) {
-        const int n = size();
-        const int begin = static_cast<int>(static_cast<long>(count_) * worker / n);
-        const int end = static_cast<int>(static_cast<long>(count_) * (worker + 1) / n);
-        for (int i = begin; i < end; ++i)
-            (*fn_)(i);
-    }
-
-    void workerMain(int worker) {
-        uint64_t seen = 0;
-        for (;;) {
-            {
-                std::unique_lock<std::mutex> lock(mu_);
-                start_.wait(lock, [&] { return generation_ != seen; });
-                seen = generation_;
-                if (stop_)
-                    return;
-            }
-            runSlice(worker);
-            {
-                std::lock_guard<std::mutex> lock(mu_);
-                if (--pending_ == 0)
-                    done_.notify_one();
-            }
-        }
-    }
-
-    std::vector<std::thread> workers_;
-    std::mutex mu_;
-    std::condition_variable start_;
-    std::condition_variable done_;
-    const std::function<void(int)>* fn_ = nullptr;
-    int count_ = 0;
-    int pending_ = 0;
-    uint64_t generation_ = 0;
-    bool stop_ = false;
-};
 
 void writeState(const auv::SimulationManager& sim, double* out) {
     const mjtNum* pos = sim.position();
@@ -121,14 +36,52 @@ void writeState(const auv::SimulationManager& sim, double* out) {
 struct AuvBatch {
     std::unique_ptr<auv::AuvModel> model;
     std::vector<std::unique_ptr<auv::SimulationManager>> sims;
-    std::unique_ptr<ThreadPool> pool;
     auv::CameraModel camera;
     std::vector<auv::CameraView> views;
 };
 
+namespace {
+
+void applyReset(
+    auv::SimulationManager& sim,
+    auv::CameraView& view,
+    const double* init_row,
+    const double* rand_row) {
+    auv::Randomization r;
+    if (rand_row != nullptr) {
+        r.dry_mass_scale = rand_row[0];
+        r.volume_scale = rand_row[1];
+        r.drag_scale = rand_row[2];
+        r.thrust_scale = rand_row[3];
+        r.rotor_inertia_scale = rand_row[4];
+        r.current[0] = rand_row[5];
+        r.current[1] = rand_row[6];
+        r.current[2] = rand_row[7];
+    }
+    sim.setRandomization(r);
+    view.clear();
+    if (init_row == nullptr) {
+        sim.reset();
+        return;
+    }
+    const mjtNum quat[4] = {init_row[6], init_row[3], init_row[4], init_row[5]};
+    sim.reset(init_row, quat, init_row + 7, init_row + 10);
+}
+
+void resetEnv(AuvBatch* batch, int i, const uint8_t* mask, const double* init_state, const double* randomization) {
+    if (mask != nullptr && mask[i] == 0)
+        return;
+    const double* init_row = init_state == nullptr ? nullptr : init_state + AUV_BATCH_INIT_SIZE * i;
+    const double* rand_row = randomization == nullptr ? nullptr : randomization + AUV_BATCH_RANDOMIZATION_SIZE * i;
+    applyReset(*batch->sims[i], batch->views[i], init_row, rand_row);
+}
+
+}  // namespace
+
 extern "C" {
 
 AuvBatch* auv_batch_create(const char* xml_path, int num_envs, int num_threads) {
+    (void)num_threads;
     if (xml_path == nullptr || num_envs <= 0) {
         std::fprintf(stderr, "[auv_batch] need an xml path and num_envs > 0\n");
         return nullptr;
@@ -144,9 +97,6 @@ AuvBatch* auv_batch_create(const char* xml_path, int num_envs, int num_threads) 
     batch->sims.reserve(num_envs);
     for (int i = 0; i < num_envs; ++i)
         batch->sims.emplace_back(new auv::SimulationManager(*model));
-    if (num_threads <= 0)
-        num_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-    batch->pool.reset(new ThreadPool(std::min(num_threads, num_envs)));
     batch->camera = auv::CameraModel::build(model->model);
     batch->views.resize(num_envs);
     return batch;
@@ -155,7 +105,6 @@ AuvBatch* auv_batch_create(const char* xml_path, int num_envs, int num_threads) 
 void auv_batch_destroy(AuvBatch* batch) {
     if (batch == nullptr)
         return;
-    batch->pool.reset();
     batch->sims.clear();
     delete batch;
 }
@@ -179,81 +128,83 @@ void auv_batch_reset(
     const double* randomization) {
     if (batch == nullptr)
         return;
-    batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
-        if (mask != nullptr && mask[i] == 0)
-            return;
-        auv::SimulationManager& sim = *batch->sims[i];
-        auv::Randomization r;
-        if (randomization != nullptr) {
-            const double* src = randomization + AUV_BATCH_RANDOMIZATION_SIZE * i;
-            r.dry_mass_scale = src[0];
-            r.volume_scale = src[1];
-            r.drag_scale = src[2];
-            r.thrust_scale = src[3];
-            r.rotor_inertia_scale = src[4];
-            r.current[0] = src[5];
-            r.current[1] = src[6];
-            r.current[2] = src[7];
-        }
-        sim.setRandomization(r);
-        batch->views[i].clear();
-        if (init_state == nullptr) {
-            sim.reset();
-            return;
-        }
-        const double* s = init_state + AUV_BATCH_INIT_SIZE * i;
-        const mjtNum quat[4] = {s[6], s[3], s[4], s[5]};
-        sim.reset(s, quat, s + 7, s + 10);
-    });
+    const int n = static_cast<int>(batch->sims.size());
+    for (int i = 0; i < n; ++i)
+        resetEnv(batch, i, mask, init_state, randomization);
+}
+
+void auv_batch_reset_env(AuvBatch* batch, int env, const double* init_row, const double* rand_row) {
+    if (batch == nullptr || env < 0 || env >= static_cast<int>(batch->sims.size()))
+        return;
+    applyReset(*batch->sims[env], batch->views[env], init_row, rand_row);
+}
+
+void auv_batch_step_env(AuvBatch* batch, int env, const float* thrusters, int substeps, double* state_out) {
+    if (batch == nullptr || env < 0 || env >= static_cast<int>(batch->sims.size()))
+        return;
+    auv::SimulationManager& sim = *batch->sims[env];
+    sim.setThrusters(thrusters, batch->model->thrusterCount());
+    for (int k = 0; k < substeps; ++k)
+        sim.step();
+    if (state_out != nullptr)
+        writeState(sim, state_out);
 }
 
 void auv_batch_step(AuvBatch* batch, const float* thrusters, int substeps, double* state_out) {
     if (batch == nullptr)
         return;
+    const int n = static_cast<int>(batch->sims.size());
     const int nthr = batch->model->thrusterCount();
-    batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
-        auv::SimulationManager& sim = *batch->sims[i];
-        sim.setThrusters(thrusters != nullptr ? thrusters + nthr * i : nullptr, nthr);
-        for (int k = 0; k < substeps; ++k)
-            sim.step();
-        if (state_out != nullptr)
-            writeState(sim, state_out + AUV_BATCH_STATE_SIZE * i);
-    });
+    for (int i = 0; i < n; ++i) {
+        const float* cmd = thrusters != nullptr ? thrusters + static_cast<std::ptrdiff_t>(nthr * i) : nullptr;
+        double* out = state_out != nullptr ? state_out + static_cast<std::ptrdiff_t>(AUV_BATCH_STATE_SIZE * i) : nullptr;
+        auv_batch_step_env(batch, i, cmd, substeps, out);
+    }
 }
 
 int auv_batch_mocap_count(const AuvBatch* batch) {
     return batch != nullptr ? batch->model->model->nmocap : 0;
 }
 
+static void writeMocap(mjModel* model, mjData* data, const double* poses) {
+    const int nmocap = model->nmocap;
+    for (int m = 0; m < nmocap; ++m) {
+        const double* pose = poses + AUV_BATCH_MOCAP_POSE * m;
+        mju_copy3(data->mocap_pos + 3 * m, pose);
+        data->mocap_quat[4 * m] = pose[6];
+        data->mocap_quat[4 * m + 1] = pose[3];
+        data->mocap_quat[4 * m + 2] = pose[4];
+        data->mocap_quat[4 * m + 3] = pose[5];
+    }
+    mj_forward(model, data);
+}
+
 void auv_batch_set_mocap(AuvBatch* batch, const double* poses) {
     if (batch == nullptr || poses == nullptr)
         return;
     const int nmocap = batch->model->model->nmocap;
-    batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
-        mjData* data = batch->sims[i]->data();
-        const double* src = poses + AUV_BATCH_MOCAP_POSE * nmocap * i;
-        for (int m = 0; m < nmocap; ++m) {
-            const double* pose = src + AUV_BATCH_MOCAP_POSE * m;
-            mju_copy3(data->mocap_pos + 3 * m, pose);
-            data->mocap_quat[4 * m] = pose[6];
-            data->mocap_quat[4 * m + 1] = pose[3];
-            data->mocap_quat[4 * m + 2] = pose[4];
-            data->mocap_quat[4 * m + 3] = pose[5];
-        }
-        mj_forward(batch->model->model, data);
-    });
+    const int n = static_cast<int>(batch->sims.size());
+    for (int i = 0; i < n; ++i)
+        writeMocap(batch->model->model, batch->sims[i]->data(), poses + AUV_BATCH_MOCAP_POSE * nmocap * i);
+}
+
+void auv_batch_set_mocap_env(AuvBatch* batch, int env, const double* poses) {
+    if (batch == nullptr || poses == nullptr || env < 0 || env >= static_cast<int>(batch->sims.size()))
+        return;
+    writeMocap(batch->model->model, batch->sims[env]->data(), poses);
 }
 
 void auv_batch_camera(AuvBatch* batch, float* features) {
     if (batch == nullptr || features == nullptr)
         return;
-    batch->pool->parallelFor(static_cast<int>(batch->sims.size()), [&](int i) {
+    const int n = static_cast<int>(batch->sims.size());
+    for (int i = 0; i < n; ++i) {
         batch->views[i].render(
             batch->model->model,
             batch->sims[i]->data(),
             batch->camera,
             features + AUV_CAM_FEATURE_SIZE * i);
-    });
+    }
 }
 
 void auv_batch_camera_image(const AuvBatch* batch, int env, uint8_t* pixels) {
@@ -272,3 +223,13 @@ void auv_batch_get_state(const AuvBatch* batch, double* state_out) {
 }
 
 }  // extern "C"
+
+auv::SimulationManager* auv_batch_env(AuvBatch* batch, int env) {
+    if (batch == nullptr || env < 0 || env >= static_cast<int>(batch->sims.size()))
+        return nullptr;
+    return batch->sims[env].get();
+}
+
+const auv::AuvModel* auv_batch_model(const AuvBatch* batch) {
+    return batch != nullptr ? batch->model.get() : nullptr;
+}

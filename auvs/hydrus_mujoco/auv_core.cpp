@@ -1,4 +1,5 @@
 #include "auv_core.h"
+#include "hydrus_drag_mesh.h"
 
 #include <algorithm>
 #include <cmath>
@@ -221,7 +222,51 @@ mjtNum signedVolume(const Faces& faces, mjtNum centroid[3]) {
     return vol6 / 6.0;
 }
 
+// Displaced volume of each external Hydrus part, in the same order as the Stonefish dump.
+// The sum is hydrus_volume. Drag coefficients and faces come from the dump itself.
+constexpr mjtNum kHydrusPartVolume[] = {0.00215788, 0.00060725, 0.001, 0.0017951, 0.0017951};
+
+bool buildStonefishHull(AuvModel& vehicle) {
+    if (hydrus_drag_part_count == 0 || hydrus_drag_face_count == 0)
+        return false;
+    const char* name = mj_id2name(vehicle.model, mjOBJ_BODY, vehicle.body);
+    if (name == nullptr || std::strcmp(name, "hydrus") != 0)
+        return false;
+    std::vector<HullPart> parts(hydrus_drag_part_count);
+    for (uint32_t i = 0; i < hydrus_drag_part_count; ++i) {
+        HullPart& part = parts[i];
+        part.com_frame = true;
+        if (i < sizeof(kHydrusPartVolume) / sizeof(kHydrusPartVolume[0]))
+            part.volume = kHydrusPartVolume[i];
+        mju_copy3(part.cd, hydrus_drag_parts[i].cd);
+        mju_copy3(part.cf, hydrus_drag_parts[i].cf);
+        for (int k = 0; k < 9; ++k)
+            part.origin_basis[k] = hydrus_drag_parts[i].origin_basis[k];
+    }
+    for (uint32_t i = 0; i < hydrus_drag_face_count; ++i) {
+        const AuvDragFace& face = hydrus_drag_faces[i];
+        if (face.part >= hydrus_drag_part_count)
+            continue;
+        Triangle triangle{};
+        for (int v = 0; v < 3; ++v)
+            for (int k = 0; k < 3; ++k)
+                triangle.v[v][k] = face.vertex[v * 3 + k];
+        parts[face.part].faces.push_back(triangle);
+    }
+    for (HullPart& part : parts) {
+        if (part.faces.empty())
+            continue;
+        signedVolume(part.faces, part.centroid);
+        for (const Triangle& triangle : part.faces)
+            part.area += triangleArea(triangle);
+        vehicle.hull.push_back(std::move(part));
+    }
+    return !vehicle.hull.empty();
+}
+
 void buildHull(AuvModel& vehicle) {
+    if (buildStonefishHull(vehicle))
+        return;
     const mjModel* model = vehicle.model;
     if (model->nuser_geom < kHullUserFields || vehicle.body < 0)
         return;
@@ -272,21 +317,56 @@ void buildHull(AuvModel& vehicle) {
     }
 }
 
-// Stonefish SolidEntity::CorrectHydrodynamicForces: weight the per-axis coefficients by the
-// direction of the summed force in the body frame.
-void scaleByCoefficients(mjtNum vec[3], const mjtNum* body_mat, const mjtNum coeff[3], mjtNum scale) {
+// Stonefish SolidEntity::CorrectHydrodynamicForces. `world_from_origin` is the part-origin
+// basis in the world (row-major, columns are the axes). safeNormalize uses length^2 < epsilon
+// and then contributes nothing, which is not the same as falling back to the first coefficient.
+void scaleByCoefficients(mjtNum vec[3], const mjtNum* world_from_origin, const mjtNum coeff[3], mjtNum scale) {
     mjtNum dir[3];
-    mju_mulMatTVec3(dir, body_mat, vec);
-    const mjtNum len = mju_norm3(dir);
-    mjtNum c = coeff[0];
-    if (len > 1e-12)
-        c = (std::abs(dir[0]) * coeff[0] + std::abs(dir[1]) * coeff[1] + std::abs(dir[2]) * coeff[2]) / len;
-    mju_scl3(vec, vec, scale * c);
+    mju_mulMatTVec3(dir, world_from_origin, vec);
+    const mjtNum len2 = mju_dot3(dir, dir);
+    mjtNum factor = 0;
+    if (len2 >= 2.2204460492503131e-16) {
+        const mjtNum inv = 1.0 / std::sqrt(len2);
+        factor = std::abs(dir[0]) * inv * coeff[0] + std::abs(dir[1]) * inv * coeff[1] + std::abs(dir[2]) * inv * coeff[2];
+    }
+    mju_scl3(vec, vec, scale * factor);
+}
+
+// Part-origin axes in the world. `origin_basis` maps that frame into the center-of-mass frame.
+void partWorldBasis(mjtNum out[9], const mjtNum* body_mat, const mjtNum* iquat, const mjtNum origin_basis[9]) {
+    for (int col = 0; col < 3; ++col) {
+        const mjtNum origin_col[3] = {origin_basis[col], origin_basis[3 + col], origin_basis[6 + col]};
+        mjtNum body_col[3];
+        mju_rotVecQuat(body_col, origin_col, iquat);
+        mjtNum world_col[3];
+        mju_mulMatVec3(world_col, body_mat, body_col);
+        out[col] = world_col[0];
+        out[3 + col] = world_col[1];
+        out[6 + col] = world_col[2];
+    }
 }
 
 void worldPoint(mjtNum out[3], const mjtNum* pos, const mjtNum* mat, const mjtNum local[3]) {
     mju_mulMatVec3(out, mat, local);
     mju_addTo3(out, pos);
+}
+
+// Stonefish vertices are stored in the center-of-mass frame. Geom meshes stay in the geom frame.
+void hullPoint(
+    mjtNum out[3],
+    const mjModel* model,
+    const mjData* data,
+    int body,
+    const HullPart& part,
+    const mjtNum local[3]) {
+    if (!part.com_frame) {
+        worldPoint(out, data->geom_xpos + 3 * part.geom, data->geom_xmat + 9 * part.geom, local);
+        return;
+    }
+    mjtNum in_body[3];
+    mju_rotVecQuat(in_body, local, model->body_iquat + 4 * body);
+    mju_addTo3(in_body, model->body_ipos + 3 * body);
+    worldPoint(out, data->xpos + 3 * body, data->xmat + 9 * body, in_body);
 }
 
 // True when name is exactly thruster_<index> and index is at or past the first missing site.
@@ -457,9 +537,38 @@ void SimulationManager::reset() {
 }
 
 void SimulationManager::reset(const mjtNum pos[3], const mjtNum quat[4], const mjtNum lin_vel[3], const mjtNum ang_vel[3]) {
-    const mjModel* m = model_.model;
-    mj_resetData(m, data_);
+    mj_resetData(model_.model, data_);
     clearActuation();
+    setVehicleState(pos, quat, lin_vel, ang_vel);
+}
+
+uint64_t SimulationManager::stateHash() const {
+    const mjModel* m = model_.model;
+    std::vector<mjtNum> state(static_cast<size_t>(mj_stateSize(m, mjSTATE_INTEGRATION)));
+    mj_getState(m, data_, state.data(), mjSTATE_INTEGRATION);
+    uint64_t hash = 1469598103934665603ull;
+    auto mix = [&hash](const void* bytes, size_t size) {
+        const auto* p = static_cast<const unsigned char*>(bytes);
+        for (size_t i = 0; i < size; ++i) {
+            hash ^= p[i];
+            hash *= 1099511628211ull;
+        }
+    };
+    mix(state.data(), state.size() * sizeof(mjtNum));
+    mix(cmd_.data(), cmd_.size() * sizeof(double));
+    for (const Rotor& rotor : rotor_) {
+        mix(&rotor.omega, sizeof(rotor.omega));
+        mix(&rotor.integral, sizeof(rotor.integral));
+        mix(&rotor.torque, sizeof(rotor.torque));
+    }
+    mix(&hydro_counter_, sizeof(hydro_counter_));
+    mix(hydro_force_, sizeof(hydro_force_));
+    mix(hydro_torque_, sizeof(hydro_torque_));
+    return hash;
+}
+
+void SimulationManager::setVehicleState(const mjtNum pos[3], const mjtNum quat[4], const mjtNum lin_vel[3], const mjtNum ang_vel[3]) {
+    const mjModel* m = model_.model;
     mjtNum* qpos = data_->qpos + model_.qpos_adr;
     mju_copy3(qpos, pos);
     mju_copy4(qpos + 3, quat);
@@ -513,8 +622,9 @@ const mjtNum* SimulationManager::accel() const {
 
 // Stonefish Compound::ComputeHydrodynamicForces for a submerged compound: buoyancy at the
 // center of buoyancy, plus per-face form drag and skin friction on every external part.
-// While crossing the surface Stonefish clips each face against the water; here each part's
-// buoyancy scales with how much of its height is under water, and dry faces get no drag.
+// Hydrus uses the Stonefish physics mesh. While crossing the surface Stonefish clips each
+// face against the water; here each part's buoyancy scales with how much of its height is
+// under water, and a face whose centroid is above the surface gets no drag.
 void SimulationManager::computeHydrodynamics() {
     const mjModel* model = model_.model;
     const mjData* data = data_;
@@ -540,13 +650,11 @@ void SimulationManager::computeHydrodynamics() {
     bool any = false;
     for (size_t p = 0; p < hull.size(); ++p) {
         const HullPart& part = hull[p];
-        const mjtNum* gpos = data->geom_xpos + 3 * part.geom;
-        const mjtNum* gmat = data->geom_xmat + 9 * part.geom;
         bool part_any = false;
         for (const Triangle& t : part.faces) {
             for (const auto& v : t.v) {
                 mjtNum w[3];
-                worldPoint(w, gpos, gmat, v);
+                hullPoint(w, model, data, body, part, v);
                 if (!part_any) {
                     part_min_[p] = part_max_[p] = w[2];
                     part_any = true;
@@ -586,16 +694,17 @@ void SimulationManager::computeHydrodynamics() {
         addAt(cb, fb);
     }
 
+    const mjtNum* iquat = model->body_iquat + 4 * body;
     for (size_t p = 0; p < hull.size(); ++p) {
         const HullPart& part = hull[p];
-        const mjtNum* gpos = data->geom_xpos + 3 * part.geom;
-        const mjtNum* gmat = data->geom_xmat + 9 * part.geom;
+        mjtNum part_basis[9];
+        partWorldBasis(part_basis, body_mat, iquat, part.origin_basis);
 
         if (!inside && part_max_[p] > 0) {
             const mjtNum span = part_max_[p] - part_min_[p];
             const mjtNum wet = part_min_[p] > 0 || span <= 0 ? 1.0 : part_max_[p] / span;
             mjtNum center[3];
-            worldPoint(center, gpos, gmat, part.centroid);
+            hullPoint(center, model, data, body, part, part.centroid);
             mjtNum fb[3];
             mju_scl3(fb, gvec, -wet * part.volume * volume_scale * rho);
             addAt(center, fb);
@@ -607,9 +716,9 @@ void SimulationManager::computeHydrodynamics() {
         mjtNum tdf[3] = {0, 0, 0};
         for (const Triangle& t : part.faces) {
             mjtNum p1[3], p2[3], p3[3];
-            worldPoint(p1, gpos, gmat, t.v[0]);
-            worldPoint(p2, gpos, gmat, t.v[1]);
-            worldPoint(p3, gpos, gmat, t.v[2]);
+            hullPoint(p1, model, data, body, part, t.v[0]);
+            hullPoint(p2, model, data, body, part, t.v[1]);
+            hullPoint(p3, model, data, body, part, t.v[2]);
             mjtNum e1[3], e2[3], fn[3];
             mju_sub3(e1, p2, p1);
             mju_sub3(e2, p3, p1);
@@ -656,10 +765,10 @@ void SimulationManager::computeHydrodynamics() {
                 mju_addTo3(tdf, m);
             }
         }
-        scaleByCoefficients(fdq, body_mat, part.cd, 0.5 * rho * drag_scale);
-        scaleByCoefficients(tdq, body_mat, part.cd, 0.5 * rho * drag_scale);
-        scaleByCoefficients(fdf, body_mat, part.cf, rho * drag_scale);
-        scaleByCoefficients(tdf, body_mat, part.cf, rho * drag_scale);
+        scaleByCoefficients(fdq, part_basis, part.cd, 0.5 * rho * drag_scale);
+        scaleByCoefficients(tdq, part_basis, part.cd, 0.5 * rho * drag_scale);
+        scaleByCoefficients(fdf, part_basis, part.cf, rho * drag_scale);
+        scaleByCoefficients(tdf, part_basis, part.cf, rho * drag_scale);
         mju_addTo3(hydro_force_, fdq);
         mju_addTo3(hydro_force_, fdf);
         mju_addTo3(hydro_torque_, tdq);

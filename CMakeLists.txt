@@ -179,12 +179,17 @@ if(MUJOCO_PREFIX)
   endif()
 
   set(MUJOCO_INCLUDE_DIR "${MUJOCO_PREFIX}/include")
+  enable_language(C)
 
-  # Physics plugin. It does not link Stonefish: both libraries export TinyXML.
-  # The window is libauv_mujoco_view.so, loaded with RTLD_DEEPBIND.
+  # Physics plugin. The Blender view is a UDP pose stream from this library.
   add_library(auv_mujoco SHARED
     auvs/hydrus_mujoco/auv.cpp
     auvs/hydrus_mujoco/auv_core.cpp
+    auvs/hydrus_mujoco/auv_batch.cpp
+    auvs/hydrus_mujoco/auv_camera.cpp
+    auvs/hydrus_mujoco/blender_link.cpp
+    auvs/hydrus_mujoco/recorder.cpp
+    auvs/hydrus_mujoco/hydrus_drag_mesh_data.c
   )
   target_include_directories(auv_mujoco PRIVATE
     "${CMAKE_SOURCE_DIR}/include"
@@ -192,46 +197,16 @@ if(MUJOCO_PREFIX)
     "${MUJOCO_INCLUDE_DIR}"
   )
   target_link_directories(auv_mujoco PRIVATE "${MUJOCO_LIB_DIR}")
-  target_link_libraries(auv_mujoco PRIVATE mujoco dl pthread)
+  target_link_libraries(auv_mujoco PRIVATE mujoco pthread)
   set_target_properties(auv_mujoco PROPERTIES
     BUILD_RPATH "${MUJOCO_LIB_DIR}"
-  )
-
-  add_library(auv_mujoco_view SHARED
-    auvs/hydrus_mujoco/auv_view.cpp
-  )
-  add_dependencies(auv_mujoco_view stonefish)
-  target_include_directories(auv_mujoco_view PRIVATE
-    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
-    "${STONEFISH_INCLUDE_ROOT}"
-    "${STONEFISH_INCLUDE_DIR}"
-  )
-  target_compile_definitions(auv_mujoco_view PRIVATE
-    _GNU_SOURCE
-    BT_EULER_DEFAULT_ZYX
-    BT_USE_DOUBLE_PRECISION
-    ${STONEFISH_EXTRA_DEFS}
-    SHADER_DIR_PATH="${STONEFISH_DIR}/share/${STONEFISH_LIB}/shaders/"
-  )
-  target_compile_options(auv_mujoco_view PRIVATE -fopenmp)
-  target_link_directories(auv_mujoco_view PRIVATE "${STONEFISH_DIR}/lib")
-  target_link_libraries(auv_mujoco_view PRIVATE
-    ${STONEFISH_LIB}
-    SDL2
-    freetype
-    OpenGL
-    GLX
-    GLU
-    gomp
-  )
-  set_target_properties(auv_mujoco_view PROPERTIES
-    BUILD_RPATH "${STONEFISH_DIR}/lib"
   )
 
   add_library(auv_mujoco_rl SHARED
     auvs/hydrus_mujoco/auv_batch.cpp
     auvs/hydrus_mujoco/auv_camera.cpp
     auvs/hydrus_mujoco/auv_core.cpp
+    auvs/hydrus_mujoco/hydrus_drag_mesh_data.c
   )
   target_include_directories(auv_mujoco_rl PRIVATE
     "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"

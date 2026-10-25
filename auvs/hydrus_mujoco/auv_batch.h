@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-// Many independent vehicles sharing one compiled model, stepped in parallel.
+// Many independent vehicles sharing one compiled model. The caller steps each world.
 typedef struct AuvBatch AuvBatch;
 
 enum {
@@ -31,11 +31,12 @@ enum {
     // boxes, then one cell record per grid cell.
     AUV_CAM_FEATURE_SIZE =
         AUV_CAM_BOXES * AUV_CAM_BOX_STRIDE + AUV_CAM_CELLS * AUV_CAM_CELL_STRIDE,
-    // xyz plus quaternion xyzw, in mocap-id order (gate, then marker).
+    // xyz plus quaternion xyzw. auv_batch_set_mocap writes mocap-id order.
+    // auv_set_world_mocap writes catalog order instead.
     AUV_BATCH_MOCAP_POSE = 7,
 };
 
-// num_threads <= 0 picks the hardware concurrency. Returns NULL on failure and prints why.
+// num_threads is ignored. Worlds are stepped by the caller. Returns NULL on failure and prints why.
 AuvBatch* auv_batch_create(const char* xml_path, int num_envs, int num_threads);
 void auv_batch_destroy(AuvBatch* batch);
 int auv_batch_num_envs(const AuvBatch* batch);
@@ -51,15 +52,26 @@ void auv_batch_reset(
     const double* init_state,
     const double* randomization);
 
+// One world. init_row is AUV_BATCH_INIT_SIZE (NULL keeps the XML pose). rand_row is
+// AUV_BATCH_RANDOMIZATION_SIZE (NULL restores nominal physics).
+void auv_batch_reset_env(AuvBatch* batch, int env, const double* init_row, const double* rand_row);
+
 // Holds thrusters[num_envs * auv_batch_num_thrusters] for substeps physics steps, then
-// writes state_out (num_envs * AUV_BATCH_STATE_SIZE, may be NULL).
+// writes state_out (num_envs * AUV_BATCH_STATE_SIZE, may be NULL). One world at a time.
 void auv_batch_step(AuvBatch* batch, const float* thrusters, int substeps, double* state_out);
+
+// Steps one world. thrusters has auv_batch_num_thrusters values (NULL holds zeros).
+// state_out is AUV_BATCH_STATE_SIZE and may be NULL. Concurrent calls on different
+// envs do not share writable state.
+void auv_batch_step_env(AuvBatch* batch, int env, const float* thrusters, int substeps, double* state_out);
 
 void auv_batch_get_state(const AuvBatch* batch, double* state_out);
 
 int auv_batch_mocap_count(const AuvBatch* batch);
 // poses is num_envs * mocap_count * AUV_BATCH_MOCAP_POSE. Forward kinematics run after.
 void auv_batch_set_mocap(AuvBatch* batch, const double* poses);
+// poses is nmocap * AUV_BATCH_MOCAP_POSE for this env. Forward kinematics run after.
+void auv_batch_set_mocap_env(AuvBatch* batch, int env, const double* poses);
 
 // Rasterizes the camera, projects gate and marker boxes, and pools Sobel and optical flow.
 // features is num_envs * AUV_CAM_FEATURE_SIZE. The first call after a reset has zero flow.
@@ -69,4 +81,13 @@ void auv_batch_camera_image(const AuvBatch* batch, int env, uint8_t* pixels);
 
 #ifdef __cplusplus
 }
+#endif
+
+#ifdef __cplusplus
+namespace auv {
+class SimulationManager;
+class AuvModel;
+}  // namespace auv
+auv::SimulationManager* auv_batch_env(AuvBatch* batch, int env);
+const auv::AuvModel* auv_batch_model(const AuvBatch* batch);
 #endif

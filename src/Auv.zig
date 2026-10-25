@@ -5,7 +5,7 @@ const c = @cImport({
     @cInclude("auv.h");
 });
 
-pub const Error = enum(u8) { none, scenario_restart, seed_goal };
+pub const Error = enum(u8) { none, scenario_restart, seed_goal, surfaced, non_finite };
 
 pub const ObjectCls = enum(u8) {
     cube,
@@ -73,6 +73,11 @@ pub const InitFunc = fn () callconv(.c) void;
 pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
 pub const DeinitFunc = fn () callconv(.c) void;
+pub const PrepareBatchFunc = fn (num_envs: c_int) callconv(.c) bool;
+pub const BeginFuzzFunc = fn (seed: u64) callconv(.c) bool;
+pub const RecordStartFunc = fn (path: [*:0]const u8, fps: f64) callconv(.c) bool;
+pub const RecordEventFunc = fn (text: [*:0]const u8) callconv(.c) void;
+pub const RecordStopFunc = fn (reason: [*:0]const u8) callconv(.c) void;
 
 const Auv = @This();
 
@@ -81,6 +86,11 @@ yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
 setThrustorValues: *const SetThrustorValuesFunc,
 deinit: *const DeinitFunc,
 getThrusterGeometry: ?*const ThrusterGeometryFunc = null,
+prepareBatch: ?*const PrepareBatchFunc = null,
+beginFuzz: ?*const BeginFuzzFunc = null,
+recordStart: ?*const RecordStartFunc = null,
+recordEvent: ?*const RecordEventFunc = null,
+recordStop: ?*const RecordStopFunc = null,
 
 // below I'm double checking the ABI matches
 fn assertSameLayout(comptime Zig: type, comptime C: type) void {

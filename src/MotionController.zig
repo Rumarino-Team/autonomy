@@ -14,7 +14,7 @@ const Pid = struct {
     derivative: math.Vector3f = @splat(0),
     initialized: bool = false,
 
-    fn run(pid: *Pid, err: math.Vector3f, measurement: math.Vector3f, kp: math.Vector3f, ki: math.Vector3f, kd: math.Vector3f, dt: f32, options: Control.Options) math.Vector3f {
+    fn run(pid: *Pid, err: math.Vector3f, measurement: math.Vector3f, kp: math.Vector3f, ki: math.Vector3f, kd: math.Vector3f, dt: f32, options: Control.Options, limit: math.Vector3f) math.Vector3f {
         if (dt > 0) {
             const alpha = dt / (options.derivative_filter_time + dt);
             if (pid.initialized) {
@@ -25,16 +25,16 @@ const Pid = struct {
         }
         inline for (0..3) |axis| {
             if (ki[axis] == 0) pid.integral[axis] = 0;
-            pid.integral[axis] = std.math.clamp(pid.integral[axis], -options.integral_limit, options.integral_limit);
+            pid.integral[axis] = std.math.clamp(pid.integral[axis], -limit[axis], limit[axis]);
         }
         pid.previous_measurement = measurement;
         pid.initialized = dt > 0;
         return kp * err + pid.integral + kd * pid.derivative;
     }
 
-    fn backCalculate(pid: *Pid, difference: math.Vector3f, ki: math.Vector3f, dt: f32, options: Control.Options) void {
+    fn backCalculate(pid: *Pid, difference: math.Vector3f, ki: math.Vector3f, dt: f32, options: Control.Options, limit: math.Vector3f) void {
         inline for (0..3) |axis| {
-            if (ki[axis] > 0) pid.integral[axis] = std.math.clamp(pid.integral[axis] + options.anti_windup_gain * difference[axis] * dt, -options.integral_limit, options.integral_limit);
+            if (ki[axis] > 0) pid.integral[axis] = std.math.clamp(pid.integral[axis] + options.anti_windup_gain * difference[axis] * dt, -limit[axis], limit[axis]);
         }
     }
 };
@@ -113,7 +113,7 @@ pub fn calculate(controller: *MotionController, nav: *const Navigation, target: 
                 measurement[2] = 0;
                 controller.world.integral[2] = 0;
             }
-            world_force = controller.world.run(error_velocity, measurement, options.velocity_kp, options.velocity_ki, options.velocity_kd, dt, options);
+            world_force = controller.world.run(error_velocity, measurement, options.velocity_kp, options.velocity_ki, options.velocity_kd, dt, options, options.velocityIntegralLimit());
             if (pressure_controls_z) world_force[2] = 0;
             controller.last_world_active = true;
         } else controller.world = .{};
@@ -122,10 +122,14 @@ pub fn calculate(controller: *MotionController, nav: *const Navigation, target: 
         const desired_rate = std.math.clamp(options.position_gain[2] * (target.pressure_depth.? - snapshot.pressure_depth.?), -options.max_velocity[2], options.max_velocity[2]);
         const error_velocity: math.Vector3f = .{ 0, 0, desired_rate - snapshot.depth_rate.? };
         const measurement: math.Vector3f = .{ 0, 0, snapshot.depth_rate.? };
-        const force = controller.depth.run(error_velocity, measurement, options.velocity_kp, options.velocity_ki, options.velocity_kd, dt, options);
+        const force = controller.depth.run(error_velocity, measurement, options.velocity_kp, options.velocity_ki, options.velocity_kd, dt, options, options.velocityIntegralLimit());
         world_force[2] += force[2];
         controller.last_depth_active = true;
     } else controller.depth = .{};
+    // Constant weight is not a velocity error. Cancel it in world axes so the
+    // integrator only trims the residual, including while pitch adaptation
+    // redirects the same force.
+    if (controller.last_world_active or controller.last_depth_active) world_force[2] -= options.submerged_weight;
     // Euler input packets are converted to a quaternion once; no Euler error
     // or Euler-rate derivative is used inside the attitude/rate feedback loops.
     var desired = target.orientation orelse math.quaternionFromEuler(.{ target.roll_pitch[0], target.roll_pitch[1], target.heading orelse snapshot.yaw().? });
@@ -159,7 +163,7 @@ pub fn calculate(controller: *MotionController, nav: *const Navigation, target: 
         controller.visual_axes = axes;
         const error_image: math.Vector3f = .{ 0, visual.approach, if (visual.align_vertical) visual.cy else 0 };
         const gains = config.non_odometry;
-        body_force += controller.visual.run(error_image, -error_image, first3(gains.kp) * axes, first3(gains.ki) * axes, first3(gains.kd) * axes, dt, options);
+        body_force += controller.visual.run(error_image, -error_image, first3(gains.kp) * axes, first3(gains.ki) * axes, first3(gains.kd) * axes, dt, options, @splat(options.integral_limit));
         // Image centering owns body yaw rate; depth/tilt stabilization continues.
         requested_rate[2] = visual.cx * @abs(gains.kp[5]);
         controller.last_visual_active = true;
@@ -174,7 +178,7 @@ pub fn calculate(controller: *MotionController, nav: *const Navigation, target: 
         const step = options.max_angular_acceleration[axis] * dt;
         controller.commanded_rate[axis] += std.math.clamp(requested - controller.commanded_rate[axis], -step, step);
     }
-    const torque = controller.rate.run(controller.commanded_rate - angular_velocity, angular_velocity, options.rate_kp, options.rate_ki, options.rate_kd, dt, options);
+    const torque = controller.rate.run(controller.commanded_rate - angular_velocity, angular_velocity, options.rate_kp, options.rate_ki, options.rate_kd, dt, options, @splat(options.integral_limit));
     const result: math.Vector6f = .{ body_force[0], body_force[1], body_force[2], torque[0], torque[1], torque[2] };
     inline for (0..6) |axis| if (!std.math.isFinite(result[axis])) {
         controller.reset();
@@ -200,11 +204,11 @@ pub fn allocationFeedback(controller: *MotionController, requested: math.Vector6
     if (controller.last_world_active) {
         var residual = world_difference;
         if (controller.last_pressure_controls_z == true) residual[2] = 0;
-        controller.world.backCalculate(residual, options.velocity_ki, elapsed, options);
+        controller.world.backCalculate(residual, options.velocity_ki, elapsed, options, options.velocityIntegralLimit());
     }
-    if (controller.last_depth_active) controller.depth.backCalculate(.{ 0, 0, world_difference[2] }, options.velocity_ki, elapsed, options);
-    if (controller.last_visual_active) controller.visual.backCalculate(body_difference, first3(config.non_odometry.ki) * controller.visual_axes, elapsed, options);
-    controller.rate.backCalculate(.{ difference[3], difference[4], difference[5] }, options.rate_ki, elapsed, options);
+    if (controller.last_depth_active) controller.depth.backCalculate(.{ 0, 0, world_difference[2] }, options.velocity_ki, elapsed, options, options.velocityIntegralLimit());
+    if (controller.last_visual_active) controller.visual.backCalculate(body_difference, first3(config.non_odometry.ki) * controller.visual_axes, elapsed, options, @splat(options.integral_limit));
+    controller.rate.backCalculate(.{ difference[3], difference[4], difference[5] }, options.rate_ki, elapsed, options, @splat(options.integral_limit));
 }
 
 fn first3(v: math.Vector6f) math.Vector3f {
@@ -310,6 +314,63 @@ fn simulateSideways(policy: Motion.AttitudePolicy, sideways: f32) !TestResult {
         if (!Navigation.validPoint(position) or !Navigation.validQuat(orientation)) return error.NonFiniteFeedback;
     }
     return .{ .distance = math.length3f(goal - position), .depth_error = @abs(position[2] - 2), .yaw_error = @abs(math.wrapAngle(math.quaternionToEuler(orientation)[2] - yaw)), .max_pitch = max_pitch };
+}
+
+test "surge integral can cancel steady drag above the shared limit" {
+    var controller: MotionController = .{};
+    var nav: Navigation = .{};
+    nav.snapshot = .{
+        .position = .{ 0, 0, 2 },
+        .orientation = .{ 0, 0, 0, 1 },
+        .velocity_world = @splat(0),
+        .angular_velocity_body = @splat(0),
+        .pressure_depth = 2,
+        .depth_rate = 0,
+        .measured_position = true,
+    };
+    const config: ConfigLoader.Config = .{
+        .non_odometry = .{ .kp = @splat(0), .ki = @splat(0), .kd = @splat(0), .center_deadband = 0.05, .target_height = 0.9 },
+        .control = .{
+            .velocity_kp = .{ 0, 0, 0 },
+            .velocity_ki = .{ 0, 10, 0 },
+            .max_velocity = .{ 0.6, 0.6, 0.4 },
+            .integral_limit = 3,
+            .velocity_integral_limit = .{ 40, 40, 0 },
+            .position_gain = .{ 1, 1, 1 },
+        },
+    };
+    // One metre of along-track error asks for max forward speed. With kp = 0 the
+    // whole force is the integrator, which must be allowed past the 3 N shared cap.
+    var force: math.Vector6f = @splat(0);
+    for (0..50) |_| {
+        force = controller.calculate(&nav, .{ .mode = .world, .world_position = .{ 0, 1, 2 }, .heading = 0, .pressure_depth = 2 }, config, 0.02);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 6), force[1], 0.05);
+    try std.testing.expect(@abs(force[2]) < 0.01);
+}
+
+test "submerged weight cancels in world axes while depth error is zero" {
+    var controller: MotionController = .{};
+    var nav: Navigation = .{};
+    nav.snapshot = .{
+        .position = .{ 0, 0, 2 },
+        .orientation = .{ 0, 0, 0, 1 },
+        .velocity_world = @splat(0),
+        .angular_velocity_body = @splat(0),
+        .pressure_depth = 2,
+        .depth_rate = 0,
+        .measured_position = true,
+    };
+    const config: ConfigLoader.Config = .{
+        .non_odometry = .{ .kp = @splat(0), .ki = @splat(0), .kd = @splat(0), .center_deadband = 0.05, .target_height = 0.9 },
+        .control = .{ .submerged_weight = 11.1885 },
+    };
+    const input = controller.calculate(&nav, .{ .mode = .world, .world_position = .{ 0, 0, 2 }, .heading = 0, .pressure_depth = 2 }, config, 0.02);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), input[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), input[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -11.1885), input[2], 1e-4);
+    const stopped = controller.calculate(&nav, .{ .stop = true }, config, 0.02);
+    try std.testing.expectEqual(@as(f32, 0), stopped[2]);
 }
 
 test "five-axis vehicle moves sideways with heading held when pitch is released" {

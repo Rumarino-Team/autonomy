@@ -22,6 +22,11 @@ struct HullPart {
     mjtNum cd[3]{};
     mjtNum cf[3]{};
     mjtNum area = 0;
+    // Row-major. Columns are the part-origin axes in the center-of-mass frame.
+    // Stonefish corrects drag with this basis, not the compound body frame.
+    mjtNum origin_basis[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    // Vertices are in the center-of-mass frame. Otherwise they are in the geom frame.
+    bool com_frame = false;
 };
 
 // Propeller model. Defaults match hydrus_auv.scn. An XML numeric named thruster_spec
@@ -97,6 +102,11 @@ public:
     void reset();
     // pos world, quat wxyz, velocities in the world frame.
     void reset(const mjtNum pos[3], const mjtNum quat[4], const mjtNum lin_vel[3], const mjtNum ang_vel[3]);
+    // Same arguments as reset, but rotors, fluid forces, mocap, and time are kept.
+    void setVehicleState(const mjtNum pos[3], const mjtNum quat[4], const mjtNum lin_vel[3], const mjtNum ang_vel[3]);
+    // FNV-1a over the MuJoCo integration state plus thruster and fluid state. Equal
+    // hashes at a step mean two runs have not diverged.
+    uint64_t stateHash() const;
     void setRandomization(const Randomization& randomization);
     void setThrusters(const float* values, int count);
     void step();

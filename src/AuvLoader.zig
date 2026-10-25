@@ -61,6 +61,11 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
             "auv_deinit",
         ) orelse return error.MissingAuvDeinit,
         .getThrusterGeometry = dynlib.lookup(*const Auv.ThrusterGeometryFunc, "auv_get_thruster_geometry"),
+        .prepareBatch = dynlib.lookup(*const Auv.PrepareBatchFunc, "auv_prepare_batch"),
+        .beginFuzz = dynlib.lookup(*const Auv.BeginFuzzFunc, "auv_begin_fuzz"),
+        .recordStart = dynlib.lookup(*const Auv.RecordStartFunc, "auv_record_start"),
+        .recordEvent = dynlib.lookup(*const Auv.RecordEventFunc, "auv_record_event"),
+        .recordStop = dynlib.lookup(*const Auv.RecordStopFunc, "auv_record_stop"),
     };
 
     if (loader.prev_dynlib) |*prev_dynlib| {

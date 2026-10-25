@@ -289,7 +289,7 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(&install_native.step);
     }
 
-    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo AUV plugin, Stonefish view, batched sim, and hydrus_tune_pid") orelse false;
+    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo AUV plugin, batched sim, and hydrus_tune_pid") orelse false;
     const mujoco_prefix = b.option([]const u8, "MUJOCO_PREFIX", "MuJoCo install prefix or source tree");
     if (mujoco) {
         const prefix = mujoco_prefix orelse @panic("-Dmujoco requires -DMUJOCO_PREFIX");
@@ -297,7 +297,6 @@ pub fn build(b: *std.Build) !void {
 
         const cmake_dynlib_targets = [_][]const u8{
             "auv_mujoco",
-            "auv_mujoco_view",
             "auv_mujoco_rl",
         };
         const cmake_exe_targets = [_][]const u8{

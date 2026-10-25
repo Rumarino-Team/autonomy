@@ -7,6 +7,7 @@ auvs/stonefish_sim/blender_stonefish_addon/__pycache__/
 rl/runs/
 __pycache__/
 MUJOCO_LOG.TXT
+hydrus_takes/
 .deps/
 vendor/
 build-rtx/

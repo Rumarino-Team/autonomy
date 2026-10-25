@@ -66,14 +66,20 @@ pub fn teleopMission(ctx: *MissionContext) !void {
 }
 
 pub fn mission(ctx: *MissionContext) !void {
+    ctx.recordEvent("search gate");
     try ctx.startSearch(.{ .target_class = .gate, .require_position = true, .duration = 60 });
     const gate_object = try ctx.yieldUntilFirstObjectWithCls(.gate);
+    ctx.recordEvent("go through gate");
     try goThrough(ctx, gate_object);
+    ctx.recordEvent("pitch turn");
     try fullTurn(ctx, .pitch);
+    ctx.recordEvent("roll turn");
     try fullTurn(ctx, .roll);
 
+    ctx.recordEvent("search marker");
     try ctx.startSearch(.{ .duration = 60 });
     const cube_or_rect_object = try ctx.yieldUntilFirstObjectWithAnyCls(&.{ .cube, .rect });
+    ctx.recordEvent("go around marker");
     try goAround(ctx, cube_or_rect_object, .{
         .facing = .{ .look_at_object = cube_or_rect_object.id },
         .attitude_policy = .allow_pitch,
