@@ -65,3 +65,65 @@ set_target_properties(auv_stonefish_sim PROPERTIES
 install(
   TARGETS auv_stonefish_sim
 )
+
+set(MUJOCO_PREFIX "" CACHE PATH "MuJoCo install prefix or source tree")
+
+if(MUJOCO_PREFIX)
+  if(EXISTS "${MUJOCO_PREFIX}/lib/libmujoco.so")
+    set(MUJOCO_LIB_DIR "${MUJOCO_PREFIX}/lib")
+  elseif(EXISTS "${MUJOCO_PREFIX}/build/lib/libmujoco.so")
+    set(MUJOCO_LIB_DIR "${MUJOCO_PREFIX}/build/lib")
+  else()
+    message(FATAL_ERROR
+      "libmujoco.so not found under ${MUJOCO_PREFIX}/lib or ${MUJOCO_PREFIX}/build/lib")
+  endif()
+
+  set(MUJOCO_INCLUDE_DIR "${MUJOCO_PREFIX}/include")
+  enable_language(C)
+
+  add_library(auv_mujoco SHARED
+    auvs/hydrus_mujoco/auv.cpp
+    auvs/hydrus_mujoco/auv_core.cpp
+    auvs/hydrus_mujoco/auv_batch.cpp
+    auvs/hydrus_mujoco/auv_camera.cpp
+    auvs/hydrus_mujoco/blender_link.cpp
+    auvs/hydrus_mujoco/recorder.cpp
+    auvs/hydrus_mujoco/hydrus_drag_mesh_data.c
+  )
+  target_include_directories(auv_mujoco PRIVATE
+    "${CMAKE_SOURCE_DIR}/include"
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${MUJOCO_INCLUDE_DIR}"
+  )
+  target_link_directories(auv_mujoco PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(auv_mujoco PRIVATE mujoco pthread)
+  set_target_properties(auv_mujoco PROPERTIES BUILD_RPATH "${MUJOCO_LIB_DIR}")
+
+  add_library(auv_mujoco_rl SHARED
+    auvs/hydrus_mujoco/auv_batch.cpp
+    auvs/hydrus_mujoco/auv_camera.cpp
+    auvs/hydrus_mujoco/auv_core.cpp
+    auvs/hydrus_mujoco/hydrus_drag_mesh_data.c
+  )
+  target_include_directories(auv_mujoco_rl PRIVATE
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${MUJOCO_INCLUDE_DIR}"
+  )
+  target_link_directories(auv_mujoco_rl PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(auv_mujoco_rl PRIVATE mujoco pthread)
+  set_target_properties(auv_mujoco_rl PROPERTIES BUILD_RPATH "${MUJOCO_LIB_DIR}")
+
+  add_executable(hydrus_tune_pid auvs/hydrus_mujoco/tune_pid.cpp)
+  target_include_directories(hydrus_tune_pid PRIVATE
+    "${CMAKE_SOURCE_DIR}/auvs/hydrus_mujoco"
+    "${MUJOCO_INCLUDE_DIR}"
+    "${CMAKE_SOURCE_DIR}/vendor/nlohmann_json/single_include"
+  )
+  target_link_directories(hydrus_tune_pid PRIVATE "${MUJOCO_LIB_DIR}")
+  target_link_libraries(hydrus_tune_pid PRIVATE auv_mujoco_rl)
+  set_target_properties(hydrus_tune_pid PROPERTIES
+    BUILD_RPATH "${MUJOCO_LIB_DIR};${CMAKE_BINARY_DIR}"
+    INSTALL_RPATH "$ORIGIN/../lib"
+  )
+  install(TARGETS hydrus_tune_pid)
+endif()

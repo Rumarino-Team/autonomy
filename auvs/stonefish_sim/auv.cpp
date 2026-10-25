@@ -1,4 +1,5 @@
 #include <cmath>
+uint32_t auv_abi_version(void);
 #include <cstdio>
 #include <math.h>
 
@@ -630,3 +631,5 @@ void auv_deinit(void)
     delete g_simulation_context;
     g_simulation_context = nullptr;
 }
+
+uint32_t auv_abi_version(void) { return AUV_ABI_VERSION; }

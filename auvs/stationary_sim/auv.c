@@ -2,6 +2,9 @@
 #include <assert.h>
 #include <stdint.h>
 #include <time.h>
+#include <string.h>
+
+uint32_t auv_abi_version(void) { return AUV_ABI_VERSION; }
 
 #define THRUSTOR_VALUES_COUNT 8
 #define FRAME_INTERVAL_NS (1000000000ULL / 60)
@@ -48,6 +51,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
   if (next_frame <= timestamp)
     next_frame = timestamp + FRAME_INTERVAL_NS;
 
+  memset(frame, 0, sizeof(*frame));
   frame->objects_len = 0;
   frame->objects2d_len = 0;
   frame->camera_pose = (MathPose){
@@ -55,6 +59,14 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
       .quat = {0, 0, 0, 1},
   };
   frame->timestamp = timestamp;
+  frame->tracking_ok = true;
+  frame->position_timestamp = timestamp;
+  frame->imu_quat.buf[3] = 1;
+  frame->imu_ok = true;
+  frame->gyro_ok = true;
+  frame->imu_timestamp = timestamp;
+  frame->pressure_depth_ok = true;
+  frame->pressure_timestamp = timestamp;
 }
 
 void auv_set_thrustor_values(

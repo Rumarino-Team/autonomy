@@ -258,5 +258,44 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(&install_stonefish_sim.step);
     }
 
+    const mujoco = b.option(bool, "mujoco", "Build the MuJoCo AUV plugin, batched sim, and hydrus_tune_pid") orelse false;
+    const mujoco_prefix = b.option([]const u8, "MUJOCO_PREFIX", "MuJoCo install prefix or source tree");
+    if (mujoco) {
+        const prefix = mujoco_prefix orelse @panic("-Dmujoco requires -DMUJOCO_PREFIX");
+        cmake_configure.addArg(b.fmt("-DMUJOCO_PREFIX={s}", .{prefix}));
+
+        const cmake_dynlib_targets = [_][]const u8{
+            "auv_mujoco",
+            "auv_mujoco_rl",
+        };
+        const cmake_exe_targets = [_][]const u8{
+            "hydrus_tune_pid",
+        };
+        for (cmake_dynlib_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
+        for (cmake_exe_targets) |cmake_target| {
+            cmake_build.addArg(cmake_target);
+        }
+
+        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/hydrus_mujoco"));
+
+        for (cmake_dynlib_targets) |cmake_target| {
+            const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
+            const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
+            const install_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
+            install_sim.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_sim.step);
+        }
+        for (cmake_exe_targets) |cmake_target| {
+            const cmake_exe_path = b.path(b.fmt("build/{s}", .{cmake_target}));
+            const install_exe = b.addInstallFileWithDir(cmake_exe_path, .bin, cmake_target);
+            install_exe.step.dependOn(&cmake_build.step);
+            b.getInstallStep().dependOn(&install_exe.step);
+        }
+    } else {
+        cmake_configure.addArg("-DMUJOCO_PREFIX=");
+    }
+
     cmake_build.step.dependOn(&cmake_configure.step);
 }

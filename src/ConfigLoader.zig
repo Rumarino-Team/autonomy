@@ -11,7 +11,7 @@ config_path: []const u8,
 use_ping: bool,
 ping: std.heap.FixedBufferAllocator,
 pong: std.heap.FixedBufferAllocator,
-reader_buf: [4098]u8,
+reader_buf: [16384]u8,
 
 pub const NonOdometryPid = struct {
     kp: math.Vector6f,
@@ -29,7 +29,7 @@ pub const OdometryPid = struct {
 
 pub const Config = struct {
     tam: []math.Vector6f,
-    odometry: OdometryPid,
+    odometry: OdometryPid = .{ .kp = @splat(0), .ki = @splat(0), .kd = @splat(0) },
     non_odometry: NonOdometryPid,
 };
 
@@ -37,8 +37,8 @@ pub fn init(arena: std.mem.Allocator, config_path: []const u8) !MissionLoader {
     return .{
         .config_path = config_path,
         .use_ping = false,
-        .ping = .init(try arena.alloc(u8, 4098)),
-        .pong = .init(try arena.alloc(u8, 4098)),
+        .ping = .init(try arena.alloc(u8, 65536)),
+        .pong = .init(try arena.alloc(u8, 65536)),
         .reader_buf = undefined,
     };
 }
@@ -49,7 +49,8 @@ pub fn load(loader: *MissionLoader, io: Io) !Config {
     var file_reader = file.reader(io, &loader.reader_buf);
     const file_contents = try file_reader.interface.allocRemaining(fba.allocator(), .unlimited);
 
-    const config = std.json.parseFromSliceLeaky(Config, fba.allocator(), file_contents, .{});
+    const config = try std.json.parseFromSliceLeaky(Config, fba.allocator(), file_contents, .{ .ignore_unknown_fields = true });
+    if (config.tam.len == 0 or config.tam.len > math.max_thrusters) return error.InvalidTam;
 
     loader.use_ping = !loader.use_ping;
     fba.reset();

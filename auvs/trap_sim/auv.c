@@ -1,5 +1,7 @@
 #include "../../include/auv.h"
 
+uint32_t auv_abi_version(void) { return AUV_ABI_VERSION; }
+
 void auv_init(void) {
   __builtin_trap();
 }

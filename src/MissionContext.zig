@@ -53,6 +53,8 @@ config: ConfigLoader.Config,
 config_loader: ConfigLoader,
 config_watcher: FileWatcher,
 
+batch: bool = false,
+
 pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     var config_loader: ConfigLoader = try .init(arena, args.live_config_path);
     const config = config_loader.load(io) catch |err| {
@@ -107,8 +109,19 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         .config_loader = config_loader,
         .config_watcher = try .init(arena, args.live_config_path),
 
+        .batch = args.mission_id == .batch or args.mission_id == .fuzz or args.mission_id == .record,
         .io = io,
     };
+}
+
+pub fn stopThrusters(ctx: *MissionContext) void {
+    const len: u8 = @intCast(@max(ctx.config.tam.len, 1));
+    var zero: [math.max_thrusters]f32 = @splat(0);
+    ctx.auv.setThrustorValues(&zero, len);
+}
+
+pub fn recordEvent(ctx: *MissionContext, text: [:0]const u8) void {
+    if (ctx.auv.recordEvent) |record| record(text.ptr);
 }
 
 /// Invalidates `seen_objects`
@@ -121,6 +134,11 @@ pub fn reset(ctx: *MissionContext) void {
 
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
+    switch (ctx.frame.@"error") {
+        .none, .scenario_restart, .seed_goal => {},
+        .surfaced => return error.Surfaced,
+        .non_finite => return error.NonFinite,
+    }
     const start = Io.Clock.Timestamp.now(ctx.io, .awake);
 
     // std.log.debug("updating seen_objects...", .{});
@@ -158,7 +176,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     // std.log.debug("setting thruster_values with pid controller...", .{});
     ControllerStep(ctx);
 
-    if (ctx.config_watcher.changed() catch |err| blk: {
+    if (!ctx.batch and ctx.config_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
     }) {
@@ -175,7 +193,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }
     }
 
-    if (ctx.auv_watcher.changed() catch |err| blk: {
+    if (!ctx.batch and ctx.auv_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
     }) {
