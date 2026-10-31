@@ -28,7 +28,8 @@ struct Object3d {
 struct Telemetry {
   float pos[3];
   float quat[4];
-  bool tracking;
+  bool position_ok[3];
+  bool attitude_ok[3];
   bool depth_ok;
   float depth;
   int objects;
@@ -83,7 +84,7 @@ static bool parse_telemetry(const unsigned char *bytes, int size, Telemetry *out
   Cursor c{bytes, bytes + size};
   const unsigned char *magic;
   unsigned char version;
-  if (!take(&c, 4, &magic) || std::memcmp(magic, "AUV1", 4) != 0 || !read_u8(&c, &version) || version != 1)
+  if (!take(&c, 4, &magic) || std::memcmp(magic, "AUV1", 4) != 0 || !read_u8(&c, &version) || version != 2)
     return false;
 
   const unsigned char *timestamp;
@@ -94,10 +95,19 @@ static bool parse_telemetry(const unsigned char *bytes, int size, Telemetry *out
     if (!read_f32(&c, &out->quat[i])) return false;
   }
 
-  unsigned char tracking, depth_ok, nobj, nbox, nthr, nstep;
-  if (!read_u8(&c, &tracking) || !read_u8(&c, &depth_ok) || !read_f32(&c, &out->depth)) return false;
+  unsigned char depth_ok, nobj, nbox, nthr, nstep;
+  for (int i = 0; i < 3; i++) {
+    unsigned char axis;
+    if (!read_u8(&c, &axis)) return false;
+    out->position_ok[i] = axis != 0;
+  }
+  for (int i = 0; i < 3; i++) {
+    unsigned char axis;
+    if (!read_u8(&c, &axis)) return false;
+    out->attitude_ok[i] = axis != 0;
+  }
+  if (!read_u8(&c, &depth_ok) || !read_f32(&c, &out->depth)) return false;
   if (!read_u8(&c, &nobj)) return false;
-  out->tracking = tracking != 0;
   out->depth_ok = depth_ok != 0;
   out->objects = nobj;
 
@@ -430,19 +440,24 @@ int main(int argc, char **argv) {
     DrawText(TextFormat("quat  %.2f %.2f %.2f %.2f", tel.quat[0], tel.quat[1], tel.quat[2], tel.quat[3]), x, 120, 20,
              RAYWHITE);
     DrawText(TextFormat("objs  %d", tel.objects), x, 150, 20, RAYWHITE);
-    DrawText(tel.tracking ? "tracking  ok" : "tracking  lost", x, 180, 20, tel.tracking ? GREEN : ORANGE);
-    DrawText(tel.depth_ok ? TextFormat("depth %.2f m", tel.depth) : "depth -", x, 210, 20, RAYWHITE);
-    DrawText(TextFormat("move  %.2f %.2f %.2f", translation[0], translation[1], translation[2]), x, 240, 20,
+    DrawText(TextFormat("pos xyz  %s %s %s", tel.position_ok[0] ? "ok" : "--", tel.position_ok[1] ? "ok" : "--",
+                        tel.position_ok[2] ? "ok" : "--"),
+             x, 180, 20, (tel.position_ok[0] && tel.position_ok[1] && tel.position_ok[2]) ? GREEN : ORANGE);
+    DrawText(TextFormat("att xyz  %s %s %s", tel.attitude_ok[0] ? "ok" : "--", tel.attitude_ok[1] ? "ok" : "--",
+                        tel.attitude_ok[2] ? "ok" : "--"),
+             x, 210, 20, (tel.attitude_ok[0] && tel.attitude_ok[1] && tel.attitude_ok[2]) ? GREEN : ORANGE);
+    DrawText(tel.depth_ok ? TextFormat("depth %.2f m", tel.depth) : "depth -", x, 240, 20, RAYWHITE);
+    DrawText(TextFormat("move  %.2f %.2f %.2f", translation[0], translation[1], translation[2]), x, 270, 20,
              teleop_fd >= 0 ? RAYWHITE : RED);
-    DrawText(TextFormat("cmd   %.2f %.2f %.2f %.2f", orientation.x, orientation.y, orientation.z, orientation.w), x, 270,
+    DrawText(TextFormat("cmd   %.2f %.2f %.2f %.2f", orientation.x, orientation.y, orientation.z, orientation.w), x, 300,
              20, RAYWHITE);
-    DrawText(TextFormat("teleop %d  W/S surge  A/D sway  R/F heave  I/K roll", teleop_port), x, 300, 16, GRAY);
-    DrawText("arrows yaw and pitch", x, 318, 16, GRAY);
+    DrawText(TextFormat("teleop %d  W/S surge  A/D sway  R/F heave  I/K roll", teleop_port), x, 330, 16, GRAY);
+    DrawText("arrows yaw and pitch", x, 348, 16, GRAY);
     DrawTextureRec(scene.texture, {0, 0, 900, -470}, {view3d.x, view3d.y}, WHITE);
     DrawRectangleLinesEx(view3d, 1, GRAY);
 
     for (int i = 0; i < tel.thr_len; i++) {
-      const int y = 350 + i * 30;
+      const int y = 380 + i * 30;
       const int w = static_cast<int>(tel.thr[i] * 100);
       DrawText(TextFormat("t%d %+.2f", i, tel.thr[i]), x, y, 20, RAYWHITE);
       DrawRectangle(w < 0 ? x + 240 + w : x + 240, y, w < 0 ? -w : w, 20, SKYBLUE);

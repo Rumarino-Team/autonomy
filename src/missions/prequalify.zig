@@ -90,11 +90,11 @@ pub fn robosubMission(ctx: *MissionContext) !void {
     try goAround(ctx, marker);
 }
 
-/// Surge, sway, and yaw from the 2D box with `id` until tracking returns.
-fn followBoxUntilTracking(ctx: *MissionContext, id: u32) !void {
+/// Surge, sway, and yaw from the 2D box with `id` until horizontal position is valid again.
+pub fn followBoxUntilTracking(ctx: *MissionContext, id: u32) !void {
     ctx.resetOdometryPid();
     ctx.motion = .{ .look_forward_heading = .{ .id = id } };
-    while (!ctx.frame.tracking_ok) {
+    while (!ctx.frame.position_ok.x or !ctx.frame.position_ok.y) {
         try ctx.yieldUntilNextFrameAndUpdate();
     }
     ctx.resetOdometryPid();
@@ -119,12 +119,12 @@ fn goThrough(ctx: *MissionContext, object: *const Auv.Object) !void {
     std.log.info("before sub_pos {any}", .{sub_pos_2d});
     std.log.info("before {any}", .{before});
 
-    try yieldGoal(ctx, object.id, before);
+    try yieldGoal(ctx, before);
 
     const overshoot_2d = object_pos_2d + direction_2d * @as(math.Vector2f, @splat(OVERSHOOT));
     const overshoot: math.Vector3f = .{ overshoot_2d[0], overshoot_2d[1], object_pos[2] };
 
-    try yieldGoal(ctx, object.id, overshoot);
+    try yieldGoal(ctx, overshoot);
 }
 
 fn goAround(ctx: *MissionContext, object: *const Auv.Object) !void {
@@ -169,21 +169,12 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object) !void {
 
     for (0..corner_pluss.len) |i| {
         const corner = corner_pluss[(starting_i + i) % corner_pluss.len];
-        try yieldGoal(ctx, object.id, corner);
+        try yieldGoal(ctx, corner);
     }
-    try yieldGoal(ctx, object.id, initial_sub_pos);
+    try yieldGoal(ctx, initial_sub_pos);
 }
 
-/// Drive to `target_pos` while looking at that goal. On `TrackingLost`, follow the 2D box, then resume.
-fn yieldGoal(ctx: *MissionContext, id: u32, target_pos: math.Vector3f) !void {
-    while (true) {
-        ctx.yieldUntilReachGoal(target_pos, target_pos) catch |err| switch (err) {
-            error.TrackingLost => {
-                try followBoxUntilTracking(ctx, id);
-                continue;
-            },
-            else => |other| return other,
-        };
-        return;
-    }
+/// Drive to `target_pos` while looking at that goal.
+fn yieldGoal(ctx: *MissionContext, target_pos: math.Vector3f) !void {
+    try ctx.yieldUntilReachGoal(target_pos, target_pos);
 }

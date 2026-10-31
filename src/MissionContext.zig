@@ -44,7 +44,7 @@ target_orientation: ?math.Quaternionf = null,
 motion: Motion = .{ .hold = .{} },
 /// Numeric command filled from the current frame. Only the yield writes this.
 command: Command = .{},
-/// Odometry PID memory in TAM order. Lanes 0..2 are position, lanes 3..5 are attitude.
+/// Odometry PID memory in TAM order. Lanes 0..2 are body translation, lanes 3..5 are attitude.
 pid_sum_err: math.Vector6f = @splat(0),
 pid_prev_err: math.Vector6f = @splat(0),
 /// Slew-limited tilt that swings a controllable force onto a missing translation.
@@ -53,6 +53,8 @@ tilt_correction: math.Vector3f = .{ 0, 0, 0 },
 held_q: ?math.Quaternionf = null,
 /// Last explicit target orientation. A mission-look change clears the attitude lanes of the PID.
 explicit_q: ?math.Quaternionf = null,
+/// Previous frame's position validity. A falling edge clears the translation integrators.
+position_axes: ?Auv.AxisOk = null,
 pid_prev_timestamp_ns: ?u64,
 
 step: []const u8,
@@ -151,6 +153,7 @@ pub fn reset(ctx: *MissionContext) void {
     ctx.command = .{};
     ctx.pid_prev_timestamp_ns = null;
     ctx.hold_position = null;
+    ctx.position_axes = null;
 }
 
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
@@ -230,7 +233,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         ctx.auv.init();
     }
 
-    const tracking_lost = ctx.applyMotion();
+    ctx.applyMotion();
     ctx.controlStep();
 
     const elapsed = start.untilNow(ctx.io);
@@ -238,16 +241,16 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
     }
     ctx.log_counter +%= 1;
-    if (tracking_lost) return error.TrackingLost;
 }
 
 // Field order is the little-endian packet.
 const TelemetryPacket = struct {
     magic: [4]u8 = "AUV1".*,
-    version: u8 = 1,
+    version: u8 = 2,
     timestamp: u64,
     camera_pose: math.Pose,
-    tracking_ok: bool,
+    position_ok: Auv.AxisOk,
+    attitude_ok: Auv.AxisOk,
     depth_ok: bool,
     depth: f32,
     objects: []const Auv.Object,
@@ -265,7 +268,8 @@ fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
     SerialBinaryWriter.write(&w, TelemetryPacket{
         .timestamp = ctx.frame.timestamp,
         .camera_pose = ctx.frame.camera_pose,
-        .tracking_ok = ctx.frame.tracking_ok,
+        .position_ok = ctx.frame.position_ok,
+        .attitude_ok = ctx.frame.attitude_ok,
         .depth_ok = ctx.frame.pressure_depth_ok,
         .depth = ctx.frame.pressure_depth,
         .objects = ctx.seen_objects[0..nobj],
@@ -319,7 +323,7 @@ const Command = struct {
     translation: math.Vector3f = .{ 0, 0, 0 },
     /// Target attitude. Null holds orientation.// TODO: WHYYY
     target_orientation: ?math.Quaternionf = null,
-    /// World-frame position error toward a target. Force is rotated into body at thruster mix.
+    /// `translation` is a world position error. The PID rotates it into body first.
     transport: bool = false,
     /// `translation` is already thrust. Teleop only.
     direct_thrust: bool = false,
@@ -352,18 +356,12 @@ fn clearTranslationIntegral(ctx: *MissionContext) void {
     ctx.pid_sum_err[2] = 0;
 }
 
-/// Fill `command` from `motion` and this frame. Position with tracking down holds and reports lost.
-fn applyMotion(ctx: *MissionContext) bool {
+/// Fill `command` from `motion` and this frame.
+fn applyMotion(ctx: *MissionContext) void {
     switch (ctx.motion) {
         .hold => |hold| commandHold(ctx, hold.orientation),
         .direct_thrust => |thrust| commandDirectThrust(ctx, thrust.translation, thrust.orientation),
-        .position => {
-            if (!ctx.frame.tracking_ok) {
-                commandHold(ctx, null);
-                return true;
-            }
-            commandPosition(ctx);
-        },
+        .position => commandPosition(ctx),
         .look_forward_heading => |heading| {
             if (object2dOnFrame(ctx, heading.id)) |box| {
                 commandLookForwardAndHeading(ctx, box, .{
@@ -377,7 +375,16 @@ fn applyMotion(ctx: *MissionContext) bool {
             }
         },
     }
-    return false;
+}
+
+/// A position axis that just became invalid must not keep pushing through the old body integral.
+fn notePositionAxes(ctx: *MissionContext) void {
+    const ok = ctx.frame.position_ok;
+    if (ctx.position_axes) |previous| {
+        if ((previous.x and !ok.x) or (previous.y and !ok.y) or (previous.z and !ok.z))
+            clearTranslationIntegral(ctx);
+    }
+    ctx.position_axes = ok;
 }
 
 /// Point the camera at `target` from the current pose, clamped by `rotation_limit`.
@@ -486,8 +493,9 @@ fn resolveLook(ctx: *MissionContext, current: math.Quaternionf, look: ?math.Quat
     return ctx.held_q.?;
 }
 
-/// Track `ctx.command` and send the resulting thruster values. No `tracking_ok` branch.
+/// Track `ctx.command` and send the resulting thruster values. Invalid pose axes contribute no error.
 fn controlStep(ctx: *MissionContext) void {
+    ctx.notePositionAxes();
     const timestamp_ns = ctx.frame.timestamp;
     const dt: ?f32 = if (ctx.pid_prev_timestamp_ns) |previous| blk: {
         const elapsed_ns = timestamp_ns - previous;
@@ -498,9 +506,6 @@ fn controlStep(ctx: *MissionContext) void {
         break :blk null;
     };
 
-    // camera_pose must already be in the TAM frame. If there is a
-    // camera-to-vehicle extrinsic rotation, convert upstream first.
-    // Pose, dt, and TAM are assumed valid. Bad values are a frame or config problem.
     const thrust_direction = bc.ThrustDirections.fromTamLinearForces(ctx.config.tam) catch unreachable;
     const current = ctx.frame.camera_pose.quat;
     const command = ctx.command;
@@ -515,29 +520,27 @@ fn controlStep(ctx: *MissionContext) void {
         break :blk coverage.force;
     } else blk: {
         const body_q = bc.normalizedQuat(current) catch unreachable;
+        if (command.transport) {
+            const ok = ctx.frame.position_ok;
+            if (!ok.x) ctx.command.translation[0] = 0;
+            if (!ok.y) ctx.command.translation[1] = 0;
+            if (!ok.z) ctx.command.translation[2] = 0;
+        }
         const error_body = if (command.transport)
-            math.quaternionRotate(math.quaternionConjugate(body_q), command.translation)
+            math.quaternionRotate(math.quaternionConjugate(body_q), ctx.command.translation)
         else
-            command.translation;
+            ctx.command.translation;
         const available = thrust_direction.alongThrust(error_body);
-        var translation: math.Vector3f = .{ 0, 0, 0 };
+        var force_body: math.Vector3f = .{ 0, 0, 0 };
         inline for (0..3) |i| {
             var rate: f32 = 0;
             if (dt) |t| {
-                if (command.transport) {
-                    ctx.pid_sum_err[i] += command.translation[i] * t;
-                } else {
-                    ctx.pid_sum_err[i] += available[i] * t;
-                }
-                rate = (command.translation[i] - ctx.pid_prev_err[i]) / t;
+                ctx.pid_sum_err[i] += available[i] * t;
+                rate = (error_body[i] - ctx.pid_prev_err[i]) / t;
             }
-            translation[i] = odom.kp[i] * command.translation[i] + odom.ki[i] * ctx.pid_sum_err[i] + odom.kd[i] * rate;
-            ctx.pid_prev_err[i] = command.translation[i];
+            force_body[i] = odom.kp[i] * error_body[i] + odom.ki[i] * ctx.pid_sum_err[i] + odom.kd[i] * rate;
+            ctx.pid_prev_err[i] = error_body[i];
         }
-        var force_body = if (command.transport)
-            math.quaternionRotate(math.quaternionConjugate(body_q), translation)
-        else
-            translation;
         const coverage = bc.coverForce(thrust_direction, moments, force_body, ctx.config.rotation_limit, ctx.config.camera_forward);
         if (coverage.tilt) |tilt| desired_tilt = tilt.axis * @as(math.Vector3f, @splat(tilt.angle));
         force_body = coverage.force;
@@ -551,10 +554,13 @@ fn controlStep(ctx: *MissionContext) void {
         const tilt_q = bc.forwardRotation(ctx.tilt_correction, tilt_len) catch unreachable;
         target_q = bc.normalizedQuat(math.quaternionMul(target_q, tilt_q)) catch unreachable;
     }
-    const attitude_error = bc.attitudeError(current, target_q) catch unreachable;
+    var attitude_error = bc.attitudeError(current, target_q) catch unreachable;
+    const attitude_axis = [3]bool{ ctx.frame.attitude_ok.x, ctx.frame.attitude_ok.y, ctx.frame.attitude_ok.z };
+    inline for (0..3) |i| {
+        if (!attitude_axis[i]) attitude_error[i] = 0;
+    }
     const translation_body: math.Vector3f = blk: {
         var force = translation_command;
-        // Coverage output is body force. World position/hold PID rotates into body before coverForce.
         if (command.direct_thrust) {
             if (command.target_orientation) |q| {
                 const body_q = bc.normalizedQuat(current) catch unreachable;
@@ -575,13 +581,18 @@ fn controlStep(ctx: *MissionContext) void {
     var rotation: math.Vector3f = .{ 0, 0, 0 };
     inline for (0..3) |i| {
         const lane = i + 3;
-        var rate: f32 = 0;
-        if (dt) |t| {
-            rate = (attitude_error[i] - ctx.pid_prev_err[lane]) / t;
-            ctx.pid_sum_err[lane] += attitude_error[i] * t;
+        if (attitude_axis[i]) {
+            var rate: f32 = 0;
+            if (dt) |t| {
+                rate = (attitude_error[i] - ctx.pid_prev_err[lane]) / t;
+                ctx.pid_sum_err[lane] += attitude_error[i] * t;
+            }
+            ctx.pid_prev_err[lane] = attitude_error[i];
+            rotation[i] = odom.kp[lane] * attitude_error[i] + odom.ki[lane] * ctx.pid_sum_err[lane] + odom.kd[lane] * rate;
+        } else {
+            ctx.pid_sum_err[lane] = 0;
+            ctx.pid_prev_err[lane] = 0;
         }
-        ctx.pid_prev_err[lane] = attitude_error[i];
-        rotation[i] = odom.kp[lane] * attitude_error[i] + odom.ki[lane] * ctx.pid_sum_err[lane] + odom.kd[lane] * rate;
     }
     ctx.held_q = target_q;
     const input: math.Vector6f = .{
@@ -602,6 +613,7 @@ fn controlStep(ctx: *MissionContext) void {
         std.log.debug("dt = {d:6.2} ms", .{(dt orelse 0) * 1000});
         std.log.debug("timestamp_ns = {d}", .{timestamp_ns});
         math.debug6f("pose", math.poseTo6f(ctx.frame.camera_pose));
+        std.log.debug("position ok: {any} attitude ok: {any}", .{ ctx.frame.position_ok, ctx.frame.attitude_ok });
         if (command.direct_thrust) {
             math.debug3f("translation direction", command.translation);
         } else if (ctx.hold_position) |held| {
@@ -679,11 +691,14 @@ pub fn yieldUntilReachGoal(ctx: *MissionContext, target_pos: math.Vector3f, look
     while (true) {
         try ctx.setLookAtTarget(look_at);
         try ctx.yieldUntilNextFrameAndUpdate();
-        const camera_pos = ctx.frame.camera_pose.pos;
-        const delta = target_pos - camera_pos;
-        const dist = @sqrt(@reduce(.Add, delta * delta));
-        if (dist <= ctx.goal_dist_threshold) {
-            break;
+        const ok = ctx.frame.position_ok;
+        if (ok.x and ok.y and ok.z) {
+            const camera_pos = ctx.frame.camera_pose.pos;
+            const delta = target_pos - camera_pos;
+            const dist = @sqrt(@reduce(.Add, delta * delta));
+            if (dist <= ctx.goal_dist_threshold) {
+                break;
+            }
         }
     }
 }
