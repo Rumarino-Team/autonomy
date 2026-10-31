@@ -119,12 +119,12 @@ fn goThrough(ctx: *MissionContext, object: *const Auv.Object) !void {
     std.log.info("before sub_pos {any}", .{sub_pos_2d});
     std.log.info("before {any}", .{before});
 
-    try yieldGoal(ctx, before);
+    try ctx.yieldUntilReachGoal(before, before);
 
     const overshoot_2d = object_pos_2d + direction_2d * @as(math.Vector2f, @splat(OVERSHOOT));
     const overshoot: math.Vector3f = .{ overshoot_2d[0], overshoot_2d[1], object_pos[2] };
 
-    try yieldGoal(ctx, overshoot);
+    try ctx.yieldUntilReachGoal(overshoot, overshoot);
 }
 
 fn goAround(ctx: *MissionContext, object: *const Auv.Object) !void {
@@ -169,12 +169,7 @@ fn goAround(ctx: *MissionContext, object: *const Auv.Object) !void {
 
     for (0..corner_pluss.len) |i| {
         const corner = corner_pluss[(starting_i + i) % corner_pluss.len];
-        try yieldGoal(ctx, corner);
+        try ctx.yieldUntilReachGoal(corner, corner);
     }
-    try yieldGoal(ctx, initial_sub_pos);
-}
-
-/// Drive to `target_pos` while looking at that goal.
-fn yieldGoal(ctx: *MissionContext, target_pos: math.Vector3f) !void {
-    try ctx.yieldUntilReachGoal(target_pos, target_pos);
+    try ctx.yieldUntilReachGoal(initial_sub_pos, initial_sub_pos);
 }
