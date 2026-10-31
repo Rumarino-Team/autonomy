@@ -191,9 +191,50 @@ static Color object_color(unsigned char cls) {
   return ColorFromHSV(static_cast<float>((cls * 47) % 360), 0.75f, 0.95f);
 }
 
-// Six little-endian floats: x, y, z, roll, pitch, yaw. Same packet as teleop_sender.
-static void encode_goal(const float goal[6], unsigned char out[24]) {
-  for (int i = 0; i < 6; i++) {
+struct Quat {
+  float x;
+  float y;
+  float z;
+  float w;
+};
+
+static Quat quat_mul(Quat a, Quat b) {
+  return {
+      a.w * b.x + b.w * a.x + (a.y * b.z - a.z * b.y),
+      a.w * b.y + b.w * a.y + (a.z * b.x - a.x * b.z),
+      a.w * b.z + b.w * a.z + (a.x * b.y - a.y * b.x),
+      a.w * b.w - (a.x * b.x + a.y * b.y + a.z * b.z),
+  };
+}
+
+static Quat axis_angle(float ax, float ay, float az, float angle) {
+  const float half = angle * 0.5f;
+  const float s = std::sin(half);
+  return {ax * s, ay * s, az * s, std::cos(half)};
+}
+
+static void normalize_quat(Quat *q) {
+  const float n = std::sqrt(q->x * q->x + q->y * q->y + q->z * q->z + q->w * q->w);
+  if (n > 1e-6f) {
+    q->x /= n;
+    q->y /= n;
+    q->z /= n;
+    q->w /= n;
+  }
+}
+
+static void normalize3(float v[3]) {
+  const float n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (n > 1e-6f) {
+    v[0] /= n;
+    v[1] /= n;
+    v[2] /= n;
+  }
+}
+
+// Seven little-endian floats: body translation xyz, world orientation quaternion xyzw.
+static void encode_goal(const float goal[7], unsigned char out[28]) {
+  for (int i = 0; i < 7; i++) {
     std::uint32_t bits;
     std::memcpy(&bits, &goal[i], sizeof(bits));
     out[i * 4 + 0] = static_cast<unsigned char>(bits);
@@ -216,7 +257,7 @@ int main(int argc, char **argv) {
   if (teleop_fd < 0)
     std::fprintf(stderr, "can't send teleop to 127.0.0.1:%d\n", teleop_port);
   else
-    std::fprintf(stderr, "teleop goal -> 127.0.0.1:%d\n", teleop_port);
+    std::fprintf(stderr, "teleop command -> 127.0.0.1:%d\n", teleop_port);
 
   InitWindow(1280, 1000, "viewer");
   SetTargetFPS(60);
@@ -238,7 +279,8 @@ int main(int argc, char **argv) {
 
   static unsigned char packet[64 * 1024];
   Telemetry tel{};
-  float goal[6] = {0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f};
+  float translation[3] = {0.0f, 0.0f, 0.0f};
+  Quat orientation{0.f, 0.f, 0.f, 1.f};
   double last_packet = -1;
   double last_frame = -1;
   double last_video_try = -10;
@@ -274,24 +316,32 @@ int main(int argc, char **argv) {
 
     if (teleop_fd >= 0 && GetTime() - last_teleop >= kTeleopPeriod) {
       last_teleop = GetTime();
-      // Hold keys in this window. Each tick moves the absolute goal by 0.05:
-      // W/S = +X/-X, D/A = +Y/-Y, R/F = +Z/-Z,
-      // E/Q = +roll/-roll, Up/Down = +pitch/-pitch, Right/Left = +yaw/-yaw.
-      if (IsKeyDown(KEY_W)) goal[0] += kTeleopStep;
-      if (IsKeyDown(KEY_S)) goal[0] -= kTeleopStep;
-      if (IsKeyDown(KEY_D)) goal[1] += kTeleopStep;
-      if (IsKeyDown(KEY_A)) goal[1] -= kTeleopStep;
-      if (IsKeyDown(KEY_R)) goal[2] += kTeleopStep;
-      if (IsKeyDown(KEY_F)) goal[2] -= kTeleopStep;
-      if (IsKeyDown(KEY_E)) goal[3] += kTeleopStep;
-      if (IsKeyDown(KEY_Q)) goal[3] -= kTeleopStep;
-      if (IsKeyDown(KEY_UP)) goal[4] += kTeleopStep;
-      if (IsKeyDown(KEY_DOWN)) goal[4] -= kTeleopStep;
-      if (IsKeyDown(KEY_RIGHT)) goal[5] += kTeleopStep;
-      if (IsKeyDown(KEY_LEFT)) goal[5] -= kTeleopStep;
+      // Body translation while held. Camera forward is body +Y. Z is down.
+      translation[0] = 0.f;
+      translation[1] = 0.f;
+      translation[2] = 0.f;
+      if (IsKeyDown(KEY_D)) translation[0] += 1.f;
+      if (IsKeyDown(KEY_A)) translation[0] -= 1.f;
+      if (IsKeyDown(KEY_W)) translation[1] += 1.f;
+      if (IsKeyDown(KEY_S)) translation[1] -= 1.f;
+      if (IsKeyDown(KEY_R)) translation[2] += 1.f;
+      if (IsKeyDown(KEY_F)) translation[2] -= 1.f;
+      normalize3(translation);
 
-      unsigned char goal_packet[24];
-      encode_goal(goal, goal_packet);
+      // Yaw about world +Z. Pitch about body X. Roll about body +Y (camera forward).
+      if (IsKeyDown(KEY_RIGHT)) orientation = quat_mul(axis_angle(0.f, 0.f, 1.f, -kTeleopStep), orientation);
+      if (IsKeyDown(KEY_LEFT)) orientation = quat_mul(axis_angle(0.f, 0.f, 1.f, kTeleopStep), orientation);
+      if (IsKeyDown(KEY_UP)) orientation = quat_mul(orientation, axis_angle(1.f, 0.f, 0.f, -kTeleopStep));
+      if (IsKeyDown(KEY_DOWN)) orientation = quat_mul(orientation, axis_angle(1.f, 0.f, 0.f, kTeleopStep));
+      if (IsKeyDown(KEY_I)) orientation = quat_mul(orientation, axis_angle(0.f, 1.f, 0.f, kTeleopStep));
+      if (IsKeyDown(KEY_K)) orientation = quat_mul(orientation, axis_angle(0.f, 1.f, 0.f, -kTeleopStep));
+      normalize_quat(&orientation);
+
+      const float command[7] = {
+          translation[0], translation[1], translation[2], orientation.x, orientation.y, orientation.z, orientation.w,
+      };
+      unsigned char goal_packet[28];
+      encode_goal(command, goal_packet);
       if (udp_send(teleop_fd, goal_packet, sizeof(goal_packet)) != static_cast<int>(sizeof(goal_packet))) {
         static bool logged = false;
         if (!logged) {
@@ -382,11 +432,12 @@ int main(int argc, char **argv) {
     DrawText(TextFormat("objs  %d", tel.objects), x, 150, 20, RAYWHITE);
     DrawText(tel.tracking ? "tracking  ok" : "tracking  lost", x, 180, 20, tel.tracking ? GREEN : ORANGE);
     DrawText(tel.depth_ok ? TextFormat("depth %.2f m", tel.depth) : "depth -", x, 210, 20, RAYWHITE);
-    DrawText(TextFormat("goal  %.2f %.2f %.2f", goal[0], goal[1], goal[2]), x, 240, 20,
+    DrawText(TextFormat("move  %.2f %.2f %.2f", translation[0], translation[1], translation[2]), x, 240, 20,
              teleop_fd >= 0 ? RAYWHITE : RED);
-    DrawText(TextFormat("rpy   %.2f %.2f %.2f", goal[3], goal[4], goal[5]), x, 270, 20, RAYWHITE);
-    DrawText(TextFormat("teleop %d  W/S X  A/D Y  R/F Z", teleop_port), x, 300, 16, GRAY);
-    DrawText("Q/E roll   arrows pitch/yaw", x, 318, 16, GRAY);
+    DrawText(TextFormat("cmd   %.2f %.2f %.2f %.2f", orientation.x, orientation.y, orientation.z, orientation.w), x, 270,
+             20, RAYWHITE);
+    DrawText(TextFormat("teleop %d  W/S surge  A/D sway  R/F heave  I/K roll", teleop_port), x, 300, 16, GRAY);
+    DrawText("arrows yaw and pitch", x, 318, 16, GRAY);
     DrawTextureRec(scene.texture, {0, 0, 900, -470}, {view3d.x, view3d.y}, WHITE);
     DrawRectangleLinesEx(view3d, 1, GRAY);
 

@@ -1,6 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 const MissionArgs = @import("MissionArgs.zig");
+const math = @import("math.zig");
+const bc = @import("BodyControl.zig");
 
 const Auv = @import("Auv.zig");
 const AuvLoader = @import("AuvLoader.zig");
@@ -33,14 +35,24 @@ thrustor_saturate: f32,
 log_counter: u32,
 log_freq_div: u16,
 
-goal: math.Vector6f,
-// Tracks the XY goal so yaw stays at its starting heading during translation,
-// then switches to the requested yaw after arrival.
-last_xy_goal: ?math.Vector2f = null,
-held_yaw: ?f32 = null,
-xy_reached: bool = false,
-pid_sum_err: math.Vector6f,
-pid_prev_pose_err: math.Vector6f,
+target_position: math.Vector3f,
+/// World position latched on the first frame of a hold episode. Null outside hold.
+hold_position: ?math.Vector3f = null,
+/// Target attitude. Null holds the current orientation through the yield.
+target_orientation: ?math.Quaternionf = null,
+/// Motion chosen before the frame. The yield turns it into `command`.
+motion: Motion = .{ .hold = .{} },
+/// Numeric command filled from the current frame. Only the yield writes this.
+command: Command = .{},
+/// Odometry PID memory in TAM order. Lanes 0..2 are position, lanes 3..5 are attitude.
+pid_sum_err: math.Vector6f = @splat(0),
+pid_prev_err: math.Vector6f = @splat(0),
+/// Slew-limited tilt that swings a controllable force onto a missing translation.
+tilt_correction: math.Vector3f = .{ 0, 0, 0 },
+/// Orientation held while `target_orientation` is null.
+held_q: ?math.Quaternionf = null,
+/// Last explicit target orientation. A mission-look change clears the attitude lanes of the PID.
+explicit_q: ?math.Quaternionf = null,
 pid_prev_timestamp_ns: ?u64,
 
 step: []const u8,
@@ -48,17 +60,8 @@ telemetry_file: ?Io.File = null,
 telemetry_socket: Io.net.Socket = undefined,
 telemetry_dest: Io.net.IpAddress = undefined,
 
-// NonOdometryState
 seen_objects2d: [Auv.Frame.max_objects]Auv.Object2d = undefined,
 seen_objects2d_len: u8 = 0,
-non_odometry_pid_sum_err: math.Vector6f,
-non_odometry_pid_prev_pose_err: math.Vector6f,
-non_odometry_prev_tracked_id: i32 = -1,
-
-tracked_id: i32 = -1,
-search_yaw: f32 = 0,
-hold_depth: f32 = 2,
-//
 
 auv: Auv,
 auv_loader: AuvLoader,
@@ -116,19 +119,14 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         .log_counter = 0,
         .log_freq_div = 120,
 
-        .goal = @splat(0),
+        .target_position = @splat(0),
 
-        .pid_sum_err = @splat(0),
-        .pid_prev_pose_err = @splat(0),
         .pid_prev_timestamp_ns = null,
 
         .step = "",
         .telemetry_file = telemetry_file,
         .telemetry_socket = telemetry_socket,
         .telemetry_dest = telemetry_dest,
-
-        .non_odometry_pid_sum_err = @splat(0),
-        .non_odometry_pid_prev_pose_err = @splat(0),
 
         .auv = auv,
         .auv_loader = auv_loader,
@@ -145,19 +143,21 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
 /// Invalidates `seen_objects`
 pub fn reset(ctx: *MissionContext) void {
     ctx.seen_objects_len = 0;
-    ctx.last_xy_goal = null;
-    ctx.held_yaw = null;
-    ctx.xy_reached = false;
-    ctx.pid_sum_err = @splat(0);
-    ctx.pid_prev_pose_err = @splat(0);
+    ctx.resetOdometryPid();
+    ctx.held_q = null;
+    ctx.explicit_q = null;
+    ctx.target_orientation = null;
+    ctx.motion = .{ .hold = .{} };
+    ctx.command = .{};
     ctx.pid_prev_timestamp_ns = null;
+    ctx.hold_position = null;
 }
 
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
+    const start = Io.Clock.Timestamp.now(ctx.io, .awake);
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
     if (stop_requested.load(.monotonic)) return error.Stopped;
 
-    const start = Io.Clock.Timestamp.now(ctx.io, .awake);
 
     // std.log.debug("updating seen_objects...", .{});
     for (ctx.frame.objects[0..ctx.frame.objects_len]) |frame_object| {
@@ -189,9 +189,6 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
             ctx.seen_objects2d_len += 1;
         }
     }
-
-    // std.log.debug("setting thruster_values with pid controller...", .{});
-    ControllerStep(ctx);
 
     if (ctx.config_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
@@ -233,14 +230,16 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         ctx.auv.init();
     }
 
+    const tracking_lost = ctx.applyMotion();
+    ctx.controlStep();
+
     const elapsed = start.untilNow(ctx.io);
     if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
     }
     ctx.log_counter +%= 1;
+    if (tracking_lost) return error.TrackingLost;
 }
-
-const math = @import("math.zig");
 
 // Field order is the little-endian packet.
 const TelemetryPacket = struct {
@@ -283,21 +282,214 @@ fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
     ctx.telemetry_socket.send(ctx.io, &ctx.telemetry_dest, packet) catch {};
 }
 
-fn ControllerStep(ctx: *MissionContext) void {
+pub fn resetOdometryPid(ctx: *MissionContext) void {
+    ctx.pid_sum_err = @splat(0);
+    ctx.pid_prev_err = @splat(0);
+    ctx.tilt_correction = .{ 0, 0, 0 };
+    ctx.hold_position = null;
+}
+
+fn clearOdometryAttitude(ctx: *MissionContext) void {
+    ctx.pid_sum_err = .{ ctx.pid_sum_err[0], ctx.pid_sum_err[1], ctx.pid_sum_err[2], 0, 0, 0 };
+    ctx.pid_prev_err = .{ ctx.pid_prev_err[0], ctx.pid_prev_err[1], ctx.pid_prev_err[2], 0, 0, 0 };
+}
+
+pub const Motion = union(enum) {
+    /// Hold the position latched in `hold_position`. Optional orientation is the teleop look.
+    hold: struct {
+        orientation: ?math.Quaternionf = null,
+    },
+    /// Body thrust and a world orientation. Coverage may tilt off that quaternion to produce a missing force.
+    direct_thrust: struct {
+        translation: math.Vector3f,
+        orientation: math.Quaternionf,
+    },
+    /// Position error toward `target_position`, and the look already chosen.
+    position,
+    /// Surge, sway, and yaw scaled by the 2D box with `id` on this frame.
+    look_forward_heading: struct {
+        id: u32,
+        surge: f32 = 1,
+        sway: f32 = 0,
+        yaw: f32 = 1,
+    },
+};
+
+const Command = struct {
+    translation: math.Vector3f = .{ 0, 0, 0 },
+    /// Target attitude. Null holds orientation.// TODO: WHYYY
+    target_orientation: ?math.Quaternionf = null,
+    /// World-frame position error toward a target. Force is rotated into body at thruster mix.
+    transport: bool = false,
+    /// `translation` is already thrust. Teleop only.
+    direct_thrust: bool = false,
+    /// Mission looks clear attitude lanes when the quaternion jumps. Box yaw does not.
+    clear_on_look_change: bool = true,
+};
+
+/// Default surge, sway, and yaw for look-forward-and-heading. The 2D box error only scales these.
+const LookForwardHeading = struct {
+    surge: f32 = 1,
+    sway: f32 = 0,
+    yaw: f32 = 1,
+};
+
+/// World direction of body +Y at a level heading. Yaw 0 looks along +Y.
+fn lookAtHeading(heading: f32) math.Vector3f {
+    return .{ -@sin(heading), @cos(heading), 0 };
+}
+
+fn object2dOnFrame(ctx: *const MissionContext, id: u32) ?Auv.Object2d {
+    for (ctx.frame.objects2d[0..ctx.frame.objects2d_len]) |object| {
+        if (object.id == id) return object;
+    }
+    return null;
+}
+
+fn clearTranslationIntegral(ctx: *MissionContext) void {
+    ctx.pid_sum_err[0] = 0;
+    ctx.pid_sum_err[1] = 0;
+    ctx.pid_sum_err[2] = 0;
+}
+
+/// Fill `command` from `motion` and this frame. Position with tracking down holds and reports lost.
+fn applyMotion(ctx: *MissionContext) bool {
+    switch (ctx.motion) {
+        .hold => |hold| commandHold(ctx, hold.orientation),
+        .direct_thrust => |thrust| commandDirectThrust(ctx, thrust.translation, thrust.orientation),
+        .position => {
+            if (!ctx.frame.tracking_ok) {
+                commandHold(ctx, null);
+                return true;
+            }
+            commandPosition(ctx);
+        },
+        .look_forward_heading => |heading| {
+            if (object2dOnFrame(ctx, heading.id)) |box| {
+                commandLookForwardAndHeading(ctx, box, .{
+                    .surge = heading.surge,
+                    .sway = heading.sway,
+                    .yaw = heading.yaw,
+                });
+            } else {
+                clearTranslationIntegral(ctx);
+                commandHold(ctx, null);
+            }
+        },
+    }
+    return false;
+}
+
+/// Point the camera at `target` from the current pose, clamped by `rotation_limit`.
+pub fn setLookAtTarget(ctx: *MissionContext, target: math.Vector3f) !void {
+    if (try bc.lookDirection(ctx.frame.camera_pose.pos, target)) |toward| {
+        ctx.target_orientation = try bc.lookWithinLimits(ctx.config.camera_forward, toward, bc.identity, ctx.config.rotation_limit);
+    } else {
+        ctx.target_orientation = null;
+    }
+}
+
+/// Position error toward the latched pose. A null orientation holds attitude.
+fn commandHold(ctx: *MissionContext, orientation: ?math.Quaternionf) void {
+    if (ctx.hold_position == null) ctx.hold_position = ctx.frame.camera_pose.pos;
+    const target = ctx.hold_position.?;
+    ctx.command = .{
+        .translation = bc.positionError(ctx.frame.camera_pose.pos, target) catch unreachable,
+        .target_orientation = orientation,
+        .transport = true,
+        .direct_thrust = false,
+        .clear_on_look_change = true,
+    };
+}
+
+/// Direct thrust and a world orientation. The quaternion is the full attitude target.
+fn commandDirectThrust(
+    ctx: *MissionContext,
+    translation: math.Vector3f,
+    orientation: math.Quaternionf,
+) void {
+    ctx.hold_position = null;
+    ctx.command = .{
+        .translation = translation,
+        .target_orientation = orientation,
+        .transport = false,
+        .direct_thrust = true,
+        .clear_on_look_change = true,
+    };
+}
+
+fn slew3(current: math.Vector3f, desired: math.Vector3f, max_step: f32) math.Vector3f {
+    if (max_step <= 0) return current;
+    const delta = desired - current;
+    const len = math.length3f(delta);
+    if (len <= max_step or len <= 1e-6) return desired;
+    return current + delta / @as(math.Vector3f, @splat(len / max_step));
+}
+
+/// World-frame error toward `target_position`, and the look already chosen.
+fn commandPosition(ctx: *MissionContext) void {
+    ctx.hold_position = null;
+    ctx.command = .{
+        .translation = bc.positionError(ctx.frame.camera_pose.pos, ctx.target_position) catch unreachable,
+        .target_orientation = ctx.target_orientation,
+        .transport = true,
+        .direct_thrust = false,
+        .clear_on_look_change = true,
+    };
+}
+
+/// Scale the surge, sway, and yaw defaults by the 2D box error. Body Z stays zero.
+fn commandLookForwardAndHeading(ctx: *MissionContext, box: Auv.Object2d, motion: LookForwardHeading) void {
+    ctx.hold_position = null;
+    const metrics = math.boxMetrics(
+        ctx.frame.image_width,
+        ctx.frame.image_height,
+        .{ box.top_left.x, box.top_left.y },
+        .{ box.bottom_right.x, box.bottom_right.y },
+    );
+    const vision = ctx.config.non_odometry;
+    const cx = math.withinDeadband(metrics.cx, vision.center_deadband);
+    const height_err = vision.target_height - metrics.height;
+    const current = bc.normalizedQuat(ctx.frame.camera_pose.quat) catch unreachable;
+    const heading = math.quaternionToEuler(current)[2] + motion.yaw * cx;
+    const look_q = bc.lookWithinLimits(
+        ctx.config.camera_forward,
+        lookAtHeading(heading),
+        bc.identity,
+        ctx.config.rotation_limit,
+    ) catch unreachable;
+    ctx.command = .{
+        .translation = .{ motion.sway * cx, motion.surge * height_err, 0 },
+        .target_orientation = look_q,
+        .transport = false,
+        .direct_thrust = false,
+        .clear_on_look_change = false,
+    };
+}
+
+fn resolveLook(ctx: *MissionContext, current: math.Quaternionf, look: ?math.Quaternionf, clear_on_change: bool) math.Quaternionf {
+    if (look) |q| {
+        const target = bc.normalizedQuat(q) catch unreachable;
+        if (clear_on_change) {
+            const changed = if (ctx.explicit_q) |previous| @abs(@reduce(.Add, previous * target)) < 0.9999 else true;
+            if (changed) ctx.clearOdometryAttitude();
+        }
+        ctx.explicit_q = target;
+        return target;
+    }
+    if (ctx.explicit_q != null) {
+        ctx.explicit_q = null;
+        ctx.held_q = null;
+        ctx.clearOdometryAttitude();
+    }
+    if (ctx.held_q == null) ctx.held_q = current;
+    return ctx.held_q.?;
+}
+
+/// Track `ctx.command` and send the resulting thruster values. No `tracking_ok` branch.
+fn controlStep(ctx: *MissionContext) void {
     const timestamp_ns = ctx.frame.timestamp;
     const dt: ?f32 = if (ctx.pid_prev_timestamp_ns) |previous| blk: {
-        if (timestamp_ns <= previous) {
-            ctx.pid_sum_err = @splat(0);
-            ctx.pid_prev_pose_err = @splat(0);
-            ctx.non_odometry_pid_sum_err = @splat(0);
-            ctx.non_odometry_pid_prev_pose_err = @splat(0);
-            ctx.pid_prev_timestamp_ns = null;
-            std.log.warn(
-                "frame timestamp not increasing (prev={} ns, now={} ns); skipping I/D",
-                .{ previous, timestamp_ns },
-            );
-            break :blk null;
-        }
         const elapsed_ns = timestamp_ns - previous;
         ctx.pid_prev_timestamp_ns = timestamp_ns;
         break :blk @as(f32, @floatFromInt(elapsed_ns)) * 1e-9;
@@ -306,204 +498,131 @@ fn ControllerStep(ctx: *MissionContext) void {
         break :blk null;
     };
 
-    const tam_input: math.Vector6f = if (ctx.frame.tracking_ok) command: {
-        const pose = ctx.frame.camera_pose;
-
-        const goal = ctx.goal;
-        const current_pose = math.poseTo6f(pose);
-
-        var pose_err = goal - current_pose;
-
-        // Current orientation.
-        const rot = math.normalize4f(pose.quat);
-
-        // Vehicle forward is +Y in body frame.
-        const forward = math.quaternionRotate(rot, .{ 0.0, 1.0, 0.0 });
-        const current_yaw = std.math.atan2(forward[1], forward[0]);
-
-        const dir = math.Vector3f{
-            pose_err[0],
-            pose_err[1],
-            0.0,
-        };
-
-        const xy_distance = math.length3f(dir);
-
-        const yaw_state = math.targetYaw(
-            ctx.last_xy_goal,
-            ctx.held_yaw,
-            ctx.xy_reached,
-            goal,
-            xy_distance,
-            current_yaw,
-            ctx.config.odometry.xy_arrival_radius,
-        );
-        ctx.last_xy_goal = yaw_state.last_xy_goal;
-        ctx.held_yaw = yaw_state.held_yaw;
-        ctx.xy_reached = yaw_state.xy_reached;
-        const target_yaw = yaw_state.yaw;
-
-        const yaw_error = math.wrapAngle(target_yaw - current_yaw);
-
-        pose_err[5] = yaw_error;
-
-        const vel_err: math.Vector6f = if (dt) |delta_t| blk: {
-            ctx.pid_sum_err += pose_err * @as(math.Vector6f, @splat(delta_t));
-
-            break :blk (pose_err - ctx.pid_prev_pose_err) / @as(math.Vector6f, @splat(delta_t));
-        } else @splat(0.0);
-
-        const kp = ctx.config.odometry.kp;
-        const ki = ctx.config.odometry.ki;
-        const kd = ctx.config.odometry.kd;
-
-        const wrench =
-            kp * pose_err +
-            ki * ctx.pid_sum_err +
-            kd * vel_err;
-
-        const input = math.wrenchToThrusterInput(wrench, pose.quat, yaw_error, std.math.pi / 8.0);
-        if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-            if (clear_print_stuff) {
-                std.debug.print("\x1b[2J\x1b[H", .{});
-            }
-            std.log.debug("config:", .{});
-            std.log.debug("\txy_arrival_radius = {}", .{ctx.config.odometry.xy_arrival_radius});
-            math.debug6f("\tkp", kp);
-            math.debug6f("\tki", ki);
-            math.debug6f("\tkd", kd);
-            for (ctx.config.tam) |row| {
-                math.debug6f("\ttam", row);
-            }
-            std.log.debug("dt = {d:6.2} ms", .{(dt orelse 0) * 1000});
-            std.log.debug("timestamp_ns = {d}, xy_translation_complete = {}", .{ timestamp_ns, ctx.xy_reached });
-            math.debug6f("pose", current_pose);
-            math.debug6f("goal", goal);
-            std.log.debug("xy_distance = {}", .{xy_distance});
-            std.log.debug("thruster mapping:", .{});
-            math.debug6f("\twrench  ", wrench);
-            math.debug3f("\tforward ", forward);
-            math.debug3f("\tdir2d   ", dir);
-            std.log.debug(
-                "\tcurrent_yaw={d:3.2} target_yaw={d:3.2} yaw_error={d:3.2}",
-                .{ current_yaw, target_yaw, yaw_error },
-            );
-            // math.debug3f("\trotated ", rotated);
-            // math.debug3f("\tbody_force ", body_force);
-            math.debug6f("\tinput   ", input);
-        }
-
-        ctx.pid_prev_pose_err = pose_err;
-        break :command input;
-    } else command: {
-        ctx.last_xy_goal = null;
-        ctx.held_yaw = null;
-        ctx.xy_reached = false;
-        ctx.trackFirstSeenObject2d();
-
-        const non_odometry = ctx.config.non_odometry;
-        const dive_sign: f32 = 1;
-        const current_pose = math.poseTo6f(ctx.frame.camera_pose);
-        const roll_err = ctx.goal[3] - current_pose[3];
-        const pitch_err = ctx.goal[4] - current_pose[4];
-
-        const tracked_box: ?Auv.Object2d = if (ctx.tracked_id < 0)
-            null
+    // camera_pose must already be in the TAM frame. If there is a
+    // camera-to-vehicle extrinsic rotation, convert upstream first.
+    // Pose, dt, and TAM are assumed valid. Bad values are a frame or config problem.
+    const thrust_direction = bc.ThrustDirections.fromTamLinearForces(ctx.config.tam) catch unreachable;
+    const current = ctx.frame.camera_pose.quat;
+    const command = ctx.command;
+    var target_q = ctx.resolveLook(current, command.target_orientation, command.clear_on_look_change);
+    const odom = ctx.config.odometry;
+    var desired_tilt: math.Vector3f = .{ 0, 0, 0 };
+    const moments = bc.ThrustDirections.fromTamMoments(ctx.config.tam) catch unreachable;
+    // Direct thrust skips the translation PID. Coverage still swings a thruster onto a component the map cannot produce.
+    const translation_command: math.Vector3f = if (command.direct_thrust) blk: {
+        const coverage = bc.coverForce(thrust_direction, moments, command.translation, ctx.config.rotation_limit, ctx.config.camera_forward);
+        if (coverage.tilt) |tilt| desired_tilt = tilt.axis * @as(math.Vector3f, @splat(tilt.angle));
+        break :blk coverage.force;
+    } else blk: {
+        const body_q = bc.normalizedQuat(current) catch unreachable;
+        const error_body = if (command.transport)
+            math.quaternionRotate(math.quaternionConjugate(body_q), command.translation)
         else
-            for (ctx.seen_objects2d[0..ctx.seen_objects2d_len]) |object| {
-            if (object.id == @as(u32, @intCast(ctx.tracked_id))) break object;
-        } else null;
-
-        const tam_input = if (ctx.tracked_id >= 0 and tracked_box == null) blk: {
-            ctx.non_odometry_pid_sum_err = @splat(0);
-            ctx.non_odometry_pid_prev_pose_err = @splat(0);
-            ctx.pid_prev_timestamp_ns = null;
-            break :blk @as(math.Vector6f, @splat(0));
-        } else if (ctx.tracked_id < 0) blk: {
-            var err: math.Vector6f = @splat(0);
-            if (ctx.frame.pressure_depth_ok) {
-                err[2] = ctx.hold_depth - ctx.frame.pressure_depth;
+            command.translation;
+        const available = thrust_direction.alongThrust(error_body);
+        var translation: math.Vector3f = .{ 0, 0, 0 };
+        inline for (0..3) |i| {
+            var rate: f32 = 0;
+            if (dt) |t| {
+                if (command.transport) {
+                    ctx.pid_sum_err[i] += command.translation[i] * t;
+                } else {
+                    ctx.pid_sum_err[i] += available[i] * t;
+                }
+                rate = (command.translation[i] - ctx.pid_prev_err[i]) / t;
             }
-            err[3] = roll_err;
-            err[4] = pitch_err;
-            const wrench = math.pidWrench(
-                &ctx.non_odometry_pid_sum_err,
-                &ctx.non_odometry_pid_prev_pose_err,
-                non_odometry.kp,
-                non_odometry.ki,
-                non_odometry.kd,
-                err,
-                dt,
-            );
-            break :blk @as(math.Vector6f, .{ 0, 0, dive_sign * wrench[2], -wrench[3], wrench[4], ctx.search_yaw });
-        } else blk: {
-            const tracked = tracked_box orelse break :blk @as(math.Vector6f, @splat(0));
-            const metrics = math.boxMetrics(
-                ctx.frame.image_width,
-                ctx.frame.image_height,
-                .{ tracked.top_left.x, tracked.top_left.y },
-                .{ tracked.bottom_right.x, tracked.bottom_right.y },
-            );
-            const cx = math.withinDeadband(metrics.cx, non_odometry.center_deadband);
-            const cy = math.withinDeadband(metrics.cy, non_odometry.center_deadband);
-
-            var err: math.Vector6f = @splat(0);
-            err[1] = non_odometry.target_height - metrics.height;
-            err[2] = cy;
-            err[3] = roll_err;
-            err[4] = pitch_err;
-            err[5] = cx;
-
-            const wrench = math.pidWrench(
-                &ctx.non_odometry_pid_sum_err,
-                &ctx.non_odometry_pid_prev_pose_err,
-                non_odometry.kp,
-                non_odometry.ki,
-                non_odometry.kd,
-                err,
-                dt,
-            );
-            break :blk @as(math.Vector6f, .{ 0, wrench[1], dive_sign * wrench[2], -wrench[3], wrench[4], wrench[5] });
-        };
-
-        if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-            if (clear_print_stuff) {
-                std.debug.print("\x1b[2J\x1b[H", .{});
-            }
-            std.log.debug("non-odometry controller:", .{});
-            math.debug6f("\tkp", non_odometry.kp);
-            math.debug6f("\tki", non_odometry.ki);
-            math.debug6f("\tkd", non_odometry.kd);
-            for (ctx.config.tam) |row| {
-                math.debug6f("\ttam", row);
-            }
-            std.log.debug("dt = {d:6.2} ms", .{(dt orelse 0) * 1000});
-            math.debug6f("pose", current_pose);
-            std.log.debug("tracked_id = {}", .{ctx.tracked_id});
-            std.log.debug(
-                "mode = {s}",
-                .{if (ctx.tracked_id < 0) "search" else if (tracked_box == null) "tracked object missing" else "track"},
-            );
-            std.log.debug(
-                "pressure_depth_ok = {}, pressure_depth = {}, hold_depth = {}",
-                .{ ctx.frame.pressure_depth_ok, ctx.frame.pressure_depth, ctx.hold_depth },
-            );
-            if (tracked_box) |tracked| {
-                std.log.debug(
-                    "\tbox = ({}, {}) -> ({}, {})",
-                    .{ tracked.top_left.x, tracked.top_left.y, tracked.bottom_right.x, tracked.bottom_right.y },
-                );
-            }
-            math.debug6f("\tinput  ", tam_input);
+            translation[i] = odom.kp[i] * command.translation[i] + odom.ki[i] * ctx.pid_sum_err[i] + odom.kd[i] * rate;
+            ctx.pid_prev_err[i] = command.translation[i];
         }
-
-        break :command tam_input;
+        var force_body = if (command.transport)
+            math.quaternionRotate(math.quaternionConjugate(body_q), translation)
+        else
+            translation;
+        const coverage = bc.coverForce(thrust_direction, moments, force_body, ctx.config.rotation_limit, ctx.config.camera_forward);
+        if (coverage.tilt) |tilt| desired_tilt = tilt.axis * @as(math.Vector3f, @splat(tilt.angle));
+        force_body = coverage.force;
+        break :blk force_body;
+    };
+    // The tilt follows the reshaped force. Slew it so the attitude loop does not see a step.
+    const tilt_step = if (dt) |t| 0.8 * t else 0;
+    ctx.tilt_correction = slew3(ctx.tilt_correction, desired_tilt, tilt_step);
+    const tilt_len = math.length3f(ctx.tilt_correction);
+    if (tilt_len > 1e-4) {
+        const tilt_q = bc.forwardRotation(ctx.tilt_correction, tilt_len) catch unreachable;
+        target_q = bc.normalizedQuat(math.quaternionMul(target_q, tilt_q)) catch unreachable;
+    }
+    const attitude_error = bc.attitudeError(current, target_q) catch unreachable;
+    const translation_body: math.Vector3f = blk: {
+        var force = translation_command;
+        // Coverage output is body force. World position/hold PID rotates into body before coverForce.
+        if (command.direct_thrust) {
+            if (command.target_orientation) |q| {
+                const body_q = bc.normalizedQuat(current) catch unreachable;
+                const command_q = bc.normalizedQuat(q) catch unreachable;
+                const into_body = math.quaternionMul(math.quaternionConjugate(body_q), command_q);
+                force = math.quaternionRotate(into_body, force);
+            }
+        }
+        force = thrust_direction.alongThrust(force);
+        if (math.length3f(attitude_error) > odom.rotation_gate) {
+            force[0] = 0;
+            force[1] = 0;
+            //we doing zero out force[2] beause we always want to maintain the z axis.
+        }
+        break :blk force;
     };
 
+    var rotation: math.Vector3f = .{ 0, 0, 0 };
+    inline for (0..3) |i| {
+        const lane = i + 3;
+        var rate: f32 = 0;
+        if (dt) |t| {
+            rate = (attitude_error[i] - ctx.pid_prev_err[lane]) / t;
+            ctx.pid_sum_err[lane] += attitude_error[i] * t;
+        }
+        ctx.pid_prev_err[lane] = attitude_error[i];
+        rotation[i] = odom.kp[lane] * attitude_error[i] + odom.ki[lane] * ctx.pid_sum_err[lane] + odom.kd[lane] * rate;
+    }
+    ctx.held_q = target_q;
+    const input: math.Vector6f = .{
+        translation_body[0], translation_body[1], translation_body[2],
+        rotation[0],         rotation[1],         rotation[2],
+    };
+    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+        if (clear_print_stuff) {
+            std.debug.print("\x1b[2J\x1b[H", .{});
+        }
+        std.log.debug("control:", .{});
+        math.debug6f("\tkp", odom.kp);
+        math.debug6f("\tki", odom.ki);
+        math.debug6f("\tkd", odom.kd);
+        for (ctx.config.tam) |row| {
+            math.debug6f("\ttam", row);
+        }
+        std.log.debug("dt = {d:6.2} ms", .{(dt orelse 0) * 1000});
+        std.log.debug("timestamp_ns = {d}", .{timestamp_ns});
+        math.debug6f("pose", math.poseTo6f(ctx.frame.camera_pose));
+        if (command.direct_thrust) {
+            math.debug3f("translation direction", command.translation);
+        } else if (ctx.hold_position) |held| {
+            math.debug3f("hold", held);
+        } else if (command.transport) {
+            math.debug3f("target_position", ctx.target_position);
+        } else {
+            math.debug3f("translation error", command.translation);
+        }
+        if (command.target_orientation) |orient_q| {
+            std.log.debug("target orientation: {any}", .{orient_q});
+        }
+        std.log.debug("attitude error body: {any}", .{attitude_error});
+        math.debug3f("rotation limit", ctx.config.rotation_limit);
+        std.log.debug("target quaternion: {any}", .{target_q});
+        math.debug6f("\tinput", input);
+    }
     var thruster_buffer: [math.max_thrusters]f32 = undefined;
     const thruster_values = math.tamToThrusters(
         ctx.config.tam,
-        tam_input,
+        input,
         ctx.thrustor_saturate,
         5.0,
         &thruster_buffer,
@@ -515,21 +634,8 @@ fn ControllerStep(ctx: *MissionContext) void {
     ctx.publishToUdp(thruster_values);
 }
 
-/// Stop search and follow the 2D object `id`. The next non-odometry step uses the tracking branch.
-pub fn trackObject2d(ctx: *MissionContext, id: u32) void {
-    const tracked_id: i32 = @intCast(id);
-    if (ctx.tracked_id == tracked_id) return;
-    ctx.tracked_id = tracked_id;
-    ctx.non_odometry_pid_sum_err = @splat(0);
-    ctx.non_odometry_pid_prev_pose_err = @splat(0);
-}
-
-fn trackFirstSeenObject2d(ctx: *MissionContext) void {
-    if (ctx.tracked_id >= 0 or ctx.seen_objects2d_len == 0) return;
-    ctx.trackObject2d(ctx.seen_objects2d[0].id);
-}
-
 fn yieldUntilObjectWithCls(ctx: *MissionContext, clss: []const u8, start: usize) !*const Auv.Object {
+    ctx.motion = .position;
     var seen = start;
 
     while (true) {
@@ -566,19 +672,18 @@ pub fn yieldUntilNewObjectWithCls(ctx: *MissionContext, cls: u8) !*const Auv.Obj
     return try yieldUntilNewObjectWithAnyCls(ctx, &.{cls});
 }
 
-/// yield until at `ctx.frame.camera_pose.pos` is at `goal_threshold` distance from `goal_pos`
-pub fn yieldUntilReachGoal(ctx: *MissionContext, goal_pos: math.Vector3f) !void {
-    ctx.goal[0] = goal_pos[0];
-    ctx.goal[1] = goal_pos[1];
-    ctx.goal[2] = goal_pos[2];
+/// Drive to `target_pos` while looking at `look_at`. The look is refreshed from the current pose each frame.
+pub fn yieldUntilReachGoal(ctx: *MissionContext, target_pos: math.Vector3f, look_at: math.Vector3f) !void {
+    ctx.target_position = target_pos;
+    ctx.motion = .position;
     while (true) {
+        try ctx.setLookAtTarget(look_at);
+        try ctx.yieldUntilNextFrameAndUpdate();
         const camera_pos = ctx.frame.camera_pose.pos;
-        const goal_delta = goal_pos - camera_pos;
-        const goal_dist = @sqrt(@reduce(.Add, goal_delta * goal_delta));
-        if (goal_dist <= ctx.goal_dist_threshold) {
+        const delta = target_pos - camera_pos;
+        const dist = @sqrt(@reduce(.Add, delta * delta));
+        if (dist <= ctx.goal_dist_threshold) {
             break;
         }
-
-        try ctx.yieldUntilNextFrameAndUpdate();
     }
 }
