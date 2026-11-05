@@ -99,7 +99,7 @@ python3 tools/blender/from_blender.py \
   --blender-link --realtime
 ```
 
-Use `--backend stonefish` for the other engine. Refresh the checked-in JSON pool snapshot with `zig build sim-scene` when the authored scene changes.
+Use `--backend stonefish` for the other engine. Refresh the checked-in pool snapshot at `sim/scenarios/pool.asim` when the authored scene changes.
 
 ### Live poses in Blender
 

@@ -6,12 +6,12 @@ int main(int argc, char **argv) {
   try {
     require(argc == 2, "scenario required");
     auto scene = Scene::load(argv[1]);
-    std::vector<SimBodyState> bodies(scene.model.bodies.size());
+    std::vector<SimBodyState> bodies(scene.bodies.size());
     for (size_t i = 0; i < bodies.size(); ++i) {
-      bodies[i].pose = scene.model.bodies[i].value.initial_pose;
+      bodies[i].pose = scene.bodies[i].initial_pose;
       bodies[i].pose.orientation = {0, 0, 0, 1};
       bodies[i].pose.position.z = 2;
-      bodies[i].center_of_mass = point(bodies[i].pose, scene.model.bodies[i].value.center_of_mass.position);
+      bodies[i].center_of_mass = point(bodies[i].pose, scene.bodies[i].center_of_mass.position);
     }
     ForceRegistry registry;
     for (double dt : {1.0 / 90, 1.0 / 360, 1.0 / 720}) {

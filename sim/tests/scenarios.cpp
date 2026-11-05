@@ -1,14 +1,27 @@
 #include "runtime.hpp"
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <iostream>
+#include <nlohmann/json.hpp>
 using namespace sim;
+using Json = nlohmann::json;
+SimVec3 vec(const Json &j) {
+  require(j.is_array() && j.size() == 3, "expected vector of length 3");
+  return {j[0].get<double>(), j[1].get<double>(), j[2].get<double>()};
+}
+SimQuat quat(const Json &j) {
+  require(j.is_array() && j.size() == 4, "expected xyzw quaternion");
+  return {j[0].get<double>(), j[1].get<double>(), j[2].get<double>(),
+          j[3].get<double>()};
+}
 int main(int argc, char **argv) {
   try {
     require(argc == 3, "backend and scenario required");
     auto backend = std::make_shared<Backend>(argv[1]);
-    auto source = Scene::load(argv[2]).document;
-    auto trajectory = [&](const Json &document) {
-      World world(Scene::parse(document), backend);
+    auto source = Scene::load(argv[2]);
+    auto trajectory = [&](Scene scene) {
+      World world(std::move(scene), backend);
       std::vector<uint64_t> result;
       for (int i = 0; i < 360; ++i) {
         world.step(std::vector<double>(world.commands.size(), 0));
@@ -18,8 +31,10 @@ int main(int argc, char **argv) {
     };
     auto hashes = trajectory(source);
     require(hashes == trajectory(source), "vehicle replay diverged");
-    World world(Scene::parse(source), backend);
-    std::ifstream baseline(std::string(argv[2]) + ".baseline.json");
+    World world(source, backend);
+    auto scenario = std::filesystem::path(argv[2]);
+    std::ifstream baseline(scenario.parent_path() /
+                           (scenario.stem().string() + ".json.baseline.json"));
     Json reference;
     if (std::string(backend->api.name) == "mujoco" && baseline)
       baseline >> reference;
@@ -27,7 +42,7 @@ int main(int argc, char **argv) {
       world.step(std::vector<double>(world.commands.size(), 0));
       if (!reference.empty() && (i + 1) % 36 == 0) {
         auto &sample = reference["samples"][i / 36];
-        auto &body = world.bodies[world.scene.camera.body];
+        auto &body = world.bodies[world.scene.header.camera.body];
         require(norm(body.pose.position - vec(sample.at("position"))) < 1e-8,
                 "vehicle position changed from legacy MuJoCo baseline");
         auto q = quat(sample.at("orientation"));
@@ -52,11 +67,12 @@ int main(int argc, char **argv) {
       require(job.get() == hashes, "vehicle parallel replay diverged");
     if (backend->api.capabilities & SIM_CAP_NATIVE_HYDRO) {
       auto native = source;
-      native["native_hydrodynamics"] = true;
+      native.header.native_hydrodynamics = 1;
       auto h = trajectory(native);
       require(h == trajectory(native), "native hydrodynamics replay diverged");
     }
-    std::cout << backend->api.name << " " << source.value("vehicle", "vehicle")
+    std::cout << backend->api.name << " "
+              << source.bodies[source.header.camera.body].name
               << " qualification passed\n";
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';

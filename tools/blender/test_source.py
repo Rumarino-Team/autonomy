@@ -1,5 +1,4 @@
 """Authoring mutations must survive export; no world preset may restore them."""
-import json
 from pathlib import Path
 import sys
 import bpy
@@ -17,7 +16,7 @@ collection=bpy.data.collections[scene['sim_collection']]
 
 
 def save(name):
-    return exporter.export_scene(scene,profiles,output=folder/(name+'.json'))
+    return exporter.export_scene(scene,profiles,output=folder/(name+'.asim'))
 
 
 def expect_failure(fn, text):
@@ -29,8 +28,9 @@ def expect_failure(fn, text):
 
 baseline=save('baseline')
 assert exporter.export_scene(scene,Path('/unavailable-profile-sidecars'))['source']['content_hash']==baseline['source']['content_hash'], 'calibration is not embedded in .blend'
-published=json.loads((repo/'sim/scenarios/pool.json').read_text())
-assert baseline['source']['content_hash']==published['source']['content_hash'], 'run zig build sim-scene and commit the refreshed snapshot'
+from autonomy_sim import wire
+published=wire.decode((repo/'sim/scenarios/pool.asim').read_bytes())
+assert baseline['source']['content_hash']==published['source']['content_hash'], 'refresh sim/scenarios/pool.asim and commit the snapshot'
 assert baseline['source']['content_hash']==save('repeat')['source']['content_hash']
 gate=scene.objects['Gate']; marker=scene.objects['Marker']; robot=scene.objects['hydrus']
 gate.location.x-=.75;gate.rotation_euler.z+=.2
@@ -86,7 +86,7 @@ instances=save('instances')
 assert any(b['sim_id'].startswith('instances/one/prototype/') for b in instances['bodies'])
 
 # Failures leave the previous valid snapshot untouched, never launch a fallback.
-path=folder/'instances.json';saved=path.read_bytes()
+path=folder/'instances.asim';saved=path.read_bytes()
 old=box['sim_id'];box['sim_id']='2'
 expect_failure(lambda:exporter.export_scene(scene,profiles,output=path),'duplicate sim_id')
 assert path.read_bytes()==saved

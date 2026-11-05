@@ -5,10 +5,21 @@ The controller outputs N and N m; TAM outputs fractions of bollard thrust.
 The quadratic_rpm curve converts those fractions to normalized shaft speed.
 No external numerical libraries are required.
 """
+import argparse
+import importlib.util
 import json
 import math
-import argparse
 from pathlib import Path
+
+def load_scene(path):
+    path = Path(path)
+    if path.suffix == '.json':
+        return json.loads(path.read_text())
+    spec = importlib.util.spec_from_file_location(
+        "scene_wire", Path(__file__).resolve().parents[1]/"tools/blender/autonomy_sim/wire.py")
+    wire = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wire)
+    return wire.decode(path.read_bytes())
 
 
 def cross(a, b):
@@ -85,8 +96,8 @@ def configuration(scene):
 if __name__ == '__main__':
     root = Path(__file__).resolve().parent
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scenario',type=Path,default=root/'scenarios/pool.json')
+    parser.add_argument('--scenario',type=Path,default=root/'scenarios/pool.asim')
     parser.add_argument('--output',type=Path,default=root/'scenarios/controller.json')
     args=parser.parse_args()
-    scene = json.loads(args.scenario.read_text())
+    scene = load_scene(args.scenario)
     args.output.write_text(json.dumps(configuration(scene), indent=2)+'\n')

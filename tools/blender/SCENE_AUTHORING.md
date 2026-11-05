@@ -97,38 +97,41 @@ are ordered by stable IDs. Native validation must succeed before an engine world
 is created. Normal launches transfer the evaluated scene over a binary socket;
 they do not write or read an intermediate scene JSON file.
 
-`Scene::load` accepts a saved `.blend`, an `.asim` frozen binary snapshot, legacy
-JSON, `-` for binary stdin, or an inherited `fd:N` binary socket. `.blend` loading
-runs Blender in background with automatic script execution disabled and the
-shared evaluated collector. Scene name/frame come from
+`Scene::load` accepts a saved `.blend`, an `.asim` snapshot, `-` for binary
+stdin, or an inherited `fd:N` binary socket. `.blend` loading runs Blender in
+background with automatic script execution disabled and the shared evaluated
+collector. Scene name/frame come from
 `AUTONOMY_SIM_SOURCE_SCENE`/`AUTONOMY_SIM_SOURCE_FRAME` (defaults
 `AutonomySource`/`1`). `AUTONOMY_SIM_BLENDER_EXECUTABLE` selects Blender;
 `AUTONOMY_SIM_BLENDER_SCRIPT` can override the installed loader script location.
 Missing files, failed evaluation, timeouts and invalid transfers stop the run.
 
-The transport header is `ASIMSC01` followed by a little-endian uint64 payload
-length; its payload is standard MessagePack, limited to 128 MiB. It contains
-values and stable IDs, never process-local pointers. Native loading validates
-the decoded record and constructs owned `SimModelDesc`/body/shape arrays and
-typed force-module, fault and assertion settings. The generic document is
-retained for provenance, optional JSON export, seeded case generation and trace
-serialization; physics steps use the typed settings. Engine ABI v1 is unchanged.
+The snapshot header is `ASIMSC02` followed by a little-endian uint64 payload
+length. The payload is the scene header and its flat arrays copied as bytes:
+bodies, shapes, vertices, triangles, thrusters, hulls, hull vertices, faults,
+force-module names, and a command sequence. Records are naturally aligned,
+little-endian, and limited to 128 MiB. Counts in the header are the schema.
+Loading allocates each array to its count and copies the bytes in. Engines
+receive that same snapshot. A run stores that snapshot, the seed, and the tick
+count. Replay launches the run again.
 
-The add-on collects unsaved source data directly and sends it through an inherited
-socket to the mission process. Command-line loading evaluates the saved file.
-Fuzz batches resolve `.blend` once into a temporary `.asim`, then independent
-workers reuse that immutable input. Preserved failures include their binary
-snapshot so reproduction does not reopen Blender.
+The add-on collects unsaved source data directly and sends the snapshot through
+an inherited socket to the mission process. Command-line loading evaluates the
+saved file. Fuzz batches resolve `.blend` once into a temporary `.asim`, then
+independent workers reuse that immutable input. Preserved failures include
+their snapshot so reproduction does not reopen Blender.
 
 The snapshot records evaluated geometry, transforms, resolved calibration,
-source scene/frame, content hash, profile hashes, exporter/Blender versions and
-the included/excluded object inventory. Fuzzing starts from that frozen snapshot
-and records its seed and resolved changes. Runs never consult subsequent source
-edits; physics replay never reopens Blender or recalibrates a vehicle.
+source scene/frame, and content hash. Calibration profiles stay authoring
+inputs and are resolved into the body and shape records before the snapshot is
+written. Fuzzing starts from that frozen snapshot and records its seed.
+Runs never consult subsequent source edits. Physics replay runs the snapshot
+again. After the reducer deletes faults or zeros commands, those edits are
+saved in `reduced.asim` and replayed with `--resolved`.
 
-`AutonomyPreview` receives state and keyframes. Source objects, mounts and their
-starting conditions stay untouched. Changing the authoring scene creates a new
-snapshot/preview; existing takes continue to refer to their original snapshot.
-Trace-only imports reconstruct physical geometry. The legacy native CBlend
+`AutonomyPreview` receives the live pose link while a process is running.
+Source objects, mounts and their starting conditions stay untouched. Changing
+the authoring scene creates a new snapshot/preview. A saved take remembers the
+seed, tick budget, and scene used to launch the run again. The legacy native CBlend
 importer remains explicitly opt-in for old stored-mesh workflows and is not
 used by these launch paths.

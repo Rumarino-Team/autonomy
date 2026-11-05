@@ -1,5 +1,5 @@
 #pragma once
-#include "scene.hpp"
+#include "image.hpp"
 #include <functional>
 #include <map>
 namespace sim {
@@ -34,6 +34,6 @@ public:
   const std::string &contribution(const std::string &name) const;
   const ForceFunction &get(const std::string &name) const;
 };
-void add_force(SimWrench &w, SimVec3 force, SimVec3 application_point,
-               SimVec3 com);
+void add_force(SimWrench &wrench, SimVec3 force, SimVec3 application_point,
+               SimVec3 center_of_mass);
 } // namespace sim

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify the authored allocator against forces, arms and propeller torques."""
+import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -8,7 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from controller_config import configuration, wrench_columns
 
 root = Path(__file__).resolve().parents[1]
-scene = json.loads((root/'scenarios/pool.json').read_text())
+spec = importlib.util.spec_from_file_location(
+    "scene_wire", root.parent/"tools/blender/autonomy_sim/wire.py")
+wire = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wire)
+scene = wire.decode((root/'scenarios/pool.asim').read_bytes())
 config = json.loads((root/'scenarios/controller.json').read_text())
 assert config == configuration(scene), 'regenerate the controller after changing the vehicle or tuning'
 columns = wrench_columns(scene)

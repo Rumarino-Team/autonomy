@@ -1,25 +1,32 @@
 #include "auv.h"
-#include "runtime.hpp"
 #include "blender_link.hpp"
+#include <atomic>
+#include <cstdio>
+#include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <filesystem>
 #include <memory>
 #include <thread>
 namespace {
 using namespace sim;
 struct Context {
+  std::shared_ptr<Backend> backend;
   std::unique_ptr<World> world;
   AuvSimulationStatus status{};
-  std::ofstream trace;
   uint64_t limit = 21600;
+  double min_depth = 0, max_depth = 0;
+  bool depth_seen = false;
   std::vector<double> commands;
   std::unique_ptr<BlenderPublisher> blender;
   bool realtime = false;
   std::chrono::steady_clock::time_point started;
 };
 thread_local Context context;
+std::atomic<int> prepared_envs{0};
 const char *environment(const char *key, const char *fallback) {
   auto p = std::getenv(key);
   return p && *p ? p : fallback;
@@ -55,17 +62,32 @@ void pose(MathPose &dst, SimPose p) {
 }
 } // namespace
 extern "C" {
+void note_depth() {
+  if (!context.world)
+    return;
+  auto &w = *context.world;
+  double depth = w.bodies[w.scene.header.camera.body].pose.position.z;
+  if (!context.depth_seen) {
+    context.min_depth = context.max_depth = depth;
+    context.depth_seen = true;
+  } else {
+    context.min_depth = std::min(context.min_depth, depth);
+    context.max_depth = std::max(context.max_depth, depth);
+  }
+}
 void auv_deinit() {
-  if (context.trace) {
-    context.trace << Json{{"t", "end"},
-                          {"step", context.status.tick},
-                          {"status", context.status.code}}
-                  << '\n';
-    context.trace.close();
+  if (context.world) {
+    auto &w = *context.world;
+    std::printf("{\"steps\":%llu,\"hash\":%llu,\"min_depth\":%.17g,\"max_depth\":%.17g,\"status\":%d}\n",
+                static_cast<unsigned long long>(w.tick),
+                static_cast<unsigned long long>(w.state_hash()), context.min_depth,
+                context.max_depth, context.status.code);
+    std::fflush(stdout);
   }
   context.world.reset();
   context.blender.reset();
   context.commands.clear();
+  context.depth_seen = false;
 }
 void auv_init() {
   auv_deinit();
@@ -75,8 +97,7 @@ void auv_init() {
         environment("AUTONOMY_SIM_SCENARIO", "auvs/stonefish_sim/data/pool_scene.blend");
     auto scene = Scene::load(path);
     if (std::getenv("AUTONOMY_SIM_SEED"))
-      scene = Scene::parse(
-          draw_case(scene.document, integer("AUTONOMY_SIM_SEED", 0)), path);
+      scene = draw_case(std::move(scene), integer("AUTONOMY_SIM_SEED", 0));
     Dl_info info{};
     require(dladdr(reinterpret_cast<void *>(&auv_init), &info) &&
                 info.dli_fname,
@@ -84,9 +105,9 @@ void auv_init() {
     auto backend_path =
         std::filesystem::absolute(info.dli_fname).parent_path() /
         "libsim_backend_mujoco.so";
-    auto backend = std::make_shared<Backend>(
+    context.backend = std::make_shared<Backend>(
         environment("AUTONOMY_SIM_BACKEND", backend_path.c_str()));
-    context.world = std::make_unique<World>(std::move(scene), backend);
+    context.world = std::make_unique<World>(std::move(scene), context.backend);
     context.limit = integer("AUTONOMY_SIM_MAX_TICKS", 21600);
     require(context.limit > 0, "simulation tick budget must be positive");
     context.commands.assign(context.world->scene.thrusters.size(), 0);
@@ -100,21 +121,36 @@ void auv_init() {
       context.blender = std::make_unique<BlenderPublisher>(port);
       context.blender->publish(*context.world, context.world->observe());
     }
-    if (auto path = std::getenv("AUTONOMY_SIM_TRACE")) {
-      context.trace.open(path);
-      require(bool(context.trace), "cannot open simulation trace");
-      context.trace << Json{{"t", "header"},
-                            {"version", 1},
-                            {"backend", backend->api.name},
-                            {"backend_version", backend->api.version},
-                            {"build_fingerprint", backend->build_fingerprint},
-                            {"scenario", context.world->scene.document},
-                            {"fingerprint", context.world->scene.fingerprint()}}
-                    << '\n';
-      context.trace << context.world->sample() << '\n';
-    }
+    note_depth();
   } catch (const std::exception &e) {
     error(e.what());
+  }
+}
+bool auv_prepare_batch(int num_envs) {
+  if (num_envs <= 0)
+    return false;
+  int expected = 0;
+  return prepared_envs.compare_exchange_strong(expected, num_envs);
+}
+bool auv_begin_fuzz(uint64_t seed) {
+  if (prepared_envs.load() <= 0 || !context.world || !context.backend)
+    return false;
+  try {
+    auto path =
+        environment("AUTONOMY_SIM_SCENARIO", "auvs/stonefish_sim/data/pool_scene.blend");
+    auto scene = draw_case(Scene::load(path), seed);
+    auto world = std::make_unique<World>(std::move(scene), context.backend);
+    context.commands.assign(world->scene.thrusters.size(), 0);
+    require(context.commands.size() <= 8, "AUV bridge supports at most eight thrusters");
+    context.world = std::move(world);
+    context.status = {};
+    context.depth_seen = false;
+    context.started = std::chrono::steady_clock::now();
+    note_depth();
+    return true;
+  } catch (const std::exception &e) {
+    error(e.what());
+    return false;
   }
 }
 void auv_set_thrustor_values(const float *input, uint8_t count) {
@@ -157,7 +193,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
       context.blender->publish(w, o);
     // Existing mission controllers consume the vehicle origin and body attitude
     // here.
-    pose(frame->camera_pose, w.bodies[w.scene.camera.body].pose);
+    pose(frame->camera_pose, w.bodies[w.scene.header.camera.body].pose);
     quaternion(frame->imu_quat, o.imu);
     frame->timestamp = w.timestamp_ns();
     frame->position_ok = {o.position_ok, o.position_ok, o.position_ok};
@@ -166,8 +202,8 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     vector(frame->gyro, o.gyro);
     frame->pressure_depth = o.depth;
     frame->pressure_depth_ok = o.depth_ok;
-    frame->image_width = w.scene.camera.width;
-    frame->image_height = w.scene.camera.height;
+    frame->image_width = w.scene.header.camera.width;
+    frame->image_height = w.scene.header.camera.height;
     for (auto &object : o.objects) {
       if (frame->objects_len >= AUV_FRAME_MAX_OBJECTS)
         break;
@@ -184,8 +220,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
         out2.bottom_right = {object.x1, object.y1};
       }
     }
-    if (context.trace)
-      context.trace << w.sample() << '\n';
+    note_depth();
   } catch (const std::exception &e) {
     error(e.what());
   }

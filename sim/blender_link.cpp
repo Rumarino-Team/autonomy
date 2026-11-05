@@ -16,7 +16,7 @@ void BlenderPublisher::publish(const World &w, const Observation &observation) {
   const double time = w.timestamp_ns() * 1e-9;
   if (time + 1e-9 < next_time_)
     return;
-  const bool stable_ids = w.scene.blender_source;
+  const bool stable_ids = w.scene.from_blender();
   std::vector<unsigned char> packet{'A', 'M', 'J', 'B', static_cast<unsigned char>(stable_ids ? 2 : 1), 0, 0, 0};
   auto number = [&](double x) {
     auto bits = std::bit_cast<uint64_t>(x);
@@ -45,9 +45,9 @@ void BlenderPublisher::publish(const World &w, const Observation &observation) {
     number(-p.orientation.z);
   };
   for (size_t i = 0; i < w.bodies.size(); ++i) {
-    const auto &body = w.scene.model.bodies[i];
-    if (body.value.motion == SIM_DYNAMIC || body.tracked || body.fuzz)
-      pose(body.value.id, body.name, w.bodies[i].pose);
+    const auto &body = w.scene.bodies[i];
+    if (body.motion == SIM_DYNAMIC || body.tracked || body.fuzz)
+      pose(body.id, body.name, w.bodies[i].pose);
   }
   pose(UINT32_MAX, "camera", observation.camera);
   packet[6] = count & 255;

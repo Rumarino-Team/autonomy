@@ -9,12 +9,12 @@ from mathutils import Matrix, Quaternion, Vector
 
 repo = Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(Path(__file__).parent))
-from autonomy_sim import exporter
+from autonomy_sim import exporter, wire
 
 scene = bpy.context.scene
 if scene.get('sim_schema'):
     raise RuntimeError('scene is already migrated; migration is intentionally one-time')
-legacy = json.loads((repo/'sim/scenarios/hydrus.json').read_text())
+legacy = wire.decode((repo/'sim/scenarios/hydrus.asim').read_bytes())
 vehicle = next(b for b in legacy['bodies'] if b['name']=='hydrus')
 folder = repo/'sim/profiles'; folder.mkdir(exist_ok=True)
 profile = {'version':1,'description':'Measured Hydrus mass, added inertia, buoyancy, fluid coefficients and motor calibration.',
@@ -115,7 +115,7 @@ profile['geometry_hash']=next(b['geometry_hash'] for b in snapshot['bodies'] if 
 profile['geometry_reference']=exporter.geometry_reference(next(b['shapes'] for b in snapshot['bodies'] if b['id']==1))
 exporter.atomic_json(folder/'hydrus.json',profile)
 exporter.embed_profiles(scene,folder)
-snapshot=exporter.export_scene(scene,folder,output=repo/'sim/scenarios/pool.json')
+snapshot=exporter.export_scene(scene,folder,output=repo/'sim/scenarios/pool.asim')
 scene['sim_migration']='experimental ad1c601 -> evaluated authoring contract v1'
 bpy.ops.wm.save_as_mainfile(filepath=str(repo/'auvs/stonefish_sim/data/pool_scene.blend'))
 print('MIGRATED_POOL',len(snapshot['bodies']),snapshot['source']['content_hash'])

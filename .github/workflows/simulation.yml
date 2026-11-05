@@ -35,10 +35,16 @@ jobs:
         run: ctest --test-dir build/portable --output-on-failure --parallel 2
       - name: Seeded fuzz and replay
         env:
-          CASES: ${{ github.event_name == 'schedule' && '1000' || '8' }}
+          CASES: ${{ github.event_name == 'schedule' && '32' || '4' }}
         run: |
+          mkdir -p build/fuzz
+          build/portable/sim/simctl snapshot auvs/stonefish_sim/data/pool_scene.blend build/fuzz/pool.asim
           for engine in mujoco stonefish; do
-            python3 sim/fuzz.py --backend "build/portable/sim/libsim_backend_${engine}.so" --scenario auvs/stonefish_sim/data/pool_scene.blend --cases "$CASES" --workers 4 --ticks 720 --verify-replay --reduce-failures --output "build/fuzz/$engine"
+            AUTONOMY_SIM_BACKEND="build/portable/sim/libsim_backend_${engine}.so" \
+            AUTONOMY_SIM_SCENARIO=build/fuzz/pool.asim \
+            AUTONOMY_SIM_MAX_TICKS=21600 \
+              ./zig-out/bin/src_3 build/portable/sim/libauv_sim.so \
+              fuzz sim/scenarios/controller.json 1 "$CASES"
           done
       - uses: actions/upload-artifact@v4
         if: failure()

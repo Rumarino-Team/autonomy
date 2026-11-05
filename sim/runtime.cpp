@@ -1,11 +1,12 @@
 #include "runtime.hpp"
 #include <dlfcn.h>
+#include <filesystem>
+#include <set>
 #include <limits>
-#include <numbers>
 namespace sim {
 static void runtime_identity() {}
-Backend::Backend(const std::filesystem::path &p)
-    : path(std::filesystem::absolute(p)) {
+Backend::Backend(const std::string &file)
+    : path(std::filesystem::absolute(file).string()) {
   library_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!library_)
     throw std::runtime_error(dlerror());
@@ -16,8 +17,7 @@ Backend::Backend(const std::filesystem::path &p)
     require(entry(SIM_BACKEND_ABI_VERSION, sizeof(api), &api) == SIM_OK,
             "incompatible physics backend ABI");
     require(api.struct_size == sizeof(api) &&
-                api.abi_version == SIM_BACKEND_ABI_VERSION &&
-                api.model_create && api.model_destroy && api.world_create &&
+                api.abi_version == SIM_BACKEND_ABI_VERSION && api.world_create &&
                 api.world_destroy && api.reset && api.step && api.read_state &&
                 api.read_contacts && api.state_hash,
             "incomplete backend API");
@@ -56,18 +56,18 @@ World::World(Scene s, std::shared_ptr<Backend> backend, ForceRegistry registry)
     : backend_(std::move(backend)), registry_(std::move(registry)),
       scene(std::move(s)) {
   require(bool(backend_), "missing backend");
-  scene.model.bind();
-  validate(&scene.model.value);
-  require(backend_->api.integrators & (1u << scene.model.value.integrator),
+  scene.validate();
+  require(backend_->api.integrators & (1u << scene.header.integrator),
           "requested integrator is unsupported by backend");
-  if (scene.model.value.native_hydrodynamics)
+  if (scene.header.native_hydrodynamics)
     require(backend_->api.capabilities & SIM_CAP_NATIVE_HYDRO,
             "backend does not support native hydrodynamics");
-  modules_ = scene.force_modules;
-  if (scene.model.value.native_hydrodynamics)
+  for (auto &module : scene.modules)
+    modules_.push_back(module.text);
+  if (scene.header.native_hydrodynamics)
     std::erase(modules_, "hydrodynamics");
   std::set<std::string> names, contributions;
-  if (scene.model.value.native_hydrodynamics)
+  if (scene.header.native_hydrodynamics)
     contributions.insert("hydrodynamics");
   for (auto &name : modules_) {
     require(names.insert(name).second, "duplicate force module");
@@ -79,36 +79,35 @@ World::World(Scene s, std::shared_ptr<Backend> backend, ForceRegistry registry)
   require(contributions.contains("gravity"),
           "gravity compensation module is required");
   char error[1024]{};
-  backend_->check(backend_->api.model_create(&scene.model.value, &model_, error,
-                                             sizeof(error)),
-                  error);
+  auto scenario = scene.binary();
+  require(scenario.size() <= std::numeric_limits<uint32_t>::max(),
+          "scene snapshot exceeds the backend argument");
   try {
-    backend_->check(
-        backend_->api.world_create(model_, &world_, error, sizeof(error)),
-        error);
+    backend_->check(backend_->api.world_create(
+                        reinterpret_cast<const char *>(scenario.data()),
+                        uint32_t(scenario.size()), &world_, error,
+                        sizeof(error)),
+                    error);
     reset();
   } catch (...) {
     if (world_)
       backend_->api.world_destroy(world_);
-    backend_->api.model_destroy(model_);
     throw;
   }
 }
 World::~World() {
   if (world_)
     backend_->api.world_destroy(world_);
-  if (model_)
-    backend_->api.model_destroy(model_);
 }
 void World::read() {
   uint32_t count = 0;
-  bodies.resize(scene.model.bodies.size());
+  bodies.resize(scene.bodies.size());
   backend_->check(
       backend_->api.read_state(world_, bodies.data(), bodies.size(), &count),
       "");
   require(count == bodies.size(), "backend returned wrong body count");
   for (size_t i = 0; i < count; ++i)
-    require(bodies[i].id == scene.model.bodies[i].value.id &&
+    require(bodies[i].id == scene.bodies[i].id &&
                 finite(bodies[i].pose.position) &&
                 finite(bodies[i].pose.orientation) &&
                 std::abs(norm2(bodies[i].pose.orientation) - 1) < 1e-5 &&
@@ -139,7 +138,7 @@ void World::reset(const std::vector<SimBodyState> &state) {
   rotors.assign(scene.thrusters.size(), {});
   commands.assign(scene.thrusters.size(), 0);
   input_commands = commands;
-  fluid_cache_.assign(scene.model.bodies.size(), {});
+  fluid_cache_.assign(scene.bodies.size(), {});
   wrenches = fluid_cache_;
   read();
   previous_velocity_.clear();
@@ -152,8 +151,8 @@ void World::reset(const std::vector<SimBodyState> &state) {
 uint64_t World::timestamp_ns() const {
   __extension__ typedef unsigned __int128 TickProduct;
   TickProduct n = static_cast<TickProduct>(tick) *
-                  scene.model.value.dt_numerator * 1000000000ULL;
-  n /= scene.model.value.dt_denominator;
+                  scene.header.dt_numerator * 1000000000ULL;
+  n /= scene.header.dt_denominator;
   require(n <= UINT64_MAX, "simulation timestamp overflow");
   return uint64_t(n);
 }
@@ -167,14 +166,14 @@ void World::step(const std::vector<double> &input) {
             "commands must be finite in [-1,1]");
   for (const auto &f : scene.faults)
     if (tick >= f.start && tick < f.end) {
-      if (f.kind == Scene::FaultKind::Dead || f.kind == Scene::FaultKind::Weak) {
+      if (f.kind == FaultKind::Dead || f.kind == FaultKind::Weak) {
         auto index = f.thruster;
         if (index < commands.size())
-          commands[index] *= f.kind == Scene::FaultKind::Dead ? 0 : f.magnitude;
+          commands[index] *= f.kind == FaultKind::Dead ? 0 : f.magnitude;
       }
     }
   for (size_t i = 0; i < wrenches.size(); ++i) {
-    wrenches[i] = {scene.model.bodies[i].value.id, {}, {}};
+    wrenches[i] = {scene.bodies[i].id, {}, {}};
     previous_velocity_[i] = bodies[i].linear_velocity;
     previous_angular_velocity_[i] = bodies[i].angular_velocity;
   }
@@ -192,17 +191,17 @@ void World::step(const std::vector<double> &input) {
   ++tick;
   read();
   for (auto &b : bodies) {
-    require(norm(b.pose.position) <= scene.bounds.position,
+    require(norm(b.pose.position) <= scene.header.bounds.position,
             "position bound exceeded");
-    require(norm(b.linear_velocity) <= scene.bounds.speed,
+    require(norm(b.linear_velocity) <= scene.header.bounds.speed,
             "speed bound exceeded");
-    require(norm(b.angular_velocity) <= scene.bounds.angular_speed,
+    require(norm(b.angular_velocity) <= scene.header.bounds.angular_speed,
             "angular speed bound exceeded");
   }
 }
 Observation World::observe() const {
   Observation o;
-  const auto &c = scene.camera;
+  const auto &c = scene.header.camera;
   const auto &b = bodies[c.body];
   o.camera = compose(b.pose, c.pose);
   o.imu = b.pose.orientation;
@@ -215,13 +214,13 @@ Observation World::observe() const {
       cross(angular_acceleration, arm) +
       cross(b.angular_velocity, cross(b.angular_velocity, arm));
   o.accel = rotate(conjugate(b.pose.orientation),
-                   origin_acceleration - scene.model.value.gravity);
+                   origin_acceleration - scene.header.gravity);
   o.depth = o.camera.position.z;
   auto camera_inverse = conjugate(o.camera.orientation);
   double focal =
       c.width * .5 / std::tan(c.horizontal_fov * std::numbers::pi / 360);
   for (size_t i = 0; i < bodies.size(); ++i) {
-    const auto &description = scene.model.bodies[i];
+    const auto &description = scene.bodies[i];
     if (!description.tracked)
       continue;
     SimVec3 lo{INFINITY, INFINITY, INFINITY},
@@ -230,10 +229,11 @@ Observation World::observe() const {
       lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
       hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
     };
-    for (auto &g : description.views)
+    for (uint32_t k = 0; k < description.shape_count; ++k) {
+      auto &g = scene.shapes[description.shape_begin + k];
       if (g.kind == SIM_MESH) {
         for (uint32_t v = 0; v < g.vertex_count; ++v)
-          add(point(g.pose, g.vertices[v]));
+          add(point(g.pose, scene.vertices[g.vertex_begin + v]));
       } else {
         SimVec3 size = g.size;
         if (g.kind == SIM_SPHERE)
@@ -244,8 +244,9 @@ Observation World::observe() const {
           add(point(g.pose, {k & 1 ? size.x : -size.x, k & 2 ? size.y : -size.y,
                              k & 4 ? size.z : -size.z}));
       }
+    }
     ObjectObservation object{
-        description.value.id,
+        description.id,
         description.cls,
         {point(bodies[i].pose, (lo + hi) * .5), bodies[i].pose.orientation},
         hi - lo};
@@ -279,16 +280,16 @@ Observation World::observe() const {
   }
   for (const auto &f : scene.faults)
     if (tick >= f.start && tick < f.end) {
-      if (f.kind == Scene::FaultKind::Tracking) {
+      if (f.kind == FaultKind::Tracking) {
         o.position_ok = false;
         o.objects.clear();
-      } else if (f.kind == Scene::FaultKind::Imu) {
+      } else if (f.kind == FaultKind::Imu) {
         o.attitude_ok = false;
         o.imu_ok = false;
         o.gyro_ok = false;
-      } else if (f.kind == Scene::FaultKind::Gyro)
+      } else if (f.kind == FaultKind::Gyro)
         o.gyro.x += f.magnitude;
-      else if (f.kind == Scene::FaultKind::Depth)
+      else if (f.kind == FaultKind::Depth)
         o.depth += f.magnitude;
     }
   return o;
@@ -321,110 +322,6 @@ uint64_t World::state_hash() const {
       h.scalar(v);
   }
   return h.value;
-}
-Json World::sample() const {
-  Json j = {{"t", "sample"},
-            {"step", tick},
-            {"timestamp_ns", timestamp_ns()},
-            {"hash", state_hash()},
-            {"bodies", Json::array()},
-            {"thr", commands},
-            {"input_commands", input_commands},
-            {"rotors", Json::array()},
-            {"wrenches", Json::array()}};
-  for (auto &b : bodies)
-    j["bodies"].push_back(json(b));
-  for (auto &r : rotors)
-    j["rotors"].push_back({r.omega, r.integral, r.torque, r.thrust});
-  for (auto &w : wrenches)
-    j["wrenches"].push_back(
-        {{"id", w.id}, {"force", json(w.force)}, {"torque", json(w.torque)}});
-  auto o = observe();
-  j["camera"] = json(o.camera);
-  j["gyro"] = json(o.gyro);
-  j["accel"] = json(o.accel);
-  j["depth"] = o.depth;
-  j["position_ok"] = o.position_ok;
-  j["attitude_ok"] = o.attitude_ok;
-  return j;
-}
-Json draw_case(Json j, uint64_t seed) {
-  auto u = [&](uint64_t channel, double lo, double hi) {
-    return lo + (hi - lo) * random(seed, channel);
-  };
-  for (auto &b : j["bodies"]) {
-    uint64_t channel = uint64_t(b.at("id").get<uint32_t>()) * 32;
-    bool dynamic = b.value("motion", 0u) == SIM_DYNAMIC;
-    if (!dynamic && !b.value("fuzz", false))
-      continue;
-    auto p = pose(b.value("pose", Json::object()));
-    p.position =
-        p.position + SimVec3{u(channel, -.2, .2), u(channel + 1, -.2, .2),
-                             u(channel + 2, -.1, .1)};
-    p.orientation = multiply(p.orientation, euler(u(channel + 3, -.05, .05),
-                                                  u(channel + 4, -.05, .05),
-                                                  u(channel + 5, -.15, .15)));
-    b["pose"] = json(p);
-    if (dynamic) {
-      b["dry_mass"] =
-          b.value("dry_mass", b.value("mass", 1.0)) * u(channel + 6, .97, 1.03);
-      b["volume"] = b.value("volume", 0.0) * u(channel + 7, .97, 1.03);
-      b["linear_velocity"] =
-          json(vec(b.value("linear_velocity", Json{0, 0, 0})) +
-               SimVec3{u(channel + 8, -.2, .2), u(channel + 9, -.2, .2),
-                       u(channel + 10, -.2, .2)});
-      b["angular_velocity"] =
-          json(vec(b.value("angular_velocity", Json{0, 0, 0})) +
-               SimVec3{u(channel + 11, -.2, .2), u(channel + 12, -.2, .2),
-                       u(channel + 13, -.2, .2)});
-    }
-  }
-  double speed = u(900, 0, .15),
-         angle = u(901, -std::numbers::pi, std::numbers::pi);
-  j["current"] = {speed * std::cos(angle), speed * std::sin(angle), 0};
-  if (j.contains("hull"))
-    for (auto &h : j["hull"]) {
-      double scale = u(910 + h.at("body").get<uint32_t>(), .7, 1.4);
-      h["drag"] = json(vec(h.at("drag")) * scale);
-      h["skin"] = json(vec(h.at("skin")) * scale);
-      h["volume"] =
-          h.value("volume", 0.0) *
-          u(uint64_t(h.at("body").get<uint32_t>()) * 32 + 7, .97, 1.03);
-    }
-  j["faults"] = j.value("faults", Json::array());
-  if (j.contains("thrusters"))
-    for (size_t i = 0; i < j["thrusters"].size(); ++i) {
-      auto &thruster = j["thrusters"][i];
-      if (!thruster.contains("spec"))
-        thruster["spec"] = Json::object();
-      auto &spec = thruster["spec"];
-      uint64_t channel =
-          20000 + uint64_t(thruster.at("body").get<uint32_t>()) * 4096 + i * 8;
-      double scale = u(channel, .8, 1.2);
-      spec["thrust_coeff"] = spec.value("thrust_coeff", .48) * scale;
-      spec["torque_coeff"] = spec.value("torque_coeff", .05) * scale;
-      spec["rotor_inertia"] =
-          spec.value("rotor_inertia", .00146468) * u(channel + 1, .7, 1.5);
-    }
-  auto thrusters = j.value("thrusters", Json::array());
-  if (!thrusters.empty()) {
-    uint64_t start = uint64_t(u(930, 36, 360));
-    j["faults"].push_back({{"kind", random(seed, 933) < .25 ? "dead" : "weak"},
-                           {"start_tick", start},
-                           {"end_tick", start + 180},
-                           {"thruster", uint32_t(u(931, 0, thrusters.size()))},
-                           {"magnitude", u(932, .3, .7)}});
-  }
-  const char *sensor_faults[] = {"tracking", "imu", "gyro", "depth"};
-  auto sensor_kind =
-      sensor_faults[std::min(3u, uint32_t(random(seed, 940) * 4))];
-  j["faults"].push_back({{"kind", sensor_kind},
-                         {"start_tick", 360},
-                         {"end_tick", 720},
-                         {"magnitude", u(941, -.05, .05)}});
-  j["case_seed"] = seed;
-  j["generator_version"] = 1;
-  return j;
 }
 std::vector<double> generated_commands(const Scene &scene, uint64_t seed,
                                        uint64_t tick) {

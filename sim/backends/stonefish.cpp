@@ -1,4 +1,5 @@
 #include "wire.hpp"
+#include <filesystem>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <memory>
@@ -8,9 +9,6 @@
 extern char **environ;
 namespace {
 using namespace sim;
-struct Model {
-  Json source;
-};
 struct World {
   int fd = -1;
   pid_t process = -1;
@@ -27,42 +25,30 @@ struct World {
     }
   }
 };
-void update(World &w, const Json &reply) {
-  if (reply.contains("error"))
-    throw std::runtime_error(reply.at("error").get<std::string>());
-  w.states.clear();
-  w.contacts.clear();
-  for (auto &s : reply.at("states"))
-    w.states.push_back(state(s));
-  for (auto &c : reply.at("contacts"))
-    w.contacts.push_back({c.at("a"), c.at("b"), vec(c.at("position")),
-                          vec(c.at("normal")), c.at("force")});
-  w.hash = reply.at("hash");
+void update(World &w, const std::vector<uint8_t> &frame) {
+  auto reply = read_worker_reply(frame);
+  w.states = std::move(reply.states);
+  w.contacts = std::move(reply.contacts);
+  w.hash = reply.hash;
 }
-void request(World &w, const Json &message) {
-  send_message(w.fd, message);
-  update(w, receive_message(w.fd));
+void request(World &w, const std::vector<uint8_t> &message) {
+  send_frame(w.fd, message.data(), message.size());
+  update(w, receive_frame(w.fd));
 }
-SimResult model_create(const SimModelDesc *d, void **out, char *e, uint32_t n) {
+SimResult world_create(const char *scenario, uint32_t length, void **out,
+                       char *e, uint32_t n) {
   if (!out)
     return SIM_INVALID;
   *out = nullptr;
-  return guarded(e, n, [&] {
-    validate(d);
-    require(d->integrator == SIM_INTEGRATOR_DEFAULT,
-            "Stonefish exposes its default integrator only");
-    require(d->gravity.x == 0 && d->gravity.y == 0 && d->gravity.z >= 0,
-            "Stonefish requires NED gravity along +Z");
-    auto m = std::make_unique<Model>();
-    m->source = encode(*d);
-    *out = m.release();
-  });
-}
-SimResult world_create(const void *model, void **out, char *e, uint32_t n) {
-  if (!out || !model)
+  if (!scenario || !length)
     return SIM_INVALID;
-  *out = nullptr;
   return guarded(e, n, [&] {
+    auto model = Scene::read(scenario, length);
+    require(model.header.integrator == SIM_INTEGRATOR_DEFAULT,
+            "Stonefish exposes its default integrator only");
+    require(model.header.gravity.x == 0 && model.header.gravity.y == 0 &&
+                model.header.gravity.z >= 0,
+            "Stonefish requires NED gravity along +Z");
     auto w = std::make_unique<World>();
     int sockets[2];
     if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets))
@@ -97,9 +83,8 @@ SimResult world_create(const void *model, void **out, char *e, uint32_t n) {
     if (result)
       throw std::system_error(result, std::generic_category(),
                               "spawn Stonefish worker");
-    request(*w, {{"version", 1},
-                 {"op", "init"},
-                 {"model", static_cast<const Model *>(model)->source}});
+    send_frame(w->fd, scenario, length);
+    update(*w, receive_frame(w->fd));
     *out = w.release();
   });
 }
@@ -108,10 +93,7 @@ SimResult reset(void *p, const SimBodyState *states, uint32_t count, char *e,
   if (!p || (!states && count))
     return SIM_INVALID;
   return guarded(e, n, [&] {
-    Json j = {{"version", 1}, {"op", "reset"}, {"states", Json::array()}};
-    for (uint32_t i = 0; i < count; ++i)
-      j["states"].push_back(json(states[i]));
-    request(*static_cast<World *>(p), j);
+    request(*static_cast<World *>(p), worker_reset(states, count));
   });
 }
 SimResult step(void *p, const SimWrench *forces, uint32_t count, char *e,
@@ -119,12 +101,7 @@ SimResult step(void *p, const SimWrench *forces, uint32_t count, char *e,
   if (!p || (!forces && count))
     return SIM_INVALID;
   return guarded(e, n, [&] {
-    Json j = {{"version", 1}, {"op", "step"}, {"forces", Json::array()}};
-    for (uint32_t i = 0; i < count; ++i)
-      j["forces"].push_back({{"id", forces[i].id},
-                             {"force", json(forces[i].force)},
-                             {"torque", json(forces[i].torque)}});
-    request(*static_cast<World *>(p), j);
+    request(*static_cast<World *>(p), worker_step(forces, count));
   });
 }
 } // namespace
@@ -156,8 +133,6 @@ extern "C" SimResult sim_backend_get_api(uint32_t version, uint32_t size,
                   "stonefish/%016llx/%016llx",
                   static_cast<unsigned long long>(engine),
                   static_cast<unsigned long long>(binary));
-    api->model_create = model_create;
-    api->model_destroy = [](void *p) { delete static_cast<Model *>(p); };
     api->world_create = world_create;
     api->world_destroy = [](void *p) { delete static_cast<World *>(p); };
     api->reset = reset;

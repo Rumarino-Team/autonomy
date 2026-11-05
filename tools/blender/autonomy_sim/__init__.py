@@ -1,7 +1,7 @@
-"""Live simulation poses and recorded takes, ported from experimental.
+"""Live simulation poses for portable simulation backends.
 
-The pool asset, take/action management, paths and rotor animation are retained.
-Live AMJB packets and portable JSONL traces work with any simulation backend.
+A take remembers the seed, tick budget, and scene. Play launches that run again.
+The pose link moves the view while the process is running.
 """
 
 import json
@@ -26,7 +26,7 @@ from bpy.props import (
 from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup, UIList
 from mathutils import Matrix, Quaternion, Vector
 
-from . import rotor_animation, trace, exporter, preview, wire
+from . import rotor_animation, exporter, preview, wire
 
 bl_info = {
     "name": "Autonomy Simulation",
@@ -34,7 +34,7 @@ bl_info = {
     "version": (3, 1, 0),
     "blender": (4, 5, 0),
     "location": "View3D > Sidebar > Autonomy",
-    "description": "Live poses, recorded takes and propeller animation for portable simulation backends",
+    "description": "Live poses and propeller animation for portable simulation backends",
     "category": "Animation",
 }
 
@@ -169,14 +169,8 @@ def _drain():
 # Takes: record and keyframe.
 
 TAKE_DIR = "autonomy_takes"
-TAKE_COLLECTION = "autonomy_takes"
 MARKER_PREFIX = "hydrus: "
-# Keyframe.interpolation enum value for LINEAR.
-LINEAR = 1
-
 _job = {"proc": None, "log": None, "scene": "", "take": "", "time": 0.0, "message": "", "cancelled": False}
-_recordings = {}
-
 
 def _prefs():
     addon = bpy.context.preferences.addons.get(__name__)
@@ -220,57 +214,6 @@ def _tool_paths(scene):
     return paths
 
 
-def _takes_dir():
-    repo = _repo_dir()
-    folder = (repo / "build/portable" if repo is not None else Path(bpy.app.tempdir)) / TAKE_DIR
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
-def _scene_fps(scene):
-    return scene.render.fps / scene.render.fps_base
-
-
-def _read_recording(path):
-    """Header, samples sorted by step, events, and the end line (None while running)."""
-    path = Path(path)
-    stat = path.stat()
-    cached = _recordings.get(str(path))
-    identity = (stat.st_mtime_ns, stat.st_size, _scene_fps(bpy.context.scene))
-    if cached is not None and cached[0] == identity:
-        return cached[1]
-    recording = trace.read_recording(path, _scene_fps(bpy.context.scene))
-    _recordings[str(path)] = (identity, recording)
-    return recording
-
-
-def _take_frame(scene, take, time):
-    return take.frame_offset + time * _scene_fps(scene)
-
-
-def _action_name(take_name, object_name):
-    return f"{take_name}:{object_name}"
-
-
-def _fcurve(action, obj, data_path, index):
-    if hasattr(action, "fcurve_ensure_for_datablock"):
-        return action.fcurve_ensure_for_datablock(obj, data_path, index=index)
-    return action.fcurves.new(data_path, index=index)
-
-
-def _write_curve(curve, frames, values):
-    count = len(frames)
-    points = curve.keyframe_points
-    points.clear()
-    points.add(count)
-    co = [0.0] * (2 * count)
-    co[0::2] = frames
-    co[1::2] = values
-    points.foreach_set("co", co)
-    points.foreach_set("interpolation", [LINEAR] * count)
-    curve.update()
-
-
 def _assign_action(obj, action):
     obj.animation_data_create()
     animation = obj.animation_data
@@ -279,128 +222,11 @@ def _assign_action(obj, action):
         animation.action_slot = action.slots[0]
 
 
-def _key_object(obj, action_name, frames, poses):
-    action = bpy.data.actions.get(action_name)
-    if action is not None:
-        bpy.data.actions.remove(action)
-    action = bpy.data.actions.new(action_name)
-    # Inactive takes keep their keyframes when the file is saved.
-    action.use_fake_user = True
-    _assign_action(obj, action)
-    obj.rotation_mode = "QUATERNION"
-    parent_inverse = obj.parent.matrix_world.inverted() if obj.parent is not None else None
-    locations = ([], [], [])
-    rotations = ([], [], [], [])
-    previous = None
-    for pose in poses:
-        loc = Vector(pose[:3])
-        quat = Quaternion(pose[3:7])
-        if parent_inverse is not None:
-            loc, quat, _scale = (parent_inverse @ Matrix.LocRotScale(loc, quat, Vector((1.0, 1.0, 1.0)))).decompose()
-        # Same rotation, shortest interpolation between neighbouring keys.
-        if previous is not None and previous.dot(quat) < 0:
-            quat.negate()
-        previous = quat
-        for index in range(3):
-            locations[index].append(loc[index])
-        for index in range(4):
-            rotations[index].append(quat[index])
-    for index in range(3):
-        _write_curve(_fcurve(action, obj, "location", index), frames, locations[index])
-    for index in range(4):
-        _write_curve(_fcurve(action, obj, "rotation_quaternion", index), frames, rotations[index])
-    return action
-
-
-def _take_collection(scene):
-    collection = bpy.data.collections.get(TAKE_COLLECTION)
-    if collection is None:
-        collection = bpy.data.collections.new(TAKE_COLLECTION)
-    # Respect an existing nested collection instead of also linking it at the root.
-    pending = [scene.collection]
-    visited = set()
-    while pending:
-        parent = pending.pop()
-        if parent in visited:
-            continue
-        visited.add(parent)
-        if collection.name in parent.children:
-            return collection
-        pending.extend(parent.children)
-    parent = bpy.data.collections.get("07 | Animation")
-    if parent not in visited:
-        parent = scene.collection
-    parent.children.link(collection)
-    return collection
-
-
-def _path_material(index):
-    name = f"hydrus_path_{index % 8}"
-    mat = bpy.data.materials.get(name)
-    if mat is not None:
-        return mat
-    hue = (index * 0.618034) % 1.0
-    rgb = _hsv(hue, 0.8, 1.0)
-    mat = _material(name, (rgb[0], rgb[1], rgb[2], 1.0))
-    mat.diffuse_color = (rgb[0], rgb[1], rgb[2], 1.0)
-    return mat
-
-
-def _hsv(h, s, v):
-    i = int(h * 6.0) % 6
-    f = h * 6.0 - int(h * 6.0)
-    p, q, t = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
-    return ((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q))[i]
-
-
-def _path_object(scene, take, index, positions):
-    name = f"path_{take.name}"
-    old = bpy.data.objects.get(name)
-    if old is not None:
-        data = old.data
-        bpy.data.objects.remove(old, do_unlink=True)
-        if data is not None and data.users == 0:
-            bpy.data.curves.remove(data)
-    curve = bpy.data.curves.new(name, "CURVE")
-    curve.dimensions = "3D"
-    curve.bevel_depth = 0.01
-    spline = curve.splines.new("POLY")
-    spline.points.add(max(0, len(positions) - 1))
-    flat = []
-    for position in positions:
-        flat.extend((position[0], position[1], position[2], 1.0))
-    spline.points.foreach_set("co", flat)
-    curve.materials.append(_path_material(index))
-    obj = bpy.data.objects.new(name, curve)
-    obj.hide_render = True
-    _take_collection(scene).objects.link(obj)
-    return obj
-
-
-def _import_take(scene, take, index):
-    """Bake the recording into one action per object, plus the vehicle path."""
-    recording = _read_recording(take.recording)
-    header = recording["header"]
-    if header.get('scenario'):
-        scene['sim_snapshot']=exporter.canonical(header['scenario'])
-        scene['sim_snapshot_hash']=preview.snapshot_key(header['scenario'])
-    samples = recording["samples"]
-    if not samples:
-        raise ValueError(f"{take.recording} has no samples")
-    ensure_link_roots()
-    frames = [_take_frame(scene, take, sample["time"]) for sample in samples]
-    for name in header["objects"]:
-        obj = _ensure_driven_object(name,header.get('object_ids',{}).get(name))
-        poses = [sample["poses"][name] for sample in samples]
-        _key_object(obj, _action_name(take.name, name), frames, poses)
-    vehicle = header.get("vehicle", "hydrus")
-    root = _object_for(vehicle)
-    if root is not None:
-        rotor_animation.bake_take(root, take.name, frames, samples, _scene_fps(scene))
-    _path_object(scene, take, index, [sample["poses"][vehicle][:3] for sample in samples])
-    take.end_frame = int(math.ceil(frames[-1]))
-    end = recording["end"]
-    take.reason = end["reason"] if end is not None else "incomplete"
+def _takes_dir():
+    repo = _repo_dir()
+    folder = (repo / "build/portable" if repo is not None else Path(bpy.app.tempdir)) / TAKE_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def _take_by_name(settings, name):
@@ -410,70 +236,37 @@ def _take_by_name(settings, name):
     return None
 
 
-def _set_markers(scene, take, recording):
-    for marker in list(scene.timeline_markers):
-        if marker.name.startswith(MARKER_PREFIX):
-            scene.timeline_markers.remove(marker)
-    for event in recording["events"]:
-        frame = int(round(_take_frame(scene, take, event["time"])))
-        scene.timeline_markers.new(MARKER_PREFIX + event["text"], frame=frame)
-    if take.branch_frame >= 0:
-        scene.timeline_markers.new(MARKER_PREFIX + "branch", frame=take.branch_frame)
-    end = recording["end"]
-    if end is not None:
-        frame = int(round(_take_frame(scene, take, end["time"])))
-        scene.timeline_markers.new(MARKER_PREFIX + "end " + end["reason"], frame=frame)
-
-
-def _show_paths(settings, active):
-    visible = {active.name}
-    if settings.show_parent_path and active.parent:
-        visible.add(active.parent)
+def _next_take_name(settings):
+    used = set()
     for take in settings.takes:
-        obj = bpy.data.objects.get(f"path_{take.name}")
-        if obj is not None:
-            obj.hide_viewport = take.name not in visible
+        match = re.fullmatch(r"take_(\d+)", take.name)
+        if match:
+            used.add(int(match.group(1)))
+    folder = _takes_dir()
+    for path in folder.glob("take_*.log"):
+        match = re.fullmatch(r"take_(\d+)\.log", path.name)
+        if match:
+            used.add(int(match.group(1)))
+    return f"take_{(max(used) + 1) if used else 0:03d}"
 
 
-def activate_take(scene, take):
-    """Assign the take's actions, frame range, markers, and paths."""
-    _link["running"] = False
-    settings = scene.autonomy_sim
-    recording = _read_recording(take.recording)
-    index = list(settings.takes).index(take)
-    missing = False
-    for name in recording["header"]["objects"]:
-        obj = _object_for(name,recording['header'].get('object_ids',{}).get(name))
-        if obj is None:
-            continue
-        action = bpy.data.actions.get(_action_name(take.name, name))
-        if action is None:
-            missing = True
-            break
-        _assign_action(obj, action)
-    if missing or bpy.data.objects.get(f"path_{take.name}") is None:
-        _import_take(scene, take, index)
-    vehicle = _object_for(recording["header"].get("vehicle", "hydrus"))
-    if vehicle is not None and not rotor_animation.activate_take(scene, vehicle, take.name):
-        frames = [_take_frame(scene, take, sample["time"]) for sample in recording["samples"]]
-        rotor_animation.bake_take(vehicle, take.name, frames, recording["samples"], _scene_fps(scene))
-    scene.frame_start = take.frame_offset
-    scene.frame_end = max(take.frame_offset + 1, take.end_frame)
-    _set_markers(scene, take, recording)
-    _show_paths(settings, take)
-    if 0 <= take.branch_frame <= scene.frame_end:
-        scene.frame_set(take.branch_frame)
-    else:
-        scene.frame_set(scene.frame_start)
+def _redraw():
+    wm = bpy.context.window_manager
+    if wm is None:
+        return
+    for window in wm.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
 
 
 def detach_takes(scene):
     """Drop take actions so the live link or manual poses are not overridden."""
-    if not scene.get('sim_preview'): return
+    if not scene.get("sim_preview"):
+        return
     legacy_names = {*rotor_animation.VEHICLES, "gate", "marker", "camera"}
     for obj in scene.objects:
-        name=str(obj.get('sim_display_name',obj.name)).casefold()
-        if obj.get('sim_role') not in ('body','sensor') and name not in legacy_names:
+        name = str(obj.get("sim_display_name", obj.name)).casefold()
+        if obj.get("sim_role") not in ("body", "sensor") and name not in legacy_names:
             continue
         if obj.animation_data is not None:
             action = obj.animation_data.action
@@ -489,84 +282,52 @@ def detach_takes(scene):
             obj.hide_viewport = True
 
 
-def _check_divergence(scene, take, parent):
-    """First frame at or before the branch where the child's state differs from the parent's."""
-    child = _read_recording(take.recording)
-    base = _read_recording(parent.recording)
-    parent_hash = {sample["step"]: sample["hash"] for sample in base["samples"]}
-    for sample in child["samples"]:
-        if sample["step"] > take.branch_step:
-            break
-        expected = parent_hash.get(sample["step"])
-        if expected is not None and expected != sample["hash"]:
-            return int(round(_take_frame(scene, take, sample["time"])))
-    return None
-
-
-def _next_take_name(settings):
-    used = set()
-    for take in settings.takes:
-        match = re.fullmatch(r"take_(\d+)", take.name)
-        if match:
-            used.add(int(match.group(1)))
-    folder = _takes_dir()
-    for pattern in ("take_*.rec.jsonl", "take_*.run.json"):
-        for path in folder.glob(pattern):
-            match = re.fullmatch(r"take_(\d+)\.(?:rec\.jsonl|run\.json)", path.name)
-            if match:
-                used.add(int(match.group(1)))
-    return f"take_{(max(used) + 1) if used else 0:03d}"
-
-
-def _redraw():
-    wm = bpy.context.window_manager
-    if wm is None:
-        return
-    for window in wm.windows:
-        for area in window.screen.areas:
-            area.tag_redraw()
-
-
 def launch_take(scene, seed, live=False):
-    """Run the current mission through the portable plugin and record its trace."""
+    """Run the current mission again from its scene, seed, and tick budget."""
     if _job["proc"] is not None:
         raise RuntimeError("A simulation is already running")
     tools = _tool_paths(scene)
-    requested={key:getattr(scene.autonomy_sim,key) for key in ('backend','port','max_ticks','randomize','seed','source_frame')}
+    requested = {key: getattr(scene.autonomy_sim, key) for key in ("backend", "port", "max_ticks", "randomize", "seed", "source_frame")}
     source = preview.source_scene(scene)
     frame = scene.autonomy_sim.source_frame
-    snapshot = exporter.export_scene(source,tools['profiles'],frame)
-    payload=wire.encode(snapshot)
-    validation = subprocess.run([str(tools['simctl']),'validate','-'],input=payload,capture_output=True)
+    snapshot = exporter.export_scene(source, tools["profiles"], frame)
+    payload = wire.encode(snapshot)
+    validation = subprocess.run([str(tools["simctl"]), "validate", "-"], input=payload, capture_output=True)
     if validation.returncode:
-        raise ValueError('Evaluated scene rejected: '+validation.stderr.decode('utf-8','replace').strip())
-    scene = preview.ensure(source,snapshot)
-    for key,value in requested.items():setattr(scene.autonomy_sim,key,value)
-    if live:_link['scene']=scene.name
-    if live and not _link['running']:
-        if bpy.ops.autonomy_sim.start_link() != {'RUNNING_MODAL'}:
-            raise RuntimeError('could not start Blender pose receiver')
+        raise ValueError("Evaluated scene rejected: " + validation.stderr.decode("utf-8", "replace").strip())
+    scene = preview.ensure(source, snapshot)
+    for key, value in requested.items():
+        setattr(scene.autonomy_sim, key, value)
+    if live:
+        _link["scene"] = scene.name
+    if live and not _link["running"]:
+        if bpy.ops.autonomy_sim.start_link() != {"RUNNING_MODAL"}:
+            raise RuntimeError("could not start Blender pose receiver")
     settings = scene.autonomy_sim
     name = _next_take_name(settings)
-    folder = _takes_dir()
-    recording_path = folder / f"{name}.rec.jsonl"
-    log_path = folder / f"{name}.log"
+    log_path = _takes_dir() / f"{name}.log"
 
     take = settings.takes.add()
     take.name = name
     take.seed = int(seed)
-    take.recording = str(recording_path)
-    take.frame_offset = scene.frame_start
+    take.max_ticks = int(settings.max_ticks)
+    take.randomize = bool(settings.randomize)
+    take.source_scene = str(source.get("sim_source_scene", source.name))
+    take.log = str(log_path)
     take.status = "running"
 
     log = log_path.open("w", encoding="utf-8")
     env = {key: value for key, value in os.environ.items() if not key.startswith("AUTONOMY_SIM_")}
-    sender,receiver=socket.socketpair()
+    sender, receiver = socket.socketpair()
     sender.settimeout(120)
-    env.update(AUTONOMY_SIM_BACKEND=str(tools["backend"]), AUTONOMY_SIM_SCENARIO=f'fd:{receiver.fileno()}',
-               AUTONOMY_SIM_MAX_TICKS=str(settings.max_ticks), AUTONOMY_SIM_TRACE=str(recording_path),
-               AUTONOMY_SIM_BLENDER=str(int(live)), AUTONOMY_SIM_REALTIME=str(int(live)),
-               AUTONOMY_SIM_BLENDER_PORT=str(settings.port))
+    env.update(
+        AUTONOMY_SIM_BACKEND=str(tools["backend"]),
+        AUTONOMY_SIM_SCENARIO=f"fd:{receiver.fileno()}",
+        AUTONOMY_SIM_MAX_TICKS=str(settings.max_ticks),
+        AUTONOMY_SIM_BLENDER=str(int(live)),
+        AUTONOMY_SIM_REALTIME=str(int(live)),
+        AUTONOMY_SIM_BLENDER_PORT=str(settings.port),
+    )
     if settings.randomize:
         env["AUTONOMY_SIM_SEED"] = str(int(seed))
     command = [
@@ -576,24 +337,28 @@ def launch_take(scene, seed, live=False):
         str(tools["config"]),
     ]
     try:
-        proc = subprocess.Popen(command, cwd=str(tools["repo"]), env=env, stdout=log, stderr=subprocess.STDOUT,
-                                pass_fds=(receiver.fileno(),))
+        proc = subprocess.Popen(
+            command, cwd=str(tools["repo"]), env=env, stdout=log, stderr=subprocess.STDOUT,
+            pass_fds=(receiver.fileno(),),
+        )
         receiver.close()
         sender.sendall(payload)
     except OSError:
-        if 'proc' in locals():
-            proc.terminate();proc.wait(timeout=15)
+        if "proc" in locals():
+            proc.terminate()
+            proc.wait(timeout=15)
         log.close()
         take.status = "failed to start"
         raise
     finally:
-        sender.close();receiver.close()
+        sender.close()
+        receiver.close()
     _job.update(
         proc=proc,
         log=log,
         scene=scene.name,
         take=name,
-        time=0.0,
+        time=_link["time"] if live else 0.0,
         message=f"Simulating {name}",
         cancelled=False,
     )
@@ -602,28 +367,12 @@ def launch_take(scene, seed, live=False):
     return take
 
 
-def _progress_time(path):
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - 8192))
-            tail = handle.read().decode("utf-8", "replace")
-    except OSError:
-        return 0.0
-    times = re.findall(r'"timestamp_ns":\s*(\d+)', tail)
-    return int(times[-1]) * 1e-9 if times else 0.0
-
-
 def _poll_job():
     proc = _job["proc"]
     if proc is None:
         return None
-    scene = bpy.data.scenes.get(_job["scene"])
-    take = _take_by_name(scene.autonomy_sim, _job["take"]) if scene is not None else None
     if proc.poll() is None:
-        if take is not None:
-            _job["time"] = _progress_time(take.recording)
+        _job["time"] = _link["time"]
         _redraw()
         return 0.5
     finish_job()
@@ -631,8 +380,16 @@ def _poll_job():
     return None
 
 
+def _result_line(text):
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and '"hash"' in line:
+            return json.loads(line)
+    return None
+
+
 def finish_job():
-    """Import the finished take, activate it, and check that it matches its parent before the branch."""
+    """Set the take status from the process exit and the result line in its log."""
     proc = _job["proc"]
     returncode = proc.wait()
     _job["log"].close()
@@ -645,43 +402,38 @@ def finish_job():
     take = _take_by_name(settings, _job["take"])
     if take is None:
         return None
-    log_path = Path(take.recording).with_suffix("").with_suffix(".log")
-    try:
-        recording = _read_recording(take.recording)
-    except (OSError, ValueError):
-        recording = None
-    if returncode != 0 or recording is None or recording["end"] is None:
-        take.status = "cancelled" if _job["cancelled"] else "failed"
-        if recording is not None and recording["end"] is not None:
-            # Failed missions are still useful recordings for diagnosis.
-            index = list(settings.takes).index(take)
-            _import_take(scene, take, index)
-            settings.take_index = index
-        _job["message"] = f"{take.name} failed (exit {returncode}). See {log_path}"
-        return take
-    index = list(settings.takes).index(take)
-    try:
-        _import_take(scene, take, index)
-        take.status = "cancelled" if _job["cancelled"] else "ok"
-        parent = _take_by_name(settings, take.parent) if take.parent else None
-        if parent is not None:
-            diverged = _check_divergence(scene, take, parent)
-            if diverged is not None:
-                take.status = f"diverged at frame {diverged}"
-    except (OSError, ValueError, KeyError) as exc:
+    log_path = Path(take.log) if take.log else None
+    text = ""
+    if log_path is not None and log_path.is_file():
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    result = _result_line(text)
+    code = None if result is None else result.get("status")
+    if _job["cancelled"]:
+        take.status = "cancelled"
+        take.reason = "cancelled"
+    elif code == 0 and returncode == 0:
+        take.status = "ok"
+        take.reason = "complete"
+    elif code == 1:
         take.status = "failed"
-        _job["message"] = f"{take.name} import failed: {exc}"
-        return take
-    settings.take_index = index
-    _job["message"] = f"{take.name}: {take.reason}, {take.status}"
+        take.reason = "tick budget"
+    else:
+        take.status = "failed"
+        take.reason = "failed"
+    settings.take_index = list(settings.takes).index(take)
+    where = log_path if log_path is not None else "the log"
+    _job["message"] = f"{take.name}: {take.reason}, {take.status}. See {where}"
     return take
+
 
 
 def _on_take_index(self, context):
     if 0 <= self.take_index < len(self.takes):
         take = self.takes[self.take_index]
-        if take.status != "running" and Path(take.recording).is_file():
-            activate_take(context.scene, take)
+        self.seed = take.seed
+        self.randomize = take.randomize
+        if take.max_ticks > 0:
+            self.max_ticks = take.max_ticks
 
 
 def _on_onboard_camera(self, context):
@@ -697,11 +449,6 @@ def _on_onboard_camera(self, context):
         previous = bpy.data.objects.get(self.previous_camera)
         if previous is not None and previous.type == "CAMERA":
             scene.camera = previous
-
-
-def _on_show_parent_path(self, context):
-    if 0 <= self.take_index < len(self.takes):
-        _show_paths(self, self.takes[self.take_index])
 
 
 class AutonomyPreferences(AddonPreferences):
@@ -733,13 +480,11 @@ class AutonomyPreferences(AddonPreferences):
 
 class AutonomyTake(PropertyGroup):
     # name is the take id, such as take_003.
-    parent: StringProperty(name="Parent")
     seed: IntProperty(name="Seed", default=0, min=0)
-    recording: StringProperty(name="Recording", subtype="FILE_PATH")
-    frame_offset: IntProperty(name="First frame", default=1)
-    end_frame: IntProperty(name="Last frame", default=1)
-    branch_frame: IntProperty(name="Branch frame", default=-1)
-    branch_step: IntProperty(name="Branch step", default=-1)
+    max_ticks: IntProperty(name="Tick budget", default=0, min=0)
+    randomize: BoolProperty(name="Randomize scenario", default=False)
+    source_scene: StringProperty(name="Scene")
+    log: StringProperty(name="Log", subtype="FILE_PATH")
     status: StringProperty(name="Status")
     reason: StringProperty(name="End reason")
 
@@ -766,12 +511,6 @@ class AutonomyLinkSettings(PropertyGroup):
         update=_on_onboard_camera,
     )
     previous_camera: StringProperty(default="")
-    show_parent_path: BoolProperty(
-        name="Show parent path",
-        description="Show the parent take's path next to the active one",
-        default=True,
-        update=_on_show_parent_path,
-    )
 
 
 
@@ -779,17 +518,16 @@ class AUTONOMY_UL_takes(UIList):
     def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
         row = layout.row(align=True)
         row.label(text=item.name, icon="SEQUENCE")
-        if item.parent:
-            row.label(text=f"from {item.parent} @ {item.branch_frame}")
-        else:
-            row.label(text=f"seed {item.seed}")
+        row.label(text=f"seed {item.seed}")
+        if item.source_scene:
+            row.label(text=item.source_scene)
         row.label(text=item.status if item.status != "ok" else item.reason)
 
 
 class AUTONOMY_OT_record_take(Operator):
     bl_idname = "autonomy_sim.record_take"
-    bl_label = "Record run"
-    bl_description = "Run the mission headless from the start and import it as a new take"
+    bl_label = "Play"
+    bl_description = "Launch this scene again with the remembered seed and tick budget"
 
     def execute(self, context):
         scene = context.scene
@@ -799,14 +537,14 @@ class AUTONOMY_OT_record_take(Operator):
         except (OSError, RuntimeError, ValueError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Recording {take.name}")
+        self.report({"INFO"}, f"Running {take.name}")
         return {"FINISHED"}
 
 
 class AUTONOMY_OT_run_live(Operator):
     bl_idname = "autonomy_sim.run_live"
     bl_label = "Run live"
-    bl_description = "Run the current mission at real time, stream poses and save a trace"
+    bl_description = "Launch this scene again and follow the live pose link"
 
     def execute(self, context):
         if _job["proc"] is not None:
@@ -871,55 +609,6 @@ class AUTONOMY_OT_remove_take(Operator):
                 bpy.data.curves.remove(data)
         settings.takes.remove(index)
         settings.take_index = min(index, len(settings.takes) - 1)
-        return {"FINISHED"}
-
-
-class AUTONOMY_OT_import_take(Operator):
-    bl_idname = "autonomy_sim.import_take"
-    bl_label = "Import recording"
-    bl_description = "Import a portable simulation trace or an experimental recording"
-
-    filepath: StringProperty(subtype="FILE_PATH")
-    filter_glob: StringProperty(default="*.jsonl", options={"HIDDEN"})
-
-    def invoke(self, context, _event):
-        context.window_manager.fileselect_add(self)
-        return {"RUNNING_MODAL"}
-
-    def execute(self, context):
-        scene = context.scene
-        settings = scene.autonomy_sim
-        recording = Path(self.filepath)
-        if not recording.is_file():
-            self.report({"ERROR"}, f"Need {recording.name}")
-            return {"CANCELLED"}
-        name = recording.name.removesuffix(".rec.jsonl").removesuffix(".jsonl")
-        if _take_by_name(settings, name) is not None:
-            self.report({"ERROR"}, f"{name} is already in the take list")
-            return {"CANCELLED"}
-        try:
-            data = _read_recording(recording)
-            scene = preview.for_recording(scene,data)
-            settings = scene.autonomy_sim
-            header = data['header']
-        except (OSError, ValueError, KeyError) as exc:
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        take = settings.takes.add()
-        take.name = name
-        take.seed = int(header.get("seed", 0))
-        take.recording = str(recording)
-        take.frame_offset = scene.frame_start
-        try:
-            index = len(settings.takes) - 1
-            _import_take(scene, take, index)
-        except (OSError, ValueError, KeyError) as exc:
-            settings.takes.remove(len(settings.takes) - 1)
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        end = _read_recording(recording)["end"]
-        take.status = "incomplete" if end is None else "failed" if end.get("status", 0) else "ok"
-        settings.take_index = index
         return {"FINISHED"}
 
 
@@ -1115,13 +804,11 @@ class AUTONOMY_PT_takes(Panel):
             layout.prop(settings, "seed")
         layout.prop(settings, "max_ticks")
         row = layout.row(align=True)
-        row.operator("autonomy_sim.record_take", icon="REC")
-        row.operator("autonomy_sim.import_take", icon="IMPORT", text="")
+        row.operator("autonomy_sim.record_take", icon="PLAY")
         layout.template_list("AUTONOMY_UL_takes", "", settings, "takes", settings, "take_index", rows=4)
         row = layout.row(align=True)
         row.operator("autonomy_sim.detach_take", icon="UNLINKED")
         row.operator("autonomy_sim.remove_take", icon="X", text="")
-        layout.prop(settings, "show_parent_path")
         layout.prop(settings, "onboard_camera", icon="CAMERA_DATA")
         if _job["proc"] is not None:
             box = layout.box()
@@ -1147,7 +834,6 @@ CLASSES = (
     AUTONOMY_OT_cancel_take,
     AUTONOMY_OT_detach_take,
     AUTONOMY_OT_remove_take,
-    AUTONOMY_OT_import_take,
     AUTONOMY_PT_link,
     AUTONOMY_PT_takes,
 )

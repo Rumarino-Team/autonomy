@@ -1,26 +1,25 @@
-#include "scene.hpp"
+#include "image.hpp"
 #include <dlfcn.h>
 #include <iomanip>
 #include <memory>
+#include <set>
 #include <mujoco/mujoco.h>
 #include <sstream>
 namespace {
 using namespace sim;
-struct Model {
-  ModelStorage source;
-  mjModel *model = nullptr;
-  std::vector<int> ids;
-  ~Model() {
-    if (model)
-      mj_deleteModel(model);
-  }
-};
 struct World {
-  const Model *model;
-  mjData *data;
+  Scene source;
+  mjModel *mj = nullptr;
+  mjData *data = nullptr;
+  std::vector<int> ids;
   std::vector<SimBodyState> states;
   std::vector<SimContact> contacts;
-  ~World() { mj_deleteData(data); }
+  ~World() {
+    if (data)
+      mj_deleteData(data);
+    if (mj)
+      mj_deleteModel(mj);
+  }
 };
 void xyz(std::ostream &out, SimVec3 v) {
   out << v.x << ' ' << v.y << ' ' << v.z;
@@ -36,17 +35,17 @@ void transform(std::ostream &out, SimPose p) {
   out << '"';
 }
 void refresh(World &w) {
-  auto m = w.model->model;
+  auto m = w.mj;
   auto d = w.data;
   mj_forward(m, d);
   w.states.clear();
   w.contacts.clear();
-  for (size_t i = 0; i < w.model->ids.size(); ++i) {
-    int id = w.model->ids[i];
+  for (size_t i = 0; i < w.ids.size(); ++i) {
+    int id = w.ids[i];
     auto p = d->xpos + 3 * id, q = d->xquat + 4 * id, c = d->xipos + 3 * id;
     double v[6];
     mj_objectVelocity(m, d, mjOBJ_BODY, id, v, 0);
-    w.states.push_back({w.model->source.views[i].id,
+    w.states.push_back({w.source.bodies[i].id,
                         {{p[0], p[1], p[2]}, {q[1], q[2], q[3], q[0]}},
                         {c[0], c[1], c[2]},
                         {v[3], v[4], v[5]},
@@ -60,10 +59,10 @@ void refresh(World &w) {
     double f[6]{};
     mj_contactForce(m, d, i, f);
     auto id = [&](int k) {
-      auto it = std::find(w.model->ids.begin(), w.model->ids.end(), k);
-      return it == w.model->ids.end()
+      auto it = std::find(w.ids.begin(), w.ids.end(), k);
+      return it == w.ids.end()
                  ? UINT32_MAX
-                 : w.model->source.views[it - w.model->ids.begin()].id;
+                 : w.source.bodies[it - w.ids.begin()].id;
     };
     w.contacts.push_back({id(a),
                           id(b),
@@ -73,13 +72,13 @@ void refresh(World &w) {
   }
 }
 void apply_state(World &w, const SimBodyState *states, uint32_t count) {
-  auto m = w.model->model;
+  auto m = w.mj;
   auto d = w.data;
-  require((!states && count == 0) || (states && count == w.model->ids.size()),
+  require((!states && count == 0) || (states && count == w.ids.size()),
           "reset needs all body states");
   mj_resetData(m, d);
-  for (size_t i = 0; i < w.model->ids.size(); ++i) {
-    auto &b = w.model->source.views[i];
+  for (size_t i = 0; i < w.ids.size(); ++i) {
+    auto &b = w.source.bodies[i];
     SimBodyState s = states ? states[i]
                             : SimBodyState{b.id,
                                            b.initial_pose,
@@ -90,7 +89,7 @@ void apply_state(World &w, const SimBodyState *states, uint32_t count) {
                 finite(s.angular_velocity),
             "invalid reset body");
     valid_pose(s.pose);
-    int id = w.model->ids[i];
+    int id = w.ids[i];
     if (b.motion == SIM_DYNAMIC) {
       int joint = m->body_jntadr[id], qa = m->jnt_qposadr[joint],
           va = m->jnt_dofadr[joint];
@@ -131,49 +130,50 @@ void apply_state(World &w, const SimBodyState *states, uint32_t count) {
   }
   refresh(w);
 }
-SimResult model_create(const SimModelDesc *desc, void **out, char *error,
-                       uint32_t n) {
+SimResult world_create(const char *scenario, uint32_t length, void **out,
+                       char *error, uint32_t n) {
   if (!out)
     return SIM_INVALID;
   *out = nullptr;
-  if (desc && desc->native_hydrodynamics)
-    return fail(error, n,
-                "MuJoCo native hydrodynamics is not exposed by ABI v1",
-                SIM_UNSUPPORTED);
+  if (!scenario || !length)
+    return SIM_INVALID;
   return guarded(error, n, [&] {
-    validate(desc);
-    auto model = std::make_unique<Model>();
-    model->source = decode(encode(*desc));
-    model->source.bind();
+    auto world = std::make_unique<World>();
+    world->source = Scene::read(scenario, length);
+    const auto &desc = world->source.header;
+    require(!desc.native_hydrodynamics,
+            "MuJoCo does not expose native hydrodynamics");
     std::ostringstream xml;
     xml << std::setprecision(17)
         << "<mujoco><compiler angle=\"radian\"/><option timestep=\""
-        << double(desc->dt_numerator) / desc->dt_denominator << "\" gravity=\"";
-    xyz(xml, desc->gravity);
+        << double(desc.dt_numerator) / desc.dt_denominator << "\" gravity=\"";
+    xyz(xml, desc.gravity);
     xml << "\" integrator=\"implicitfast\"><flag "
            "sleep=\"disable\"/></option><asset>";
-    for (uint32_t i = 0; i < desc->body_count; ++i)
-      for (uint32_t k = 0; k < desc->bodies[i].shape_count; ++k) {
-        auto &g = desc->bodies[i].shapes[k];
+    for (size_t i = 0; i < world->source.bodies.size(); ++i) {
+      auto &body = world->source.bodies[i];
+      for (uint32_t k = 0; k < body.shape_count; ++k) {
+        auto &g = world->source.shapes[body.shape_begin + k];
         require(g.restitution == 0,
                 "MuJoCo adapter currently requires zero restitution");
         if (g.kind != SIM_MESH)
           continue;
         xml << "<mesh name=\"m" << i << '_' << k << "\" vertex=\"";
         for (uint32_t v = 0; v < g.vertex_count; ++v) {
-          xyz(xml, g.vertices[v]);
+          xyz(xml, world->source.vertices[g.vertex_begin + v]);
           xml << ' ';
         }
         xml << "\" face=\"";
         for (uint32_t t = 0; t < g.triangle_count; ++t) {
-          auto f = g.triangles[t];
+          auto &f = world->source.triangles[g.triangle_begin + t];
           xml << f.a << ' ' << f.b << ' ' << f.c << ' ';
         }
         xml << "\"/>";
       }
+    }
     xml << "</asset><worldbody>";
-    for (uint32_t i = 0; i < desc->body_count; ++i) {
-      auto &b = desc->bodies[i];
+    for (size_t i = 0; i < world->source.bodies.size(); ++i) {
+      auto &b = world->source.bodies[i];
       xml << "<body name=\"b" << b.id << '"';
       transform(xml, b.initial_pose);
       if (b.motion == SIM_KINEMATIC)
@@ -187,7 +187,7 @@ SimResult model_create(const SimModelDesc *desc, void **out, char *error,
             << placeholder << ' ' << placeholder << "\"/>";
       }
       for (uint32_t k = 0; k < b.shape_count; ++k) {
-        auto &g = b.shapes[k];
+        auto &g = world->source.shapes[b.shape_begin + k];
         xml << "<geom name=\"g" << i << '_' << k << '"';
         transform(xml, g.pose);
         xml << " density=\"0\" contype=\"" << g.collisions
@@ -219,58 +219,46 @@ SimResult model_create(const SimModelDesc *desc, void **out, char *error,
         mj_parseXMLString(xml.str().c_str(), nullptr, message, sizeof(message));
     if (!spec)
       throw std::runtime_error(message);
-    model->model = mj_compile(spec, nullptr);
-    if (!model->model) {
+    world->mj = mj_compile(spec, nullptr);
+    if (!world->mj) {
       std::string e = mjs_getError(spec);
       mj_deleteSpec(spec);
       throw std::runtime_error(e);
     }
     mj_deleteSpec(spec);
-    for (uint32_t i = 0; i < desc->body_count; ++i) {
-      auto &b = desc->bodies[i];
-      int id = mj_name2id(model->model, mjOBJ_BODY,
+    for (auto &b : world->source.bodies) {
+      int id = mj_name2id(world->mj, mjOBJ_BODY,
                           ("b" + std::to_string(b.id)).c_str());
-      model->ids.push_back(id);
+      world->ids.push_back(id);
       if (b.motion == SIM_DYNAMIC) {
-        auto p = model->model->body_inertia + 3 * id;
+        auto p = world->mj->body_inertia + 3 * id;
         p[0] = b.inertia.x;
         p[1] = b.inertia.y;
         p[2] = b.inertia.z;
       }
     }
-    switch (desc->integrator) {
+    switch (desc.integrator) {
     case SIM_INTEGRATOR_EULER:
-      model->model->opt.integrator = mjINT_EULER;
+      world->mj->opt.integrator = mjINT_EULER;
       break;
     case SIM_INTEGRATOR_IMPLICIT:
-      model->model->opt.integrator = mjINT_IMPLICIT;
+      world->mj->opt.integrator = mjINT_IMPLICIT;
       break;
     case SIM_INTEGRATOR_RK4:
-      model->model->opt.integrator = mjINT_RK4;
+      world->mj->opt.integrator = mjINT_RK4;
       break;
     default:
-      model->model->opt.integrator = mjINT_IMPLICITFAST;
+      world->mj->opt.integrator = mjINT_IMPLICITFAST;
       break;
     }
-    auto data = mj_makeData(model->model);
-    require(data, "cannot allocate MuJoCo constants");
-    mj_setConst(model->model, data);
-    mj_deleteData(data);
-    *out = model.release();
-  });
-}
-SimResult world_create(const void *p, void **out, char *e, uint32_t n) {
-  if (!p || !out)
-    return SIM_INVALID;
-  *out = nullptr;
-  return guarded(e, n, [&] {
-    auto model = static_cast<const Model *>(p);
-    auto w = std::make_unique<World>();
-    w->model = model;
-    w->data = mj_makeData(model->model);
-    require(w->data, "cannot allocate MuJoCo world");
-    apply_state(*w, nullptr, 0);
-    *out = w.release();
+    auto constants = mj_makeData(world->mj);
+    require(constants, "cannot allocate MuJoCo constants");
+    mj_setConst(world->mj, constants);
+    mj_deleteData(constants);
+    world->data = mj_makeData(world->mj);
+    require(world->data, "cannot allocate MuJoCo world");
+    apply_state(*world, nullptr, 0);
+    *out = world.release();
   });
 }
 SimResult reset(void *p, const SimBodyState *s, uint32_t c, char *e,
@@ -285,18 +273,18 @@ SimResult step(void *p, const SimWrench *input, uint32_t count, char *e,
     return SIM_INVALID;
   return guarded(e, n, [&] {
     auto &w = *static_cast<World *>(p);
-    auto m = w.model->model;
+    auto m = w.mj;
     mju_zero(w.data->xfrc_applied, 6 * m->nbody);
     std::set<uint32_t> seen;
     for (uint32_t i = 0; i < count; ++i) {
       auto &f = input[i];
       require(finite(f.force) && finite(f.torque) && seen.insert(f.id).second,
               "invalid or duplicate wrench");
-      auto &source = w.model->source.views;
+      auto &source = w.source.bodies;
       auto it = std::find_if(source.begin(), source.end(),
                              [&](auto &b) { return b.id == f.id; });
       require(it != source.end(), "unknown wrench body");
-      auto out = w.data->xfrc_applied + 6 * w.model->ids[it - source.begin()];
+      auto out = w.data->xfrc_applied + 6 * w.ids[it - source.begin()];
       out[0] = f.force.x;
       out[1] = f.force.y;
       out[2] = f.force.z;
@@ -313,8 +301,8 @@ uint64_t hash(const void *p) {
     return 0;
   auto &w = *static_cast<const World *>(p);
   try {
-    std::vector<mjtNum> s(mj_stateSize(w.model->model, mjSTATE_INTEGRATION));
-    mj_getState(w.model->model, w.data, s.data(), mjSTATE_INTEGRATION);
+    std::vector<mjtNum> s(mj_stateSize(w.mj, mjSTATE_INTEGRATION));
+    mj_getState(w.mj, w.data, s.data(), mjSTATE_INTEGRATION);
     Hash h;
     for (double v : s)
       h.scalar(v);
@@ -344,8 +332,6 @@ extern "C" SimResult sim_backend_get_api(uint32_t version, uint32_t size,
     return SIM_BACKEND_ERROR;
   std::snprintf(api->version, sizeof(api->version), "%s/%016llx",
                 mj_versionString(), static_cast<unsigned long long>(digest));
-  api->model_create = model_create;
-  api->model_destroy = [](void *p) { delete static_cast<Model *>(p); };
   api->world_create = world_create;
   api->world_destroy = [](void *p) { delete static_cast<World *>(p); };
   api->reset = reset;

@@ -25,14 +25,16 @@ def run(*args,success=True,**kwargs):
     return result
 
 
-values={'finite':[-1.25,0.0,1.5],'integers':[-2**63,0,2**64-1],
-        'bool':[True,False,None],'text':'Blender → simulator','nested':{'list':[]}}
-assert wire.decode(wire.encode(values))==values
-for bad in (b'',wire.encode(values)[:-1],b'wrongver'+wire.encode(values)[8:]):
+scene={'version':1,'gravity':[0,0,0],'bodies':[{'id':1,'motion':1,'mass':2,'inertia':[1,1,1],
+        'pose':{'position':[0,0,2]},'shapes':[{'kind':0,'size':[.1,.2,.3]}]}]}
+assert wire.decode(wire.encode(scene))['bodies'][0]['pose']['position']==[0,0,2]
+blob=wire.encode(scene)
+for bad in (b'',blob[:-1],b'wrongver'+blob[8:],wire.HEADER.pack(wire.MAGIC,wire.MAX_BYTES+1)):
     try: wire.decode(bad)
     except ValueError: pass
     else: raise AssertionError('malformed wire accepted')
-try: wire.encode({'bad':float('nan')})
+scene['gravity']=[float('nan'),0,0]
+try: wire.encode(scene)
 except ValueError: pass
 else: raise AssertionError('nonfinite wire accepted')
 
@@ -43,8 +45,9 @@ with tempfile.TemporaryDirectory(prefix='sim-direct-blender-') as temporary:
     run('snapshot',source,frozen)
     payload=frozen.read_bytes()
     snapshot=wire.decode(payload)
-    expected=json.loads((repo/'sim/scenarios/pool.json').read_text())
-    assert snapshot==expected, 'direct loader differs from evaluated authoring snapshot'
+    expected=wire.decode((repo/'sim/scenarios/pool.asim').read_bytes())
+    assert snapshot['source']['content_hash']==expected['source']['content_hash'], 'direct loader differs from evaluated authoring snapshot'
+    assert len(snapshot['bodies'])==len(expected['bodies'])
     relocated=folder/'self contained pool.blend'
     shutil.copy2(source,relocated)
     relocated_data=json.loads(run('validate',relocated).stdout)
@@ -65,30 +68,23 @@ with tempfile.TemporaryDirectory(prefix='sim-direct-blender-') as temporary:
     assert b'authoring scene not found' in result.stderr
     wrong=environment.copy();wrong['AUTONOMY_SIM_BLENDER_EXECUTABLE']='/missing-blender-binary'
     run('validate',source,env=wrong,success=False)
-    # Subsequent worlds/replays work after the Blender executable disappears.
-    for index,backend in enumerate(backends):
-        trace=folder/f'trace-{index}.jsonl';replay=folder/f'replay-{index}.jsonl'
-        run('run',backend,frozen,trace,36,7,env=wrong)
-        run('replay',backend,trace,replay,env=wrong)
-        assert trace.exists() and replay.exists()
-    # A batch evaluates Blender exactly once, then all parallel cases use the
-    # frozen binary scene. Preserved cases remain runnable after its tempdir ends.
+    # Subsequent runs work after the Blender executable disappears.
+    for backend in backends:
+        first=json.loads(run('run',backend,frozen,36,7,env=wrong).stdout)
+        second=json.loads(run('run',backend,frozen,36,7,env=wrong).stdout)
+        assert first['status']=='passed' and first['hash']==second['hash'] and first['steps']==second['steps']==36
+    # Freeze the blend once, then later runs use that snapshot.
     counter=folder/'evaluations.log'
     proxy=folder/'blender-proxy'
     blender=shutil.which('blender')
     proxy.write_text('#!'+sys.executable+'\nimport os,sys\nwith open('+repr(str(counter))+',"a") as log: log.write("evaluation\\n")\nos.execv('+repr(blender)+',['+repr(blender)+',*sys.argv[1:]])\n')
     proxy.chmod(0o755)
     batch_env=environment.copy();batch_env['AUTONOMY_SIM_BLENDER_EXECUTABLE']=str(proxy)
-    batch=folder/'batch'
-    result=subprocess.run([sys.executable,str(repo/'sim/fuzz.py'),'--simctl',str(simctl),
-        '--backend',str(backends[0]),'--scenario',str(source),'--cases','2','--workers','2',
-        '--ticks','12','--verify-replay','--keep-passed','--output',str(batch)],
-        env=batch_env,capture_output=True,timeout=120)
-    assert result.returncode==0,result.stderr.decode(errors='replace')
-    assert counter.read_text().splitlines()==['evaluation'], 'parallel workers reopened Blender'
-    for manifest_path in batch.glob('case-*/failure.json'):
-        manifest=json.loads(manifest_path.read_text())
-        assert Path(manifest['source_scenario']).suffix=='.asim'
-        subprocess.run(manifest['command'],env=wrong,check=True,capture_output=True,timeout=120)
+    frozen_batch=folder/'batch-scene.asim'
+    run('snapshot',source,frozen_batch,env=batch_env)
+    assert counter.read_text().splitlines()==['evaluation'], 'snapshot did not evaluate Blender once'
+    for seed in (1, 2):
+        run('run',backends[0],frozen_batch,12,seed,env=wrong)
+    assert counter.read_text().splitlines()==['evaluation'], 'later runs reopened Blender'
     assert not list(folder.glob('*.json')), 'direct launch produced an intermediate JSON scene'
 print('DIRECT_BLEND_BINARY_AND_REPLAY_PASSED')

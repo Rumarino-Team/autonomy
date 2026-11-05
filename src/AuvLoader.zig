@@ -58,6 +58,8 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
             *const Auv.DeinitFunc,
             "auv_deinit",
         ) orelse return error.MissingAuvDeinit,
+        .prepareBatch = dynlib.lookup(*const Auv.PrepareBatchFunc, "auv_prepare_batch"),
+        .beginFuzz = dynlib.lookup(*const Auv.BeginFuzzFunc, "auv_begin_fuzz"),
     };
 
     if (loader.prev_dynlib) |*prev_dynlib| {

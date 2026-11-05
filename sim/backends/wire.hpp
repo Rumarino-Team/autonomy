@@ -1,10 +1,34 @@
 #pragma once
-#include "scene.hpp"
+#include "image.hpp"
 #include <cerrno>
 #include <sys/socket.h>
 #include <system_error>
 #include <unistd.h>
+#include <vector>
 namespace sim {
+inline constexpr char worker_step_magic[8] = {'A', 'S', 'I', 'M', 'S', 'T', '0', '1'};
+inline constexpr char worker_reset_magic[8] = {'A', 'S', 'I', 'M', 'R', 'S', '0', '1'};
+inline constexpr char worker_reply_magic[8] = {'A', 'S', 'I', 'M', 'R', 'P', '0', '1'};
+inline constexpr char worker_error_magic[8] = {'A', 'S', 'I', 'M', 'E', 'R', '0', '1'};
+struct WorkerHead {
+  char magic[8]{};
+  uint32_t count = 0;
+  uint32_t extra = 0;
+  uint64_t hash = 0;
+};
+static_assert(sizeof(WorkerHead) == 24);
+struct WorkerReply {
+  std::vector<SimBodyState> states;
+  std::vector<SimContact> contacts;
+  uint64_t hash = 0;
+};
+enum class WorkerOp { Step, Reset };
+struct WorkerRequest {
+  WorkerOp op = WorkerOp::Step;
+  std::vector<SimWrench> forces;
+  std::vector<SimBodyState> states;
+};
+
 inline void transfer(int fd, void *buffer, size_t n, bool send) {
   auto p = static_cast<char *>(buffer);
   while (n) {
@@ -17,25 +41,14 @@ inline void transfer(int fd, void *buffer, size_t n, bool send) {
     n -= size_t(k);
   }
 }
-inline void send_message(int fd, const Json &j) {
-  auto s = j.dump();
-  require(s.size() <= 128 * 1024 * 1024, "worker message too large");
-  uint32_t size = s.size();
-  unsigned char bytes[4] = {static_cast<unsigned char>(size),
-                            static_cast<unsigned char>(size >> 8),
-                            static_cast<unsigned char>(size >> 16),
-                            static_cast<unsigned char>(size >> 24)};
-  transfer(fd, bytes, 4, true);
-  transfer(fd, s.data(), s.size(), true);
-}
-inline Json receive_message(int fd) {
-  unsigned char bytes[4];
-  transfer(fd, bytes, 4, false);
-  uint32_t n = uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8) |
-               (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
-  require(n && n <= 128 * 1024 * 1024, "invalid worker message size");
-  std::string s(n, '\0');
-  transfer(fd, s.data(), s.size(), false);
-  return Json::parse(s);
-}
+void send_frame(int fd, const void *data, size_t n);
+std::vector<uint8_t> receive_frame(int fd);
+std::vector<uint8_t> worker_step(const SimWrench *forces, uint32_t count);
+std::vector<uint8_t> worker_reset(const SimBodyState *states, uint32_t count);
+std::vector<uint8_t> worker_reply(const std::vector<SimBodyState> &states,
+                                  const std::vector<SimContact> &contacts,
+                                  uint64_t hash);
+std::vector<uint8_t> worker_error(const char *message);
+WorkerRequest read_worker_request(const std::vector<uint8_t> &frame);
+WorkerReply read_worker_reply(const std::vector<uint8_t> &frame);
 } // namespace sim

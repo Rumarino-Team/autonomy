@@ -334,5 +334,7 @@ def _export(scene, collection, dg, profiles_dir, frame, output, check_calibratio
                           'blender_version':bpy.app.version_string,'file':bpy.data.filepath,'scene':scene.name,
                           'frame':frame,'content_hash':identity,'profiles':profiles,'objects':origins,
                           'excluded':sorted(o.name for o in scene.objects if o not in objects or o.get('sim_role')=='visual')}
-    if output: atomic_json(output,document)
+    if output:
+        from . import wire
+        wire.write_atomic(output, wire.encode(document))
     return document

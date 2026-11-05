@@ -8,8 +8,8 @@ class Backend {
 public:
   SimBackendApi api{};
   uint64_t build_fingerprint = 0;
-  std::filesystem::path path;
-  explicit Backend(const std::filesystem::path &path);
+  std::string path;
+  explicit Backend(const std::string &path);
   ~Backend();
   Backend(const Backend &) = delete;
   Backend &operator=(const Backend &) = delete;
@@ -33,7 +33,6 @@ struct Observation {
 };
 class World {
   std::shared_ptr<Backend> backend_;
-  void *model_ = nullptr;
   void *world_ = nullptr;
   ForceRegistry registry_;
   std::vector<std::string> modules_;
@@ -58,16 +57,15 @@ public:
   void reset(const std::vector<SimBodyState> &state = {});
   void step(const std::vector<double> &commands);
   double dt() const {
-    return double(scene.model.value.dt_numerator) /
-           scene.model.value.dt_denominator;
+    return double(scene.header.dt_numerator) / scene.header.dt_denominator;
   }
   uint64_t timestamp_ns() const;
   uint64_t state_hash() const;
   Observation observe() const;
-  Json sample() const;
   const Backend &backend() const { return *backend_; }
+  std::shared_ptr<Backend> backend_handle() const { return backend_; }
 };
-Json draw_case(Json source, uint64_t seed);
 std::vector<double> generated_commands(const Scene &, uint64_t seed,
                                        uint64_t tick);
+Scene draw_case(Scene scene, uint64_t seed);
 } // namespace sim

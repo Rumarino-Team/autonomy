@@ -143,6 +143,12 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
     };
 }
 
+pub fn stopThrusters(ctx: *MissionContext) void {
+    var zero: [8]f32 = @splat(0);
+    const len: u8 = @intCast(@min(ctx.config.tam.len, zero.len));
+    ctx.auv.setThrustorValues(&zero, len);
+}
+
 pub fn reset(ctx: *MissionContext) void {
     ctx.seen_objects_len = 0;
     ctx.clearQueue();

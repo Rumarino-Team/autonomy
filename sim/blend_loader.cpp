@@ -1,5 +1,6 @@
 // Blender evaluates .blend data; only the immutable binary scene crosses IPC.
-#include "scene.hpp"
+#include "image.hpp"
+#include <filesystem>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -18,8 +19,7 @@
 extern char **environ;
 namespace sim {
 namespace {
-constexpr size_t max_payload = 128 * 1024 * 1024;
-constexpr char magic[] = "ASIMSC01";
+constexpr char magic_bytes[] = {'A', 'S', 'I', 'M', 'S', 'C', '0', '2'};
 struct FileDescriptor {
   int fd = -1;
   ~FileDescriptor() { if (fd >= 0) ::close(fd); }
@@ -53,27 +53,19 @@ Scene Scene::load_fd(int fd) {
   auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(120);
   unsigned char header[16];
   read_exact(fd, header, sizeof(header), deadline);
-  require(std::memcmp(header, magic, 8) == 0, "unsupported binary scene version");
+  require(std::memcmp(header, magic_bytes, 8) == 0, "unsupported binary scene version");
   uint64_t count = 0;
   for (int i=0;i<8;++i) count |= uint64_t(header[8+i]) << (8*i);
-  require(count && count <= max_payload, "invalid binary scene size");
+  require(count && count <= max_scene_bytes, "invalid binary scene size");
   struct stat status{};
   if(::fstat(fd,&status)==0 && S_ISREG(status.st_mode))
     require(uint64_t(status.st_size)==16+count,"binary scene file size does not match its header");
-  std::vector<uint8_t> payload(count);
-  read_exact(fd, payload.data(), payload.size(), deadline);
-  return parse(Json::from_msgpack(payload));
+  std::vector<uint8_t> file(16 + count);
+  std::memcpy(file.data(), header, 16);
+  read_exact(fd, file.data() + 16, count, deadline);
+  return Scene::read(file.data(), file.size());
 }
-std::vector<uint8_t> Scene::binary() const {
-  auto data = Json::to_msgpack(document);
-  require(!data.empty() && data.size() <= max_payload, "invalid binary scene size");
-  std::vector<uint8_t> output(magic, magic+8);
-  uint64_t size=data.size();
-  for (int i=0;i<8;++i) output.push_back(uint8_t(size >> (8*i)));
-  output.insert(output.end(), data.begin(), data.end());
-  return output;
-}
-Scene Scene::load_blend(const std::filesystem::path &path) {
+Scene Scene::load_blend(const std::string &path) {
   require(std::filesystem::is_regular_file(path),"Blender scene file is missing");
   const char *frame = option("AUTONOMY_SIM_SOURCE_FRAME", "1");
   uint32_t value=0; auto end=frame+std::strlen(frame);
@@ -130,7 +122,7 @@ Scene Scene::load_blend(const std::filesystem::path &path) {
       ::poll(nullptr,0,10);
     }
     require(WIFEXITED(status) && WEXITSTATUS(status)==0,"Blender scene evaluation failed");
-    scene.path=std::filesystem::absolute(path);
+    scene.path=std::filesystem::absolute(path).string();
     return scene;
   } catch(const std::exception &error) {
     if(pid>0) { ::kill(pid,SIGKILL); while(::waitpid(pid,nullptr,0)<0 && errno==EINTR) {} }

@@ -62,6 +62,13 @@ void auv_init(void);
 void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
 void auv_deinit(void);
+// Optional export. Call once, before auv_init, to run num_envs headless worlds.
+// Each later auv_init binds the calling thread to its own world.
+bool auv_prepare_batch(int num_envs);
+// Optional export. Call after auv_init, on the thread that owns the world.
+// Draws the case for this seed and resets that world. A world without this call
+// stays at the loaded pose.
+bool auv_begin_fuzz(uint64_t seed);
 
 // Optional simulation extension. AuvFrame and hardware plugin ABI remain unchanged.
 // code: 0 running, 1 tick budget exhausted, 2 simulation/controller failure.
@@ -78,6 +85,8 @@ using AuvInitFunc = decltype(auv_init);
 using AuvYieldUntilNextFrameFunc = decltype(auv_yield_until_next_frame);
 using AuvSetThrustorsInputFunc = decltype(auv_set_thrustor_values);
 using AuvDeinitFunc = decltype(auv_deinit);
+using AuvPrepareBatchFunc = decltype(auv_prepare_batch);
+using AuvBeginFuzzFunc = decltype(auv_begin_fuzz);
 
 #else
 
@@ -85,6 +94,8 @@ typedef typeof(auv_init) AuvInitFunc;
 typedef typeof(auv_yield_until_next_frame) AuvYieldUntilNextFrameFunc;
 typedef typeof(auv_set_thrustor_values) AuvSetThrustorsInputFunc;
 typedef typeof(auv_deinit) AuvDeinitFunc;
+typedef typeof(auv_prepare_batch) AuvPrepareBatchFunc;
+typedef typeof(auv_begin_fuzz) AuvBeginFuzzFunc;
 
 #endif // __cplusplus
 

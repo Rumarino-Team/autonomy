@@ -56,6 +56,8 @@ pub const InitFunc = fn () callconv(.c) void;
 pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
 pub const DeinitFunc = fn () callconv(.c) void;
+pub const PrepareBatchFunc = fn (num_envs: c_int) callconv(.c) bool;
+pub const BeginFuzzFunc = fn (seed: u64) callconv(.c) bool;
 
 pub const SimulationStatusFunc = fn (status: *c.AuvSimulationStatus) callconv(.c) bool;
 
@@ -65,6 +67,8 @@ init: *const InitFunc,
 yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
 setThrustorValues: *const SetThrustorValuesFunc,
 deinit: *const DeinitFunc,
+prepareBatch: ?*const PrepareBatchFunc = null,
+beginFuzz: ?*const BeginFuzzFunc = null,
 simulationStatus: ?*const SimulationStatusFunc = null,
 
 // below I'm double checking the ABI matches

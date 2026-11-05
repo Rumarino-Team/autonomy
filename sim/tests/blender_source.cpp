@@ -1,11 +1,12 @@
 #include "runtime.hpp"
+#include <filesystem>
 #include <iostream>
 using namespace sim;
 int main(int argc, char **argv) {
   try {
     require(argc == 3, "backend and exported fixture directory required");
     auto backend = std::make_shared<Backend>(argv[1]);
-    auto load = [&](const char *name) { return Scene::load(std::filesystem::path(argv[2])/(std::string(name)+".json")); };
+    auto load = [&](const char *name) { return Scene::load((std::filesystem::path(argv[2])/(std::string(name)+".asim")).string()); };
     World baseline(load("baseline"),backend), moved(load("moved"),backend), deleted(load("deleted"),backend);
     auto state = [](World &w,uint32_t id)->const SimBodyState & {
       for(auto &b:w.bodies) if(b.id==id) return b;
@@ -20,7 +21,7 @@ int main(int argc, char **argv) {
     World robot(load("robot_moved"),backend), mounts(load("mounts"),backend), instances(load("instances"),backend);
     require(std::abs(state(robot,1).pose.position.x-state(baseline,1).pose.position.x+.3)<1e-5,"robot initial pose did not come from Blender");
     require(std::abs(mounts.scene.thrusters[0].position.x-baseline.scene.thrusters[0].position.x)>.09,"thruster mount edit lost");
-    require(std::abs(mounts.scene.camera.pose.position.z-baseline.scene.camera.pose.position.z)>.14,"camera mount edit lost");
+    require(std::abs(mounts.scene.header.camera.pose.position.z-baseline.scene.header.camera.pose.position.z)>.14,"camera mount edit lost");
     require(instances.bodies.size()>deleted.bodies.size(),"instanced geometry missing");
     for(const char *name:{"added","disabled"}) {
       World w(load(name),backend);

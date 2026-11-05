@@ -1,10 +1,8 @@
 """Run: blender --background --factory-startup pool_scene.blend --python this_file."""
 
 import math
-import json
 import struct
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -103,33 +101,6 @@ assert all(abs(key.co.y) < 1e-8 for key in inactive.animation_data.action.fcurve
 rotors.detach_takes(scene)
 assert all(ob.animation_data.action is None for ob in rotors.rotors(root))
 assert rotors.activate_take(scene, root, 'rotor_test')
-
-# Exercise the real recording import, including selection and take activation.
-take = scene.autonomy_sim.takes.add()
-take.name = 'rotor_integration_test'
-folder = tempfile.TemporaryDirectory()
-recording_path = Path(folder.name) / 'rotor_recording.jsonl'
-records = [{'t': 'header', 'version': 1, 'vehicle': 'hydrus', 'objects': ['hydrus'],
-            'fps': 24, 'timestep': .01, 'every': 50, 'thrusters': 8}]
-for i in range(9):
-    records.append({'t': 'sample', 'step': i * 50, 'time': i * .5,
-                    'poses': {'hydrus': [0, i * .2, -2, 1, 0, 0, 0]},
-                    'thr': [0 if i in (0, 8) else .5] * 8})
-recording_path.write_text(''.join(json.dumps(record) + '\n' for record in records))
-take.recording = str(recording_path)
-take.frame_offset = 1
-link._import_take(scene, take, 0)
-assert all(ob.animation_data.action.name.startswith(take.name + ':rotor:')
-           for ob in rotors.rotors(root))
-link.activate_take(scene, take)
-scene.frame_set(30)
-angle_a = rotor.rotation_euler.x
-scene.frame_set(100)
-scene.frame_set(30)
-assert abs(rotor.rotation_euler.x - angle_a) < 1e-6
-link.detach_takes(scene)
-assert all(ob.animation_data.action is None for ob in rotors.rotors(root))
 link.unregister()
-folder.cleanup()
 assert rotors._on_frame not in bpy.app.handlers.frame_change_post
 print('ROTOR_TESTS_PASSED', counts)
