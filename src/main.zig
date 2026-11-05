@@ -3,6 +3,8 @@ const MissionContext = @import("MissionContext.zig");
 const MissionArgs = @import("MissionArgs.zig");
 
 test {
+    _ = @import("Pid.zig");
+    _ = @import("Simulation.zig");
     std.testing.refAllDecls(@import("BodyControl.zig"));
     std.testing.refAllDecls(@import("MissionContext.zig"));
     std.testing.refAllDecls(@import("ConfigLoader.zig"));
@@ -15,6 +17,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("args = {f}", .{args});
 
     var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
+    defer ctx.auv.deinit();
 
     while (true) {
         try ctx.yieldUntilNextFrameAndUpdate();
@@ -44,6 +47,4 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("succesfully completed mission", .{});
         break;
     }
-
-    ctx.auv.deinit();
 }

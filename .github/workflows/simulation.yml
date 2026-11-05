@@ -1,0 +1,51 @@
+name: Portable simulation
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ libsdl2-dev libfreetype-dev libgl-dev libglu1-mesa-dev libglm-dev libyaml-cpp-dev zlib1g-dev libzstd-dev
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install tested Blender for evaluated scene and ownership tests
+        run: |
+          curl --fail --location --retry 3 https://download.blender.org/release/Blender4.5/blender-4.5.6-linux-x64.tar.xz -o "$RUNNER_TEMP/blender.tar.xz"
+          echo "d4a6ba867b35d65cfa16929178bcafaa5d774afef93beda5493cacdcd912b3a6  $RUNNER_TEMP/blender.tar.xz" | sha256sum --check
+          tar -xf "$RUNNER_TEMP/blender.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/blender-4.5.6-linux-x64" >> "$GITHUB_PATH"
+      - name: Test current controllers and ABI imports
+        run: zig build test && zig build
+      - name: Build pinned physics engines
+        run: |
+          cmake -S . -B build/portable -G Ninja -DCMAKE_BUILD_TYPE=Release -DAUTONOMY_BUILD_SIM=ON
+          cmake --build build/portable --target sim_all --parallel 4
+      - name: Qualify both backends and existing vehicles
+        run: ctest --test-dir build/portable --output-on-failure --parallel 2
+      - name: Seeded fuzz and replay
+        env:
+          CASES: ${{ github.event_name == 'schedule' && '1000' || '8' }}
+        run: |
+          for engine in mujoco stonefish; do
+            python3 sim/fuzz.py --backend "build/portable/sim/libsim_backend_${engine}.so" --scenario auvs/stonefish_sim/data/pool_scene.blend --cases "$CASES" --workers 4 --ticks 720 --verify-replay --reduce-failures --output "build/fuzz/$engine"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: simulation-failures
+          path: |
+            build/fuzz
+            build/portable/sim/blender-source-fixtures
+            build/portable/autonomy_takes
+            build/portable/Testing/Temporary

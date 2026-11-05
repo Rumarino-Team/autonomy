@@ -1,19 +1,28 @@
 zig-out/
 .zig-cache/
-<<<<<<< Updated upstream
 .cache/
 build
 tmp/
-=======
 demo
 frames
 build
 build-rtx
-auvs/stonefish_sim
+auvs/stonefish_sim/*
+!auvs/stonefish_sim/data/
+auvs/stonefish_sim/data/*
+!auvs/stonefish_sim/data/pool_scene.blend
+!auvs/stonefish_sim/data/textures/
+auvs/stonefish_sim/data/textures/*
+!auvs/stonefish_sim/data/textures/pool_*.png
+!auvs/stonefish_sim/data/textures/hdri/
+auvs/stonefish_sim/data/textures/hdri/*
+!auvs/stonefish_sim/data/textures/hdri/README.md
 tmp
-tools
+tools/*
+!tools/blender/
+**/__pycache__/
+*.blend1
 
-
+.zig-cache-test
 
 .cache
->>>>>>> Stashed changes

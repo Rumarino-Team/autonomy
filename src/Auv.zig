@@ -57,12 +57,15 @@ pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
 pub const DeinitFunc = fn () callconv(.c) void;
 
+pub const SimulationStatusFunc = fn (status: *c.AuvSimulationStatus) callconv(.c) bool;
+
 const Auv = @This();
 
 init: *const InitFunc,
 yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
 setThrustorValues: *const SetThrustorValuesFunc,
 deinit: *const DeinitFunc,
+simulationStatus: ?*const SimulationStatusFunc = null,
 
 // below I'm double checking the ABI matches
 fn assertSameLayout(comptime Zig: type, comptime C: type) void {

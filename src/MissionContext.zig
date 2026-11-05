@@ -3,6 +3,7 @@ const Io = std.Io;
 const MissionArgs = @import("MissionArgs.zig");
 const math = @import("math.zig");
 const bc = @import("BodyControl.zig");
+const Pid = @import("Pid.zig");
 
 const Auv = @import("Auv.zig");
 const AuvLoader = @import("AuvLoader.zig");
@@ -36,7 +37,6 @@ seen_objects: [Auv.Frame.max_objects]Auv.Object,
 seen_objects_len: u8,
 
 goal_dist_threshold: f32,
-thrustor_saturate: f32,
 
 log_counter: u32,
 log_freq_div: u16,
@@ -50,8 +50,8 @@ position_axes: Auv.AxisOk = .{ .x = true, .y = true, .z = true },
 desired: math.Vector2f = .{ 0, 0 },
 desired_height: ?f32 = null,
 translation: ?math.Vector3f = null,
-pid_sum_err: math.Vector6f = @splat(0),
-pid_prev_err: math.Vector6f = @splat(0),
+pid: [6]Pid = @splat(.{}),
+previous_position: ?math.Vector3f = null,
 tilt_correction: math.Vector3f = .{ 0, 0, 0 },
 force_error: math.Vector3f = .{ 0, 0, 0 },
 pid_prev_timestamp_ns: ?u64,
@@ -117,7 +117,6 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         .seen_objects_len = 0,
 
         .goal_dist_threshold = args.goal_dist_threshold,
-        .thrustor_saturate = 5,
 
         .log_counter = 0,
         .log_freq_div = 120,
@@ -160,6 +159,14 @@ pub fn reset(ctx: *MissionContext) void {
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     const start = Io.Clock.Timestamp.now(ctx.io, .awake);
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
+    if (ctx.auv.simulationStatus) |read_status| {
+        var status: Auv.c.AuvSimulationStatus = undefined;
+        if (!read_status(&status)) return error.SimulationStatusUnavailable;
+        if (status.code != 0) {
+            std.log.err("simulation step={d}: {s}", .{ status.tick, std.mem.sliceTo(&status.message, 0) });
+            return if (status.code == 1) error.SimulationTickBudget else error.SimulationFailed;
+        }
+    }
     if (stop_requested.load(.monotonic)) return error.Stopped;
 
     // std.log.debug("updating seen_objects...", .{});
@@ -193,7 +200,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }
     }
 
-    if (ctx.config_watcher.changed() catch |err| blk: {
+    if (ctx.auv.simulationStatus == null and ctx.config_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
     }) {
@@ -210,7 +217,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }
     }
 
-    if (ctx.auv_watcher.changed() catch |err| blk: {
+    if (ctx.auv.simulationStatus == null and ctx.auv_watcher.changed() catch |err| blk: {
         std.log.err("{s}", .{@errorName(err)});
         break :blk false;
     }) {
@@ -300,8 +307,8 @@ fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
 }
 
 pub fn resetOdometryPid(ctx: *MissionContext) void {
-    ctx.pid_sum_err = @splat(0);
-    ctx.pid_prev_err = @splat(0);
+    ctx.pid = @splat(.{});
+    ctx.previous_position = null;
     ctx.tilt_correction = .{ 0, 0, 0 };
 }
 
@@ -463,23 +470,32 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     const current_q = bc.normalizedQuat(current) catch bc.identity;
     var target_q = bc.normalizedQuat(math.quaternionMul(current_q, delta)) catch current_q;
     const odom = ctx.config.odometry;
+    var velocity_body: math.Vector3f = @splat(0);
+    if (dt) |t| {
+        if (t > 0) {
+            if (ctx.previous_position) |position| {
+                var velocity_world = (ctx.frame.camera_pose.pos - position) / @as(math.Vector3f, @splat(t));
+                if (!ctx.frame.position_ok.x) velocity_world[0] = 0;
+                if (!ctx.frame.position_ok.y) velocity_world[1] = 0;
+                if (!ctx.frame.position_ok.z) velocity_world[2] = 0;
+                velocity_body = math.quaternionRotate(math.quaternionConjugate(current_q), velocity_world);
+            }
+        }
+    }
+    ctx.previous_position = if (ctx.frame.position_ok.x and ctx.frame.position_ok.y and ctx.frame.position_ok.z) ctx.frame.camera_pose.pos else null;
     var desired_tilt: math.Vector3f = .{ 0, 0, 0 };
     var force_error: math.Vector3f = .{ 0, 0, 0 };
     const moments = bc.ThrustDirections.fromTamMoments(ctx.config.tam) catch unreachable;
     // Coverage swings a thruster onto a force component the map cannot produce.
     const translation_command: math.Vector3f = blk: {
         force_error = error_body;
-        const available = thrust_direction.alongThrust(error_body);
-        var force_body: math.Vector3f = .{ 0, 0, 0 };
+        const error_control = if (odom.translation_frame == .world) math.quaternionRotate(current_q, error_body) else error_body;
+        const velocity_control = if (odom.translation_frame == .world) math.quaternionRotate(current_q, velocity_body) else velocity_body;
+        var force_control: math.Vector3f = .{ 0, 0, 0 };
         inline for (0..3) |i| {
-            var rate: f32 = 0;
-            if (dt) |t| {
-                ctx.pid_sum_err[i] += available[i] * t;
-                rate = (error_body[i] - ctx.pid_prev_err[i]) / t;
-            }
-            force_body[i] = odom.kp[i] * error_body[i] + odom.ki[i] * ctx.pid_sum_err[i] + odom.kd[i] * rate;
-            ctx.pid_prev_err[i] = error_body[i];
+            force_control[i] = ctx.pid[i].step(error_control[i], if (odom.derivative_on_measurement) velocity_control[i] else null, dt, odom.kp[i], odom.ki[i], odom.kd[i], odom.integral_limit[i], odom.output_limit[i]);
         }
+        const force_body = if (odom.translation_frame == .world) math.quaternionRotate(math.quaternionConjugate(current_q), force_control) else force_control;
         const coverage = bc.coverForce(thrust_direction, moments, force_body, ctx.config.rotation_limit, ctx.config.camera_forward);
         if (coverage.tilt) |tilt| desired_tilt = tilt.axis * @as(math.Vector3f, @splat(tilt.angle));
         break :blk coverage.force;
@@ -500,10 +516,12 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     const translation_body: math.Vector3f = blk: {
         var force = thrust_direction.alongThrust(translation_command);
         if (math.length3f(attitude_error) > odom.rotation_gate) {
+            if (odom.translation_frame == .world) force = math.quaternionRotate(current_q, force);
             force[0] = 0;
             force[1] = 0;
-            //we doing zero out force[2] beause we always want to maintain the z axis.
+            if (odom.translation_frame == .world) force = math.quaternionRotate(math.quaternionConjugate(current_q), force);
         }
+        force += math.quaternionRotate(math.quaternionConjugate(current_q), odom.feedforward_world_force);
         break :blk force;
     };
     ctx.force_error = force_error;
@@ -512,16 +530,9 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     inline for (0..3) |i| {
         const lane = i + 3;
         if (attitude_axis[i]) {
-            var rate: f32 = 0;
-            if (dt) |t| {
-                rate = (attitude_error[i] - ctx.pid_prev_err[lane]) / t;
-                ctx.pid_sum_err[lane] += attitude_error[i] * t;
-            }
-            ctx.pid_prev_err[lane] = attitude_error[i];
-            rotation[i] = odom.kp[lane] * attitude_error[i] + odom.ki[lane] * ctx.pid_sum_err[lane] + odom.kd[lane] * rate;
+            rotation[i] = ctx.pid[lane].step(attitude_error[i], if (odom.derivative_on_measurement) ctx.frame.gyro[i] else null, dt, odom.kp[lane], odom.ki[lane], odom.kd[lane], odom.integral_limit[lane], odom.output_limit[lane]);
         } else {
-            ctx.pid_sum_err[lane] = 0;
-            ctx.pid_prev_err[lane] = 0;
+            ctx.pid[lane] = .{};
         }
     }
     const input: math.Vector6f = .{
@@ -553,10 +564,13 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     const thruster_values = math.tamToThrusters(
         ctx.config.tam,
         input,
-        ctx.thrustor_saturate,
-        5.0,
+        ctx.config.thruster_output_scale,
+        ctx.config.thruster_output_scale,
         thruster_buffer,
     );
+    if (ctx.config.thruster_curve == .quadratic_rpm) {
+        for (thruster_values) |*value| value.* = std.math.sign(value.*) * @sqrt(@abs(value.*));
+    }
     if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }

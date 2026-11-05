@@ -38,6 +38,7 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
     errdefer dynlib.close();
 
     const auv: Auv = .{
+        .simulationStatus = dynlib.lookup(*const Auv.SimulationStatusFunc, "auv_simulation_status"),
         .init = dynlib.lookup(
             *const Auv.InitFunc,
             "auv_init",

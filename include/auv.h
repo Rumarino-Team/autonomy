@@ -63,6 +63,15 @@ void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
 void auv_deinit(void);
 
+// Optional simulation extension. AuvFrame and hardware plugin ABI remain unchanged.
+// code: 0 running, 1 tick budget exhausted, 2 simulation/controller failure.
+typedef struct {
+  uint32_t code;
+  uint64_t tick;
+  char message[256];
+} AuvSimulationStatus;
+bool auv_simulation_status(AuvSimulationStatus* status);
+
 #ifdef __cplusplus
 
 using AuvInitFunc = decltype(auv_init);

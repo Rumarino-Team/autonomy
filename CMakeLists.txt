@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(autonomy LANGUAGES CXX)
+project(autonomy LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,3 +65,9 @@ set_target_properties(auv_stonefish_sim PROPERTIES
 install(
   TARGETS auv_stonefish_sim
 )
+
+include(CTest)
+option(AUTONOMY_BUILD_SIM "Build portable physics runtime and both backend adapters" OFF)
+if(AUTONOMY_BUILD_SIM)
+  add_subdirectory(sim)
+endif()
