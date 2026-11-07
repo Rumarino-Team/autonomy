@@ -9,13 +9,20 @@ pub const MissionId = enum {
     teleop,
 };
 
+fuzz: bool = false,
+fuzz_nominal: bool = false,
+master_seed: u64 = 1,
+case_count: usize = 100,
+workers: usize = 8,
+replay_seed: ?u64 = null,
+results_path: []const u8 = "fuzz-results",
 goal_dist_threshold: f32,
 auv_dynlib_path: []const u8,
 mission_id: MissionId,
 live_config_path: []const u8,
 
 pub fn init(args_slice: []const [:0]const u8) !MissionArgs {
-    if (args_slice.len < 3) {
+    if (args_slice.len < 4) {
         std.log.err("usage: {s} <auv_dynlib_path> <mission_name> <live_config_path>", .{args_slice[0]});
         return error.MissingArgs;
     }
@@ -33,12 +40,49 @@ pub fn init(args_slice: []const [:0]const u8) !MissionArgs {
         return error.InvalidMissionId;
     };
 
-    return .{
+    var result: MissionArgs = .{
         .mission_id = mission_id,
         .auv_dynlib_path = auv_dynlib_path,
         .live_config_path = live_config_path,
         .goal_dist_threshold = 1.0,
     };
+    var i: usize = 4;
+    while (i < args_slice.len) : (i += 1) {
+        const flag = args_slice[i];
+        if (std.mem.eql(u8, flag, "--fuzz")) {
+            result.fuzz = true;
+            continue;
+        }
+        if (i + 1 == args_slice.len) return error.MissingOptionValue;
+        i += 1;
+        const value = args_slice[i];
+        if (std.mem.eql(u8, flag, "--seed")) {
+            result.master_seed = try std.fmt.parseInt(u64, value, 10);
+        } else if (std.mem.eql(u8, flag, "--cases")) {
+            result.case_count = try std.fmt.parseInt(usize, value, 10);
+        } else if (std.mem.eql(u8, flag, "--workers")) {
+            result.workers = try std.fmt.parseInt(usize, value, 10);
+        } else if (std.mem.eql(u8, flag, "--replay-seed")) {
+            result.replay_seed = try std.fmt.parseInt(u64, value, 10);
+        } else if (std.mem.eql(u8, flag, "--profile")) {
+            if (std.mem.eql(u8, value, "nominal")) {
+                result.fuzz_nominal = true;
+            } else if (std.mem.eql(u8, value, "default")) {
+                result.fuzz_nominal = false;
+            } else return error.UnknownFuzzProfile;
+        } else if (std.mem.eql(u8, flag, "--results")) {
+            result.results_path = value;
+        } else return error.UnknownOption;
+        if (!result.fuzz) return error.FuzzFlagRequired;
+    }
+    if (result.case_count == 0 or result.workers == 0 or result.results_path.len == 0)
+        return error.InvalidFuzzOptions;
+    if (result.replay_seed != null) {
+        result.case_count = 1;
+        result.workers = 1;
+    }
+    if (result.fuzz and mission_id == .teleop) return error.FuzzTeleopUnsupported;
+    return result;
 }
 
 pub fn format(args: MissionArgs, writer: *std.Io.Writer) !void {

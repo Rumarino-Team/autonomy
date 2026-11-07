@@ -1,0 +1,4 @@
+Repository: https://github.com/Rumarino-Team/autonomy.git
+Branch base: main
+Commit: 450b0055d9222604beadd0fcff131477255c1e2f
+MuJoCo pin: 237c17e48539b6c90bf90d3161547cbdcbfaa1e0

@@ -3,6 +3,7 @@ const Io = std.Io;
 const MissionArgs = @import("MissionArgs.zig");
 const math = @import("math.zig");
 const bc = @import("BodyControl.zig");
+const Pid = @import("Pid.zig");
 
 const Auv = @import("Auv.zig");
 const AuvLoader = @import("AuvLoader.zig");
@@ -29,6 +30,7 @@ fn requestStop(_: std.posix.SIG) callconv(.c) void {
 }
 
 io: Io,
+batch: bool = false,
 
 frame: Auv.Frame,
 
@@ -36,7 +38,6 @@ seen_objects: [Auv.Frame.max_objects]Auv.Object,
 seen_objects_len: u8,
 
 goal_dist_threshold: f32,
-thrustor_saturate: f32,
 
 log_counter: u32,
 log_freq_div: u16,
@@ -50,8 +51,8 @@ position_axes: Auv.AxisOk = .{ .x = true, .y = true, .z = true },
 desired: math.Vector2f = .{ 0, 0 },
 desired_height: ?f32 = null,
 translation: ?math.Vector3f = null,
-pid_sum_err: math.Vector6f = @splat(0),
-pid_prev_err: math.Vector6f = @splat(0),
+pid: [6]Pid = @splat(.{}),
+previous_position: ?math.Vector3f = null,
 tilt_correction: math.Vector3f = .{ 0, 0, 0 },
 force_error: math.Vector3f = .{ 0, 0, 0 },
 pid_prev_timestamp_ns: ?u64,
@@ -72,11 +73,48 @@ config: ConfigLoader.Config,
 config_loader: ConfigLoader,
 config_watcher: FileWatcher,
 
-pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
+pub fn installSignalHandlers() void {
+    stop_requested.store(false, .monotonic);
     const stop: std.posix.Sigaction = .{ .handler = .{ .handler = requestStop }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.INT, &stop, null);
     std.posix.sigaction(.TERM, &stop, null);
+}
 
+pub fn stopRequested() bool {
+    return stop_requested.load(.monotonic);
+}
+pub fn requestCancellation() void {
+    stop_requested.store(true, .monotonic);
+}
+
+// The caller owns the active adapter world and its loaded code. No watches,
+// sockets, plugin initialization, or process signal changes occur in a batch.
+pub fn initBatch(arena: std.mem.Allocator, io: Io, args: MissionArgs, auv: Auv, config_contents: []const u8) !MissionContext {
+    const config = try ConfigLoader.parse(arena, config_contents);
+    const goals = try arena.alloc(Goal, queue_capacity);
+    return .{
+        .io = io,
+        .batch = true,
+        .frame = undefined,
+        .seen_objects = undefined,
+        .seen_objects_len = 0,
+        .goal_dist_threshold = args.goal_dist_threshold,
+        .log_counter = 0,
+        .log_freq_div = 120,
+        .target_position = @splat(0),
+        .queue = .initBuffer(goals),
+        .pid_prev_timestamp_ns = null,
+        .step = "",
+        .auv = auv,
+        .auv_loader = undefined,
+        .auv_watcher = undefined,
+        .config = config,
+        .config_loader = undefined,
+        .config_watcher = undefined,
+    };
+}
+
+pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     var config_loader: ConfigLoader = try .init(arena, args.live_config_path);
     const config = config_loader.load(io) catch |err| {
         std.log.err("failed to load config: {s}", .{config_loader.config_path});
@@ -88,6 +126,7 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
     }
 
     var auv_loader: AuvLoader = try .init(arena, args.auv_dynlib_path);
+    errdefer auv_loader.deinit();
     const auv = auv_loader.load(io) catch |err| {
         const dl_err = std.mem.span(std.c.dlerror()) orelse "NO_DL_ERROR";
         std.log.err("dlerror: `{s}`", .{dl_err});
@@ -95,6 +134,7 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         return err;
     };
     auv.init();
+    errdefer auv.deinit();
     if (print_stuff) {
         std.log.debug("succesfully loaded auv: {s}", .{auv_loader.auv_path});
         std.log.debug("{any}", .{auv});
@@ -103,12 +143,18 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
     const telemetry_dest = try Io.net.IpAddress.parseLiteral(telemetry_addr);
     const telemetry_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
     const telemetry_socket = try telemetry_bind.bind(io, .{ .mode = .dgram });
+    errdefer telemetry_socket.close(io);
     const telemetry_file: ?Io.File = if (telemetry_log_path) |path|
         try Io.Dir.cwd().createFile(io, path, .{})
     else
         null;
 
+    errdefer if (telemetry_file) |file| file.close(io);
     const goals = try arena.alloc(Goal, queue_capacity);
+    var auv_watcher = try FileWatcher.init(arena, args.auv_dynlib_path);
+    errdefer auv_watcher.deinit();
+    var config_watcher = try FileWatcher.init(arena, args.live_config_path);
+    errdefer config_watcher.deinit();
 
     return .{
         .frame = undefined,
@@ -117,7 +163,6 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
         .seen_objects_len = 0,
 
         .goal_dist_threshold = args.goal_dist_threshold,
-        .thrustor_saturate = 5,
 
         .log_counter = 0,
         .log_freq_div = 120,
@@ -134,18 +179,36 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
 
         .auv = auv,
         .auv_loader = auv_loader,
-        .auv_watcher = try .init(arena, args.auv_dynlib_path),
+        .auv_watcher = auv_watcher,
 
         .config = config,
         .config_loader = config_loader,
-        .config_watcher = try .init(arena, args.live_config_path),
+        .config_watcher = config_watcher,
 
         .io = io,
     };
 }
 
+pub fn deinit(ctx: *MissionContext) void {
+    ctx.stopThrusters();
+    if (ctx.batch) return;
+    ctx.auv.deinit();
+    ctx.auv_loader.deinit();
+    ctx.auv_watcher.deinit();
+    ctx.config_watcher.deinit();
+    ctx.telemetry_socket.close(ctx.io);
+    if (ctx.telemetry_file) |file| file.close(ctx.io);
+}
+
+pub fn stopThrusters(ctx: *MissionContext) void {
+    var zero: [8]f32 = @splat(0);
+    const len: u8 = @intCast(@min(ctx.config.tam.len, zero.len));
+    ctx.auv.setThrustorValues(&zero, len);
+}
+
 pub fn reset(ctx: *MissionContext) void {
     ctx.seen_objects_len = 0;
+    ctx.seen_objects2d_len = 0;
     ctx.clearQueue();
     ctx.resetOdometryPid();
     ctx.target_orientation = bc.identity;
@@ -160,6 +223,14 @@ pub fn reset(ctx: *MissionContext) void {
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     const start = Io.Clock.Timestamp.now(ctx.io, .awake);
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
+    if (ctx.auv.simulationStatus) |read_status| {
+        var status: Auv.c.AuvSimulationStatus = undefined;
+        if (!read_status(&status)) return error.SimulationStatusUnavailable;
+        if (status.code != 0) {
+            if (!ctx.batch) std.log.err("simulation step={d}: {s}", .{ status.tick, std.mem.sliceTo(&status.message, 0) });
+            return if (status.code == 1) error.SimulationTickBudget else error.SimulationFailed;
+        }
+    }
     if (stop_requested.load(.monotonic)) return error.Stopped;
 
     // std.log.debug("updating seen_objects...", .{});
@@ -172,7 +243,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
 
         if (maybe_seen_object) |seen_object| {
             seen_object.* = frame_object;
-        } else {
+        } else if (ctx.seen_objects_len < ctx.seen_objects.len) {
             ctx.seen_objects[ctx.seen_objects_len] = frame_object;
             ctx.seen_objects_len += 1;
         }
@@ -187,50 +258,52 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
 
         if (maybe_seen_object) |seen_object| {
             seen_object.* = frame_object;
-        } else {
+        } else if (ctx.seen_objects2d_len < ctx.seen_objects2d.len) {
             ctx.seen_objects2d[ctx.seen_objects2d_len] = frame_object;
             ctx.seen_objects2d_len += 1;
         }
     }
 
-    if (ctx.config_watcher.changed() catch |err| blk: {
-        std.log.err("{s}", .{@errorName(err)});
-        break :blk false;
-    }) {
-        if (ctx.config_loader.load(ctx.io)) |config| {
-            if (print_stuff) {
-                std.log.debug("succesfully reloaded config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
-                std.log.debug("{any}", .{config});
-            }
-            ctx.config = config;
-        } else |err| {
-            std.log.err("failed to reload config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+    if (!ctx.batch) {
+        if (ctx.config_watcher.changed() catch |err| blk: {
             std.log.err("{s}", .{@errorName(err)});
-            std.log.info("kept previous config", .{});
+            break :blk false;
+        }) {
+            if (ctx.config_loader.load(ctx.io)) |config| {
+                if (!ctx.batch and print_stuff) {
+                    std.log.debug("succesfully reloaded config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                    std.log.debug("{any}", .{config});
+                }
+                ctx.config = config;
+            } else |err| {
+                std.log.err("failed to reload config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                std.log.err("{s}", .{@errorName(err)});
+                std.log.info("kept previous config", .{});
+            }
         }
-    }
 
-    if (ctx.auv_watcher.changed() catch |err| blk: {
-        std.log.err("{s}", .{@errorName(err)});
-        break :blk false;
-    }) {
-        ctx.auv.deinit();
-        if (ctx.auv_loader.load(ctx.io)) |auv| {
-            if (print_stuff) {
-                std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
-                std.log.debug("{any}", .{auv});
-            }
-            ctx.auv = auv;
-            if (print_stuff) {
-                std.log.debug("restarted auv loop", .{});
-            }
-            return error.RestartMission;
-        } else |err| {
-            std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+        if (ctx.auv_watcher.changed() catch |err| blk: {
             std.log.err("{s}", .{@errorName(err)});
-            std.log.info("kept previous auv", .{});
+            break :blk false;
+        }) {
+            ctx.auv.deinit();
+            if (ctx.auv_loader.load(ctx.io)) |auv| {
+                if (!ctx.batch and print_stuff) {
+                    std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                    std.log.debug("{any}", .{auv});
+                }
+                ctx.auv = auv;
+                ctx.auv.init();
+                if (!ctx.batch and print_stuff) {
+                    std.log.debug("restarted auv loop", .{});
+                }
+                return error.RestartMission;
+            } else |err| {
+                std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                std.log.err("{s}", .{@errorName(err)});
+                return err;
+            }
         }
-        ctx.auv.init();
     }
 
     var thruster_buffer: [math.max_thrusters]f32 = @splat(0);
@@ -239,7 +312,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     ctx.publishToUdp(thruster_values);
 
     const elapsed = start.untilNow(ctx.io);
-    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+    if (!ctx.batch and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
     }
     ctx.log_counter +%= 1;
@@ -263,6 +336,7 @@ const TelemetryPacket = struct {
 };
 
 fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
+    if (ctx.batch) return;
     const nobj = @min(@as(usize, ctx.seen_objects_len), ctx.seen_objects.len);
     const nbox = @min(@as(usize, ctx.seen_objects2d_len), ctx.seen_objects2d.len);
     var goals: [queue_capacity]Goal = undefined;
@@ -300,8 +374,8 @@ fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
 }
 
 pub fn resetOdometryPid(ctx: *MissionContext) void {
-    ctx.pid_sum_err = @splat(0);
-    ctx.pid_prev_err = @splat(0);
+    ctx.pid = @splat(.{});
+    ctx.previous_position = null;
     ctx.tilt_correction = .{ 0, 0, 0 };
 }
 
@@ -463,23 +537,32 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     const current_q = bc.normalizedQuat(current) catch bc.identity;
     var target_q = bc.normalizedQuat(math.quaternionMul(current_q, delta)) catch current_q;
     const odom = ctx.config.odometry;
+    var velocity_body: math.Vector3f = @splat(0);
+    if (dt) |t| {
+        if (t > 0) {
+            if (ctx.previous_position) |position| {
+                var velocity_world = (ctx.frame.camera_pose.pos - position) / @as(math.Vector3f, @splat(t));
+                if (!ctx.frame.position_ok.x) velocity_world[0] = 0;
+                if (!ctx.frame.position_ok.y) velocity_world[1] = 0;
+                if (!ctx.frame.position_ok.z) velocity_world[2] = 0;
+                velocity_body = math.quaternionRotate(math.quaternionConjugate(current_q), velocity_world);
+            }
+        }
+    }
+    ctx.previous_position = if (ctx.frame.position_ok.x and ctx.frame.position_ok.y and ctx.frame.position_ok.z) ctx.frame.camera_pose.pos else null;
     var desired_tilt: math.Vector3f = .{ 0, 0, 0 };
     var force_error: math.Vector3f = .{ 0, 0, 0 };
     const moments = bc.ThrustDirections.fromTamMoments(ctx.config.tam) catch unreachable;
     // Coverage swings a thruster onto a force component the map cannot produce.
     const translation_command: math.Vector3f = blk: {
         force_error = error_body;
-        const available = thrust_direction.alongThrust(error_body);
-        var force_body: math.Vector3f = .{ 0, 0, 0 };
+        const error_control = if (odom.translation_frame == .world) math.quaternionRotate(current_q, error_body) else error_body;
+        const velocity_control = if (odom.translation_frame == .world) math.quaternionRotate(current_q, velocity_body) else velocity_body;
+        var force_control: math.Vector3f = .{ 0, 0, 0 };
         inline for (0..3) |i| {
-            var rate: f32 = 0;
-            if (dt) |t| {
-                ctx.pid_sum_err[i] += available[i] * t;
-                rate = (error_body[i] - ctx.pid_prev_err[i]) / t;
-            }
-            force_body[i] = odom.kp[i] * error_body[i] + odom.ki[i] * ctx.pid_sum_err[i] + odom.kd[i] * rate;
-            ctx.pid_prev_err[i] = error_body[i];
+            force_control[i] = ctx.pid[i].step(error_control[i], if (odom.derivative_on_measurement) velocity_control[i] else null, dt, odom.kp[i], odom.ki[i], odom.kd[i], odom.integral_limit[i], odom.output_limit[i]);
         }
+        const force_body = if (odom.translation_frame == .world) math.quaternionRotate(math.quaternionConjugate(current_q), force_control) else force_control;
         const coverage = bc.coverForce(thrust_direction, moments, force_body, ctx.config.rotation_limit, ctx.config.camera_forward);
         if (coverage.tilt) |tilt| desired_tilt = tilt.axis * @as(math.Vector3f, @splat(tilt.angle));
         break :blk coverage.force;
@@ -500,10 +583,12 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     const translation_body: math.Vector3f = blk: {
         var force = thrust_direction.alongThrust(translation_command);
         if (math.length3f(attitude_error) > odom.rotation_gate) {
+            if (odom.translation_frame == .world) force = math.quaternionRotate(current_q, force);
             force[0] = 0;
             force[1] = 0;
-            //we doing zero out force[2] beause we always want to maintain the z axis.
+            if (odom.translation_frame == .world) force = math.quaternionRotate(math.quaternionConjugate(current_q), force);
         }
+        force += math.quaternionRotate(math.quaternionConjugate(current_q), odom.feedforward_world_force);
         break :blk force;
     };
     ctx.force_error = force_error;
@@ -512,23 +597,16 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     inline for (0..3) |i| {
         const lane = i + 3;
         if (attitude_axis[i]) {
-            var rate: f32 = 0;
-            if (dt) |t| {
-                rate = (attitude_error[i] - ctx.pid_prev_err[lane]) / t;
-                ctx.pid_sum_err[lane] += attitude_error[i] * t;
-            }
-            ctx.pid_prev_err[lane] = attitude_error[i];
-            rotation[i] = odom.kp[lane] * attitude_error[i] + odom.ki[lane] * ctx.pid_sum_err[lane] + odom.kd[lane] * rate;
+            rotation[i] = ctx.pid[lane].step(attitude_error[i], if (odom.derivative_on_measurement) ctx.frame.gyro[i] else null, dt, odom.kp[lane], odom.ki[lane], odom.kd[lane], odom.integral_limit[lane], odom.output_limit[lane]);
         } else {
-            ctx.pid_sum_err[lane] = 0;
-            ctx.pid_prev_err[lane] = 0;
+            ctx.pid[lane] = .{};
         }
     }
     const input: math.Vector6f = .{
         translation_body[0], translation_body[1], translation_body[2],
         rotation[0],         rotation[1],         rotation[2],
     };
-    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+    if (!ctx.batch and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         if (clear_print_stuff) {
             std.debug.print("\x1b[2J\x1b[H", .{});
         }
@@ -553,11 +631,14 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     const thruster_values = math.tamToThrusters(
         ctx.config.tam,
         input,
-        ctx.thrustor_saturate,
-        5.0,
+        ctx.config.thruster_output_scale,
+        ctx.config.thruster_output_scale,
         thruster_buffer,
     );
-    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+    if (ctx.config.thruster_curve == .quadratic_rpm) {
+        for (thruster_values) |*value| value.* = std.math.sign(value.*) * @sqrt(@abs(value.*));
+    }
+    if (!ctx.batch and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }
     return thruster_values;

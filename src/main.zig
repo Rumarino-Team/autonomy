@@ -1,8 +1,18 @@
 const std = @import("std");
+// Zig 0.16's default alternate signal stack is a TLS byte array (alignment 1).
+// Clang ASan requires aligned signal-stack bounds during C++ exception handling.
+// Instrumented-plugin tests leave signal-stack ownership to the ASan runtime.
+const external_asan = @import("runtime_options").external_asan;
+pub const std_options: std.Options = .{
+    .signal_stack_size = if (external_asan) null else 1 << 18,
+    .enable_segfault_handler = if (external_asan) false else std.debug.default_enable_segfault_handler,
+};
 const MissionContext = @import("MissionContext.zig");
 const MissionArgs = @import("MissionArgs.zig");
 
 test {
+    _ = @import("Pid.zig");
+    _ = @import("SceneContext.zig");
     std.testing.refAllDecls(@import("BodyControl.zig"));
     std.testing.refAllDecls(@import("MissionContext.zig"));
     std.testing.refAllDecls(@import("ConfigLoader.zig"));
@@ -14,36 +24,12 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("args = {f}", .{args});
 
-    var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
-
-    while (true) {
-        try ctx.yieldUntilNextFrameAndUpdate();
-        // Make sure the target position starts with the initial odometry measurement.
-        ctx.target_position = ctx.frame.camera_pose.pos;
-
-        const mission_result = switch (args.mission_id) {
-            .prequalify_coco => @import("missions/prequalify.zig").cocoMission(&ctx),
-            .prequalify_robosub => @import("missions/prequalify.zig").robosubMission(&ctx),
-            .teleop => @import("missions/prequalify.zig").teleopMission(&ctx),
-        };
-
-        mission_result catch |err| switch (err) {
-            error.RestartMission => {
-                std.log.info("restaring mission context", .{});
-                ctx.reset();
-                std.log.info("restaring mission", .{});
-                continue;
-            },
-            error.Stopped => {
-                std.log.info("stopped", .{});
-                break;
-            },
-            else => return err,
-        };
-
-        std.log.info("succesfully completed mission", .{});
-        break;
+    MissionContext.installSignalHandlers();
+    if (args.fuzz) {
+        try @import("FuzzRunner.zig").run(init.io, args);
+        return;
     }
-
-    ctx.auv.deinit();
+    var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
+    defer ctx.deinit();
+    try @import("MissionRunner.zig").execute(&ctx, args);
 }

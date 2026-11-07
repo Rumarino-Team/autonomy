@@ -63,6 +63,15 @@ void auv_yield_until_next_frame(AuvFrame *frame);
 void auv_set_thrustor_values(const float *thrustor_values, uint8_t thrustor_values_len);
 void auv_deinit(void);
 
+/* Optional simulator export; required functions and AuvFrame remain unchanged.
+ * code: 0 running, 1 tick budget exhausted, 2 initialization/command/step error. */
+typedef struct AuvSimulationStatus {
+  uint32_t code;
+  uint64_t tick;
+  char message[256];
+} AuvSimulationStatus;
+bool auv_simulation_status(AuvSimulationStatus *status);
+
 #ifdef __cplusplus
 
 using AuvInitFunc = decltype(auv_init);
@@ -72,10 +81,10 @@ using AuvDeinitFunc = decltype(auv_deinit);
 
 #else
 
-typedef typeof(auv_init) AuvInitFunc;
-typedef typeof(auv_yield_until_next_frame) AuvYieldUntilNextFrameFunc;
-typedef typeof(auv_set_thrustor_values) AuvSetThrustorsInputFunc;
-typedef typeof(auv_deinit) AuvDeinitFunc;
+typedef void AuvInitFunc(void);
+typedef void AuvYieldUntilNextFrameFunc(AuvFrame *);
+typedef void AuvSetThrustorsInputFunc(const float *, uint8_t);
+typedef void AuvDeinitFunc(void);
 
 #endif // __cplusplus
 

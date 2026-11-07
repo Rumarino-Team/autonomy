@@ -50,6 +50,13 @@ pub fn init(arena: std.mem.Allocator, path: []const u8) !FileWatcher {
     };
 }
 
+pub fn deinit(self: *FileWatcher) void {
+    if (self.fd >= 0) {
+        _ = linux.close(self.fd);
+        self.fd = -1;
+    }
+}
+
 pub fn changed(self: *FileWatcher) !bool {
     while (true) {
         if (self.off >= self.len) {

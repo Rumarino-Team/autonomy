@@ -38,6 +38,7 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
     errdefer dynlib.close();
 
     const auv: Auv = .{
+        .simulationStatus = dynlib.lookup(*const Auv.SimulationStatusFunc, "auv_simulation_status"),
         .init = dynlib.lookup(
             *const Auv.InitFunc,
             "auv_init",
@@ -67,4 +68,9 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
     loader.use_tmp = !loader.use_tmp;
 
     return auv;
+}
+
+pub fn deinit(loader: *AuvLoader) void {
+    if (loader.prev_dynlib) |*library| library.close();
+    loader.prev_dynlib = null;
 }

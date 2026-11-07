@@ -11,7 +11,7 @@ config_path: []const u8,
 use_ping: bool,
 ping: std.heap.FixedBufferAllocator,
 pong: std.heap.FixedBufferAllocator,
-reader_buf: [4098]u8,
+reader_buf: [16384]u8,
 
 /// Image-based visual servoing. The interaction matrix maps image error into a body error.
 pub const Ibvs = struct {
@@ -28,6 +28,16 @@ pub const OdometryPid = struct {
     kp: math.Vector6f,
     ki: math.Vector6f,
     kd: math.Vector6f,
+    /// Use body velocity and gyro for D, avoiding kicks at waypoint changes.
+    derivative_on_measurement: bool = false,
+    /// World coordinates keep depth independent of horizontal waypoint error
+    /// when the hull tilts. Body coordinates preserve legacy gain conventions.
+    translation_frame: enum { body, world } = .body,
+    /// Bounds on the I contribution and total PID output, in command units.
+    integral_limit: math.Vector6f = @splat(std.math.inf(f32)),
+    output_limit: math.Vector6f = @splat(std.math.inf(f32)),
+    /// Known steady force to apply in world axes (e.g. weight minus buoyancy).
+    feedforward_world_force: math.Vector3f = @splat(0),
 };
 
 pub const Config = struct {
@@ -35,8 +45,11 @@ pub const Config = struct {
     /// Body direction the camera looks along, such as `[0, 1, 0]` for body +Y.
     camera_forward: math.Vector3f,
     /// Max |rotation| about body X, Y, and Z (rad) when building a look from a world direction. Zero holds that axis at the reference.
-    rotation_limit: math.Vector3f = .{std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) },
+    rotation_limit: math.Vector3f = .{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) },
     tam: []math.Vector6f,
+    thruster_output_scale: f32 = 5,
+    /// RPM-controlled propellers produce signed quadratic thrust at zero inflow.
+    thruster_curve: enum { linear, quadratic_rpm } = .linear,
     odometry: OdometryPid,
     ibvs: Ibvs,
 };
@@ -45,8 +58,8 @@ pub fn init(arena: std.mem.Allocator, config_path: []const u8) !MissionLoader {
     return .{
         .config_path = config_path,
         .use_ping = false,
-        .ping = .init(try arena.alloc(u8, 4098)),
-        .pong = .init(try arena.alloc(u8, 4098)),
+        .ping = .init(try arena.alloc(u8, 16384)),
+        .pong = .init(try arena.alloc(u8, 16384)),
         .reader_buf = undefined,
     };
 }
@@ -54,13 +67,28 @@ pub fn init(arena: std.mem.Allocator, config_path: []const u8) !MissionLoader {
 pub fn load(loader: *MissionLoader, io: Io) !Config {
     const fba = if (loader.use_ping) &loader.ping else &loader.pong;
     const file = try Io.Dir.cwd().openFile(io, loader.config_path, .{ .mode = .read_only });
+    defer file.close(io);
+    errdefer fba.reset();
     var file_reader = file.reader(io, &loader.reader_buf);
     const file_contents = try file_reader.interface.allocRemaining(fba.allocator(), .unlimited);
 
-    const config = std.json.parseFromSliceLeaky(Config, fba.allocator(), file_contents, .{});
+    const config = try parse(fba.allocator(), file_contents);
 
     loader.use_ping = !loader.use_ping;
     fba.reset();
+
+    return config;
+}
+
+// Batch callers parse one immutable coordinator snapshot into private storage.
+pub fn parse(allocator: std.mem.Allocator, contents: []const u8) !Config {
+    const config = try std.json.parseFromSliceLeaky(Config, allocator, contents, .{});
+    if (config.tam.len == 0 or config.tam.len > max_thrustors or
+        !std.math.isFinite(config.thruster_output_scale) or config.thruster_output_scale <= 0)
+        return error.InvalidControlConfiguration;
+    for (config.tam) |row| inline for (0..6) |i| {
+        if (!std.math.isFinite(row[i])) return error.InvalidControlConfiguration;
+    };
 
     return config;
 }

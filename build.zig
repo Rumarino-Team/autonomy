@@ -83,8 +83,12 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
+    const runtime_options = b.addOptions();
+    runtime_options.addOption(bool, "external_asan", b.option(bool, "external-asan", "Let externally preloaded ASan own signal handlers/stacks (does not instrument Zig)") orelse false);
+    exe.root_module.addOptions("runtime_options", runtime_options);
     exe.root_module.link_libc = true;
     exe.root_module.addIncludePath(b.path("include"));
+    exe.root_module.addIncludePath(b.path("auvs/simulator"));
     exe.root_module.addCSourceFile(.{
         .file = b.path("auvs/trap_sim/auv.c"),
     });
@@ -142,11 +146,6 @@ pub fn build(b: *std.Build) !void {
         run_cmd.addArgs(args);
     }
 
-
-
-
-
-
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
@@ -173,6 +172,17 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run tests");
     // test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const fuzz_startup = b.addExecutable(.{
+        .name = "fuzz_startup_test",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/FuzzStartupTest.zig"), .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    fuzz_startup.root_module.addIncludePath(b.path("include"));
+    fuzz_startup.root_module.addIncludePath(b.path("auvs/simulator"));
+    fuzz_startup.root_module.addOptions("runtime_options", runtime_options);
+    const startup_step = b.step("fuzz-startup-test", "Build the injectable fuzz worker startup fixture");
+    const install_startup = b.addInstallArtifact(fuzz_startup, .{});
+    startup_step.dependOn(&install_startup.step);
 
     const arduino_cli = b.option([]const u8, "arduino-cli", "Arduino CLI executable") orelse "arduino-cli";
     const arduino_fqbn = b.option([]const u8, "arduino-fqbn", "Arduino board FQBN") orelse "arduino:avr:uno";
@@ -218,8 +228,6 @@ pub fn build(b: *std.Build) !void {
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
 
-
-
     const lib_auv_stationary_sim = b.addLibrary(.{
         .name = "auv_stationary_sim",
         .root_module = b.createModule(.{
@@ -235,8 +243,6 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(lib_auv_stationary_sim);
 
-
-
     // the zed sdk exposes c++ types, so this one has to be built with the
     // system g++ to match its libstdc++ abi. off by default so that machines
     // without the sdk and cuda can still build everything else.
@@ -246,7 +252,7 @@ pub fn build(b: *std.Build) !void {
     const cuda_prefix = b.option([]const u8, "cuda-prefix", "CUDA install prefix") orelse "/usr/local/cuda";
     if (zed) {
         const lib_auv_proteus_hwd = b.addSystemCommand(&.{cxx});
-        lib_auv_proteus_hwd.addArgs(&.{"-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror"});
+        lib_auv_proteus_hwd.addArgs(&.{ "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror" });
         lib_auv_proteus_hwd.addArg(if (optimize == .Debug) "-O0" else "-O2");
         if (optimize == .Debug)
             lib_auv_proteus_hwd.addArg("-g");
@@ -298,14 +304,40 @@ pub fn build(b: *std.Build) !void {
     });
     cmake_build.step.dependOn(&cmake_configure.step);
 
+    const simulator = b.option(bool, "simulator", "Build/install the C simulator AUV bridge and MuJoCo") orelse false;
+    if (simulator) {
+        if (target.result.os.tag != .linux or target.result.cpu.arch != b.graph.host.result.cpu.arch or target.result.abi != b.graph.host.result.abi)
+            return error.SimulatorRequiresNativeLinux;
+        const configure_simulator = b.addSystemCommand(&.{ "cmake", "-S", ".", "-B", "build/simulator", "-DAUTONOMY_BUILD_SIMULATOR=ON", "-DSIMULATOR_ENABLE_STONEFISH=OFF", "-DCMAKE_BUILD_TYPE=Release" });
+        const build_simulator = b.addSystemCommand(&.{ "cmake", "--build", "build/simulator", "--target", "simulator_all", "--parallel", b.fmt("{d}", .{@min(cpu_count, 8)}) });
+        build_simulator.step.dependOn(&configure_simulator.step);
+        const install_simulator = b.addSystemCommand(&.{ "cmake", "--install", "build/simulator", "--prefix", b.getInstallPath(.prefix, ""), "--component", "simulator" });
+        install_simulator.step.dependOn(&build_simulator.step);
+        b.getInstallStep().dependOn(&install_simulator.step);
+    }
+
+    // Header ABI checks have no engine dependency and run with zig build test.
+    const sensor_abi = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("auvs/simulator/tests/sensor_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    sensor_abi.root_module.addIncludePath(b.path("include"));
+    sensor_abi.root_module.addIncludePath(b.path("auvs/simulator"));
+    sensor_abi.root_module.addCSourceFile(.{ .file = b.path("auvs/simulator/tests/sensor_abi.c"), .flags = &.{ "-std=c11", "-pedantic-errors" } });
+    const run_sensor_abi = b.addRunArtifact(sensor_abi);
+    test_step.dependOn(&run_sensor_abi.step);
+
     const stonefish = b.option(bool, "stonefish", "Build the Stonefish simulator plugin") orelse false;
     if (stonefish) {
+        cmake_configure.addArg("-DSIMULATOR_ENABLE_STONEFISH=ON");
         const cmake_target = "auv_stonefish_sim";
         cmake_build.addArg(cmake_target);
 
         _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/stonefish_sim"));
 
-        const cmake_dynlib_file = b.fmt("lib{s}{s}", .{cmake_target, target.result.dynamicLibSuffix()});
+        const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
         const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
 
         const install_stonefish_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);

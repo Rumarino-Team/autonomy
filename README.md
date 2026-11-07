@@ -71,3 +71,16 @@ zig build -Dzed run -- \
 
 
 
+
+## Data-oriented simulator core
+
+The opt-in C ABI simulator, custom allocators, MuJoCo backend, and
+programmatic examples and four robot presets are documented in
+[auvs/simulator/README.md](auvs/simulator/README.md).
+Build its dedicated target with `-DAUTONOMY_BUILD_SIMULATOR=ON` and
+`cmake --build build/simulator --target simulator_all`. Blender import and
+rendered images are deferred. The scene-defined sensor layer and Zig AUV bridge
+are documented in [auvs/simulator/SENSORS.md](auvs/simulator/SENSORS.md).
+
+MuJoCo-only seeded parallel campaigns and replay are documented in
+[auvs/simulator/FUZZING.md](auvs/simulator/FUZZING.md).
