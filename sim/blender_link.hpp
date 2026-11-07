@@ -7,6 +7,8 @@ class BlenderPublisher {
   int socket_ = -1;
   uint16_t port_;
   double next_time_ = 0;
+  Memory memory_;
+  std::pmr::vector<unsigned char> packet_{&memory_.pool};
 
 public:
   explicit BlenderPublisher(uint16_t port);

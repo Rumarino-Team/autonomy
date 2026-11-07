@@ -5,22 +5,23 @@ using namespace sim;
 int main(int argc, char **argv) {
   try {
     require(argc == 2, "scenario required");
-    auto scene = Scene::load(argv[1]);
-    std::vector<SimBodyState> bodies(scene.bodies.size());
+    auto owner = Main::load(argv[1]);
+    auto &scene = *owner;
+    std::vector<SimBodyState> bodies(scene.objects.size());
     for (size_t i = 0; i < bodies.size(); ++i) {
-      bodies[i].pose = scene.bodies[i].initial_pose;
+      bodies[i].pose = scene.objects[i].initial_pose;
       bodies[i].pose.orientation = {0, 0, 0, 1};
       bodies[i].pose.position.z = 2;
-      bodies[i].center_of_mass = point(bodies[i].pose, scene.bodies[i].center_of_mass.position);
+      bodies[i].center_of_mass = point(bodies[i].pose, scene.objects[i].center_of_mass.position);
     }
     ForceRegistry registry;
     for (double dt : {1.0 / 90, 1.0 / 360, 1.0 / 720}) {
-      std::vector<RotorState> rotors(scene.thrusters.size());
+      std::vector<RotorState> rotors(scene.robot.thrusters().size());
       std::vector<double> commands(rotors.size(), .5);
-      std::vector<SimWrench> fluid(bodies.size()), w(bodies.size());
-      std::map<std::string, std::vector<double>> state;
+      WrenchBuffer fluid(bodies.size()), w(bodies.size());
+      ModuleState state;
       ForceContext context{scene, bodies, commands, 0, dt, rotors, fluid, state};
-      const double target = scene.thrusters[0].spec.command_sign * .5 * scene.thrusters[0].spec.max_rpm / 60 * 2 * std::numbers::pi;
+      const double target = scene.robot.thrusters()[0].spec.command_sign * .5 * scene.robot.thrusters()[0].spec.max_rpm / 60 * 2 * std::numbers::pi;
       for (int phase = 0; phase < 3; ++phase) {
         double goal = phase == 0 ? target : phase == 1 ? -target : 0;
         std::fill(commands.begin(), commands.end(), phase == 0 ? .5 : phase == 1 ? -.5 : 0);

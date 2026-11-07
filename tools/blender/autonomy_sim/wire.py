@@ -1,15 +1,12 @@
-"""Scene snapshots are ASIMSC02 copies of the C++ records in sim/image.hpp.
+"""Explicit little-endian ASIMSC03 sections, including shared mesh tables.
 
-Profile sidecars still use the MessagePack subset below. Scene struct formats
-are locked to the C++ sizeof/offsetof asserts.
+Physics profile MessagePack helpers below are independent of the scene codec.
+The field formats document scalar widths; native C++ struct padding is excluded.
 """
 import math
-import os
 import struct
-import tempfile
-from pathlib import Path
 
-MAGIC = b'ASIMSC02'
+MAGIC = b'ASIMSC03'
 HEADER = struct.Struct('<8sQ')
 MAX_BYTES = 128 * 1024 * 1024
 _BODY = struct.Struct('<I64sIIIIId3d3d4d3d4d3d3ddd3dII')
@@ -221,8 +218,8 @@ def _hull_faces(entry, shapes):
                    [tuple(map(int, t)) for t in shape.get('triangles', ())])
 
 
-def encode(scene):
-    """Flatten one evaluated scene dict into an ASIMSC02 snapshot."""
+def _encode_records(scene):
+    """Flatten one evaluated scene dict into an ASIMSC03 snapshot."""
     if not isinstance(scene, dict) or 'bodies' not in scene:
         raise ValueError('scene snapshot requires a bodies array')
     bodies = scene['bodies']
@@ -374,8 +371,8 @@ def _pose_out(raw):
     return {'position': list(raw[:3]), 'orientation': list(raw[3:7])}
 
 
-def decode(data):
-    """Read an ASIMSC02 snapshot into the scene dict used by the tools."""
+def _decode_records(data):
+    """Read an ASIMSC03 snapshot into the scene dict used by the tools."""
     if len(data) < HEADER.size:
         raise ValueError('truncated binary scene header')
     magic, size = HEADER.unpack_from(data)
@@ -474,14 +471,109 @@ def decode(data):
     return document
 
 
-def write_atomic(path, payload):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'wb') as output:
-            output.write(payload)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+# ASIMSC03 section directory: u32 kind/count, u64 offset/byte-length.
+# The private record helpers encode named fields; these are not native-memory
+# structure dumps. Shared meshes are represented once, with explicit references.
+_SECTION = struct.Struct('<IIQQ')
+_MESH = struct.Struct('<IIII')
+_WIDTHS = (408, 328, 168, 24, 12, 120, 184, 24, 32, 32, 8, 16, 4)
+
+
+def encode(scene):
+    raw = _encode_records(scene)[HEADER.size:]
+    header = list(_HEADER_PREFIX.unpack(raw[:_HEADER_PREFIX.size]))
+    counts = (1, header[6], header[7], header[8], header[9], header[10],
+              header[11], header[12], header[13], header[14], header[15] * header[16])
+    sections = []
+    at = 0
+    for count, width in zip(counts, _WIDTHS):
+        end = at + count * width
+        sections.append(raw[at:end])
+        at = end
+    if at != len(raw):
+        raise ValueError('scene field schema mismatch')
+    vertices, triangles, meshes, refs = bytearray(), bytearray(), bytearray(), bytearray()
+    shapes, cache = bytearray(), {}
+    for offset in range(0, len(sections[2]), _SHAPE.size):
+        shape = list(_SHAPE.unpack_from(sections[2], offset))
+        if shape[0] == 3:
+            vb, vc, tb, tc = shape[-4:]
+            points = sections[3][vb*24:(vb+vc)*24]
+            faces = sections[4][tb*12:(tb+tc)*12]
+            key = (points, faces)
+            if key not in cache:
+                index = len(meshes) // _MESH.size
+                ranges = (len(vertices)//24, vc, len(triangles)//12, tc)
+                cache[key] = (index, ranges)
+                meshes += _MESH.pack(*ranges)
+                vertices += points
+                triangles += faces
+            index, ranges = cache[key]
+            shape[-4:] = ranges
+        else:
+            index = 0xffffffff
+            shape[-4:] = (0, 0, 0, 0)
+        shapes += _SHAPE.pack(*shape)
+        refs += struct.pack('<I', index)
+    # Empty primitive ranges use the final geometry cursors in both languages.
+    for offset in range(0, len(shapes), _SHAPE.size):
+        shape = list(_SHAPE.unpack_from(shapes, offset))
+        if shape[0] != 3:
+            shape[-4:] = (len(vertices)//24, 0, len(triangles)//12, 0)
+            _SHAPE.pack_into(shapes, offset, *shape)
+    header[8], header[9] = len(vertices)//24, len(triangles)//12
+    sections[0] = _HEADER_PREFIX.pack(*header) + sections[0][_HEADER_PREFIX.size:]
+    sections[2:5] = [bytes(shapes), bytes(vertices), bytes(triangles)]
+    sections.extend((bytes(meshes), bytes(refs)))
+    offset = 8 + len(sections) * _SECTION.size
+    directory = bytearray(struct.pack('<II', len(sections), 1))
+    for index, (section, width) in enumerate(zip(sections, _WIDTHS), 1):
+        directory += _SECTION.pack(index, len(section)//width, offset, len(section))
+        offset += len(section)
+    payload = bytes(directory) + b''.join(sections)
+    if not payload or len(payload) > MAX_BYTES:
+        raise ValueError('invalid binary scene size')
+    return HEADER.pack(MAGIC, len(payload)) + payload
+
+
+def decode(data):
+    if len(data) < HEADER.size:
+        raise ValueError('truncated binary scene header')
+    magic, length = HEADER.unpack_from(data)
+    if magic != MAGIC:
+        raise ValueError('unsupported scene format; ASIMSC03 is required (regenerate old recordings)')
+    if not length or length > MAX_BYTES or length != len(data) - HEADER.size:
+        raise ValueError('invalid binary scene size')
+    payload = memoryview(data)[HEADER.size:]
+    if len(payload) < 8 or struct.unpack_from('<II', payload) != (13, 1):
+        raise ValueError('unsupported scene directory')
+    sections, counts, end = [], [], 8 + 13*_SECTION.size
+    if len(payload) < end:
+        raise ValueError('truncated scene directory')
+    for i, width in enumerate(_WIDTHS):
+        kind, count, offset, size = _SECTION.unpack_from(payload, 8+i*_SECTION.size)
+        if kind != i+1 or offset != end or size != count*width or offset+size > length:
+            raise ValueError('invalid scene section directory')
+        sections.append(bytes(payload[offset:offset+size]))
+        counts.append(count)
+        end += size
+    if end != length or counts[0] != 1 or not counts[1] or counts[1] > 4096:
+        raise ValueError('invalid scene sections')
+    h = _HEADER_PREFIX.unpack_from(sections[0])
+    expected = [1, h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]*h[16]]
+    if counts[:11] != expected or counts[12] != counts[2]:
+        raise ValueError('scene header disagrees with section counts')
+    meshes = [_MESH.unpack_from(sections[11], i*_MESH.size) for i in range(counts[11])]
+    for vb, vc, tb, tc in meshes:
+        if vb+vc > counts[3] or tb+tc > counts[4]:
+            raise ValueError('invalid mesh section range')
+    for i in range(counts[2]):
+        shape = _SHAPE.unpack_from(sections[2], i*_SHAPE.size)
+        mesh, = struct.unpack_from('<I', sections[12], i*4)
+        if shape[0] == 3:
+            if mesh >= len(meshes) or shape[-4:] != meshes[mesh]:
+                raise ValueError('invalid mesh reference')
+        elif mesh != 0xffffffff:
+            raise ValueError('primitive references a mesh')
+    records = b''.join(sections[:11])
+    return _decode_records(HEADER.pack(MAGIC, len(records)) + records)

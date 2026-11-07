@@ -32,10 +32,14 @@ target_include_directories(autonomy_cblend SYSTEM PUBLIC
   ${cblend_SOURCE_DIR}/third_party/optional/include
   ${cblend_SOURCE_DIR}/third_party/range-v3/include
 )
-find_package(yaml-cpp REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(glm REQUIRED)
 find_library(AUTONOMY_ZSTD_LIBRARY NAMES zstd REQUIRED)
-add_library(autonomy_blend_reader STATIC blend_scene.cpp)
+find_library(AUTONOMY_QHULL_LIBRARY NAMES qhull_r REQUIRED)
+add_library(autonomy_blend_reader STATIC native_scene.cpp robot_registry.cpp
+  ../robots/hydrus.cpp ../robots/proteus.cpp ../robots/bluerov.cpp ../robots/girona500.cpp)
 set_target_properties(autonomy_blend_reader PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(autonomy_blend_reader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(autonomy_blend_reader PUBLIC autonomy_cblend yaml-cpp ZLIB::ZLIB ${AUTONOMY_ZSTD_LIBRARY})
+target_compile_definitions(autonomy_blend_reader PRIVATE SIM_BLENDER_PROFILES="${PROJECT_SOURCE_DIR}/sim/profiles")
+target_link_libraries(autonomy_blend_reader PUBLIC sim_headers autonomy_cblend glm::glm OpenSSL::Crypto ZLIB::ZLIB ${AUTONOMY_ZSTD_LIBRARY} ${AUTONOMY_QHULL_LIBRARY})

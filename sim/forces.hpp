@@ -6,18 +6,21 @@ namespace sim {
 struct RotorState {
   double omega = 0, integral = 0, torque = 0, thrust = 0;
 };
+using WrenchBuffer = std::pmr::vector<SimWrench>;
+using ModuleState = std::pmr::map<std::pmr::string, std::pmr::vector<double>>;
 struct ForceContext {
-  const Scene &scene;
-  const std::vector<SimBodyState> &bodies;
-  const std::vector<double> &commands;
+  const Main &scene;
+  std::span<const SimBodyState> bodies;
+  std::span<const double> commands;
   uint64_t tick;
   double dt;
-  std::vector<RotorState> &rotors;
-  std::vector<SimWrench> &fluid_cache;
-  std::map<std::string, std::vector<double>> &state;
+
+  std::span<RotorState> rotors;
+  WrenchBuffer &fluid_cache;
+  ModuleState &state;
+  std::pmr::memory_resource *scratch = std::pmr::get_default_resource();
 };
-using ForceFunction =
-    std::function<void(ForceContext &, std::vector<SimWrench> &)>;
+using ForceFunction = std::function<void(ForceContext &, WrenchBuffer &)>;
 class ForceRegistry {
   struct Entry {
     ForceFunction evaluate;

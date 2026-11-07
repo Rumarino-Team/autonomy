@@ -13,11 +13,17 @@ BlenderPublisher::~BlenderPublisher() {
     ::close(socket_);
 }
 void BlenderPublisher::publish(const World &w, const Observation &observation) {
+  // Publish at most 30 times per simulated second, independently of the physics
+  // timestep. These packets contain display poses, not scene/model geometry.
   const double time = w.timestamp_ns() * 1e-9;
   if (time + 1e-9 < next_time_)
     return;
   const bool stable_ids = w.scene.from_blender();
-  std::vector<unsigned char> packet{'A', 'M', 'J', 'B', static_cast<unsigned char>(stable_ids ? 2 : 1), 0, 0, 0};
+  // AMJB v2 includes stable body IDs so renaming a Blender object does not
+  // break its preview binding. V1 retains the older name-only packet layout.
+  auto &packet = packet_;
+  packet.assign({'A', 'M', 'J', 'B',
+                 static_cast<unsigned char>(stable_ids ? 2 : 1), 0, 0, 0});
   auto number = [&](double x) {
     auto bits = std::bit_cast<uint64_t>(x);
     for (int i = 0; i < 8; ++i)
@@ -25,7 +31,7 @@ void BlenderPublisher::publish(const World &w, const Observation &observation) {
   };
   number(time);
   uint16_t count = 0;
-  auto pose = [&](uint32_t id, const std::string &name, SimPose p) {
+  auto pose = [&](uint32_t id, std::string_view name, SimPose p) {
     if (name.empty() || (!stable_ids && name.size() > 31) || count == 64)
       return;
     ++count;
@@ -34,7 +40,8 @@ void BlenderPublisher::publish(const World &w, const Observation &observation) {
         packet.push_back(static_cast<unsigned char>(id >> (8 * i)));
     auto offset = packet.size();
     packet.resize(offset + 32, 0);
-    std::copy_n(name.begin(), std::min<size_t>(name.size(),31), packet.begin() + offset);
+    std::copy_n(name.begin(), std::min<size_t>(name.size(), 31),
+                packet.begin() + offset);
     // The original pool uses M=diag(-1,1,-1). R_blender = M R_ned M.
     number(-p.position.x);
     number(p.position.y);
@@ -45,7 +52,7 @@ void BlenderPublisher::publish(const World &w, const Observation &observation) {
     number(-p.orientation.z);
   };
   for (size_t i = 0; i < w.bodies.size(); ++i) {
-    const auto &body = w.scene.bodies[i];
+    const auto &body = w.scene.objects[i];
     if (body.motion == SIM_DYNAMIC || body.tracked || body.fuzz)
       pose(body.id, body.name, w.bodies[i].pose);
   }

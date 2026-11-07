@@ -1,6 +1,11 @@
 # Make Blender authoritative for simulation objects
 
-Status: implemented. See `tools/blender/SCENE_AUTHORING.md` for the versioned
+Historical plan: the evaluated-exporter design below has been superseded for
+normal launches by direct C++ `.blend` loading in `blend/native_scene.cpp`.
+Run live and CLI launches now read the saved file; they do not consume a Python
+exporter snapshot. Save edits and apply physical modifiers before running.
+
+Original status: implemented. See `tools/blender/SCENE_AUTHORING.md` for the versioned
 contract and `tools/blender/README.md` for the exporter, launch and replay paths.
 The subsequent direct-loading implementation accepts `.blend` natively and
 uses binary IPC; JSON is now an optional export/legacy input and trace format.

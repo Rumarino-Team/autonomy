@@ -1,4 +1,5 @@
 #include "runtime.hpp"
+#include "blend/robot_registry.hpp"
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -19,9 +20,43 @@ int main(int argc, char **argv) {
   try {
     require(argc == 3, "backend and scenario required");
     auto backend = std::make_shared<Backend>(argv[1]);
-    auto source = Scene::load(argv[2]);
-    auto trajectory = [&](Scene scene) {
-      World world(std::move(scene), backend);
+    auto source_owner = Main::load(argv[2]);
+    auto &source = *source_owner;
+    if (source.robot.definition) {
+      auto check_storage = [](const Main &model) {
+        const auto &r = model.robot;
+        require(r.object_registered &&
+                    &model.objects.block(r.object.id.index) == &r.object &&
+                    !r.object.id.pooled,
+                "robot body escaped its embedded storage");
+        require(r.object.colliders.data() == r.colliders.data() &&
+                    r.object.colliders.size() == r.shape_count,
+                "robot colliders escaped their embedded array");
+        for (const auto &c : r.object.colliders)
+          require(c.object == &r.object, "robot collider has a foreign object");
+        require(r.thrusters().data() == r.motors.data() &&
+                    r.hulls().data() == r.fluid_surfaces.data(),
+                "robot hardware escaped its fixed arrays");
+      };
+      check_storage(source);
+      auto copy = source.clone();
+      copy->finalize();
+      check_storage(*copy);
+      require(&copy->robot.object != &source.robot.object &&
+                  copy->robot.thrusters().data() != source.robot.thrusters().data(),
+              "robot clone shares mutable hardware");
+      auto bytes = source.binary();
+      auto decoded = Main::read(bytes.data(), bytes.size());
+      check_storage(*decoded);
+      require(decoded->binary() == bytes, "fixed robot binary round trip changed physics");
+      auto definition = *source.robot.definition;
+      const auto hash = robot_configuration_hash(definition);
+      definition.body.mass += 1;
+      require(robot_configuration_hash(definition) != hash,
+              "typed robot hash ignored its physical values");
+    }
+    auto trajectory = [&](const Main &scene) {
+      World world(scene, backend);
       std::vector<uint64_t> result;
       for (int i = 0; i < 360; ++i) {
         world.step(std::vector<double>(world.commands.size(), 0));
@@ -66,13 +101,34 @@ int main(int argc, char **argv) {
     for (auto &job : jobs)
       require(job.get() == hashes, "vehicle parallel replay diverged");
     if (backend->api.capabilities & SIM_CAP_NATIVE_HYDRO) {
-      auto native = source;
+      auto native_owner = source.clone();
+      auto &native = *native_owner;
       native.header.native_hydrodynamics = 1;
       auto h = trajectory(native);
       require(h == trajectory(native), "native hydrodynamics replay diverged");
     }
+    // Exercise every authored motor, not only a passive zero-command replay.
+    // Repeat from a cold reset so rotor PI state and engine state must agree.
+    for (size_t motor = 0; motor < source.robot.thrusters().size(); ++motor) {
+      uint64_t expected = 0;
+      for (int repeat = 0; repeat < 2; ++repeat) {
+        world.reset();
+        std::vector<double> commands(source.robot.thrusters().size(), 0);
+        commands[motor] = .35;
+        for (int tick = 0; tick < 36; ++tick)
+          world.step(commands);
+        require(std::isfinite(world.rotors[motor].thrust) &&
+                    std::abs(world.rotors[motor].thrust) > 1e-8,
+                "authored thruster did not produce thrust");
+        if (repeat == 0)
+          expected = world.state_hash();
+        else
+          require(world.state_hash() == expected,
+                  "commanded vehicle cold reset diverged");
+      }
+    }
     std::cout << backend->api.name << " "
-              << source.bodies[source.header.camera.body].name
+              << source.objects[source.header.camera.body].name
               << " qualification passed\n";
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';

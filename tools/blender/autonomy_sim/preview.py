@@ -31,15 +31,19 @@ def matrix(p):
     return exporter.M @ Matrix.LocRotScale(Vector(p['position']),Quaternion((w,x,y,z)),Vector((1,1,1))) @ exporter.M
 
 
-def ensure(source, snapshot):
-    key = snapshot_key(snapshot)
-    previous = next((s for s in bpy.data.scenes if s.get('sim_preview') and s.get('sim_snapshot_hash')==key),None)
+def ensure(source, snapshot=None, *, identity=None):
+    # Native launches clone the saved authoring objects for display. Only the
+    # physical identity comes from simctl; no Python scene snapshot feeds physics.
+    key = identity if identity is not None else snapshot_key(snapshot)
+    hash_property = 'sim_source_hash' if identity is not None else 'sim_snapshot_hash'
+    previous = next((s for s in bpy.data.scenes if s.get('sim_preview') and s.get(hash_property)==key),None)
     if previous:
         select(previous); return previous
     scene = bpy.data.scenes.new('AutonomyPreview')
     scene['sim_preview'] = True
-    scene['sim_snapshot_hash'] = key
-    scene['sim_snapshot'] = exporter.canonical(snapshot)
+    scene[hash_property] = key
+    if identity is None:
+        scene['sim_snapshot'] = exporter.canonical(snapshot)
     if source is not None:
         scene['sim_source_scene'] = source.name
         scene.world = source.world

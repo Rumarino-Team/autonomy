@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import sys
 import time
+import tempfile
 
 import bpy
 
@@ -32,6 +33,14 @@ settings.max_ticks = 21600
 settings.randomize = False
 source=scene
 source_hash=link.exporter.export_scene(source,repo/'sim/profiles')['source']['content_hash']
+# Runtime launch must never call the Python scene exporter.
+original_export=link.exporter.export_scene
+def forbidden_export(*args, **kwargs):
+    raise AssertionError('runtime used the Python exporter snapshot')
+link.exporter.export_scene=forbidden_export
+temporary=tempfile.TemporaryDirectory(prefix='native-blender-addon-')
+saved=Path(temporary.name)/'source.blend'
+bpy.ops.wm.save_as_mainfile(filepath=str(saved))
 scene_files_before=set(link._takes_dir().glob('scene_*.json'))
 
 # Test the same Record run operator used by the sidebar, including its subprocess.
@@ -45,7 +54,8 @@ assert take.status == 'ok' and take.reason == 'complete', link._job['message']
 log = Path(take.log).read_text(encoding='utf-8', errors='replace')
 result = json.loads(next(line for line in reversed(log.splitlines()) if line.startswith('{') and '"hash"' in line))
 root = link._object_for('hydrus')
-assert 900 < result['steps'] < 1200, result
+assert 720 < result['steps'] < settings.max_ticks and result['status'] == 0, result
+assert 'completed mission' in log, log[-2000:]
 assert len(link.rotor_animation.rotors(root)) == 8
 settings.onboard_camera = True
 assert scene.camera == link._object_for('hydrus_camera')
@@ -66,6 +76,7 @@ listener.bind(('127.0.0.1', 0))
 listener.setblocking(False)
 settings.port = listener.getsockname()[1]
 link._link.update(socket=listener, running=True, packets=0, time=0.0)
+bpy.ops.wm.save_as_mainfile(filepath=str(saved))
 live_take = link.launch_take(scene, 0, live=True)
 link.preview.select(source)  # Editing source while live updates arrive is safe.
 seen = []
@@ -91,7 +102,7 @@ settings.max_ticks = 21600
 settings.port = 9760
 settings.take_index = 0
 scene.frame_set(1)
-assert link.exporter.export_scene(source,repo/'sim/profiles')['source']['content_hash']==source_hash, 'live/take playback changed the authoring scene'
+assert original_export(source,repo/'sim/profiles')['source']['content_hash']==source_hash, 'live/take playback changed the authoring scene'
 for image in bpy.data.images:
     if image.source == 'FILE' and not image.packed_file:
         assert Path(bpy.path.abspath(image.filepath)).exists(), image.filepath

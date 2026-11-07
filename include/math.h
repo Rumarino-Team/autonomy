@@ -24,6 +24,25 @@ typedef struct {
   alignas(MATH_VECTOR6F_ALIGN) float buf[6];
 } MathVector6f;
 
+// Double-precision storage uses natural double alignment, without SIMD padding.
+// Named components preserve the simulator's C layout and field access. The
+// existing float types above retain their SIMD alignment and controller ABI.
+typedef struct {
+  double x, y, z;
+} MathVector3d;
+
+// Quaternion components are xyzw; rotations use unit quaternions.
+typedef struct {
+  double x, y, z, w;
+} MathQuaterniond;
+
+// A spatial vector: linear xyz followed by angular xyz, in the same frame.
+// For a wrench these halves hold force and torque respectively.
+typedef struct {
+  MathVector3d linear;
+  MathVector3d angular;
+} MathVector6d;
+
 typedef struct {
   MathVector3f pos;
   MathQuaternionf quat;

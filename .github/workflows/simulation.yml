@@ -15,11 +15,11 @@ jobs:
         with:
           submodules: recursive
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ libsdl2-dev libfreetype-dev libgl-dev libglu1-mesa-dev libglm-dev libyaml-cpp-dev zlib1g-dev libzstd-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ libsdl2-dev libfreetype-dev libgl-dev libglu1-mesa-dev libglm-dev libyaml-cpp-dev zlib1g-dev libzstd-dev libssl-dev libqhull-dev
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - name: Install tested Blender for evaluated scene and ownership tests
+      - name: Install tested Blender for saved scene authoring and ownership tests
         run: |
           curl --fail --location --retry 3 https://download.blender.org/release/Blender4.5/blender-4.5.6-linux-x64.tar.xz -o "$RUNNER_TEMP/blender.tar.xz"
           echo "d4a6ba867b35d65cfa16929178bcafaa5d774afef93beda5493cacdcd912b3a6  $RUNNER_TEMP/blender.tar.xz" | sha256sum --check
@@ -37,11 +37,9 @@ jobs:
         env:
           CASES: ${{ github.event_name == 'schedule' && '32' || '4' }}
         run: |
-          mkdir -p build/fuzz
-          build/portable/sim/simctl snapshot auvs/stonefish_sim/data/pool_scene.blend build/fuzz/pool.asim
           for engine in mujoco stonefish; do
             AUTONOMY_SIM_BACKEND="build/portable/sim/libsim_backend_${engine}.so" \
-            AUTONOMY_SIM_SCENARIO=build/fuzz/pool.asim \
+            AUTONOMY_SIM_SCENARIO=auvs/stonefish_sim/data/pool_scene.blend \
             AUTONOMY_SIM_MAX_TICKS=21600 \
               ./zig-out/bin/src_3 build/portable/sim/libauv_sim.so \
               fuzz sim/scenarios/controller.json 1 "$CASES"
@@ -51,7 +49,5 @@ jobs:
         with:
           name: simulation-failures
           path: |
-            build/fuzz
-            build/portable/sim/blender-source-fixtures
             build/portable/autonomy_takes
             build/portable/Testing/Temporary

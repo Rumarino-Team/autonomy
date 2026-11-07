@@ -45,9 +45,8 @@ inline void valid_pose(SimPose p) {
               std::abs(norm2(p.orientation) - 1) < 1e-6,
           "pose must be finite with a unit xyzw quaternion");
 }
-template <class T>
-SimResult copy_out(const std::vector<T> &v, T *out, uint32_t capacity,
-                   uint32_t *count) {
+template <class Range, class T>
+SimResult copy_out(const Range &v, T *out, uint32_t capacity, uint32_t *count) {
   if (!count)
     return SIM_INVALID;
   *count = static_cast<uint32_t>(v.size());

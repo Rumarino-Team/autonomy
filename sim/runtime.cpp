@@ -1,10 +1,14 @@
 #include "runtime.hpp"
 #include <dlfcn.h>
 #include <filesystem>
-#include <set>
 #include <limits>
+#include <set>
 namespace sim {
 static void runtime_identity() {}
+static Main &owned_model(const MainPtr &p) {
+  require(bool(p), "missing model database");
+  return *p;
+}
 Backend::Backend(const std::string &file)
     : path(std::filesystem::absolute(file).string()) {
   library_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -17,9 +21,10 @@ Backend::Backend(const std::string &file)
     require(entry(SIM_BACKEND_ABI_VERSION, sizeof(api), &api) == SIM_OK,
             "incompatible physics backend ABI");
     require(api.struct_size == sizeof(api) &&
-                api.abi_version == SIM_BACKEND_ABI_VERSION && api.world_create &&
-                api.world_destroy && api.reset && api.step && api.read_state &&
-                api.read_contacts && api.state_hash,
+                api.abi_version == SIM_BACKEND_ABI_VERSION &&
+                api.world_create && api.world_destroy && api.reset &&
+                api.step && api.read_state && api.read_contacts &&
+                api.state_hash,
             "incomplete backend API");
     Dl_info identity{};
     require(dladdr(reinterpret_cast<void *>(&runtime_identity), &identity) &&
@@ -52,17 +57,26 @@ void Backend::check(SimResult r, const char *e) const {
     throw std::runtime_error(std::string(api.name) + ": " +
                              (e && *e ? e : "backend call failed"));
 }
-World::World(Scene s, std::shared_ptr<Backend> backend, ForceRegistry registry)
-    : backend_(std::move(backend)), registry_(std::move(registry)),
-      scene(std::move(s)) {
+World::World(MainPtr s, std::shared_ptr<Backend> backend,
+             ForceRegistry registry, std::pmr::memory_resource *upstream)
+    : model_(std::move(s)), memory_(upstream), backend_(std::move(backend)),
+      registry_(std::move(registry)), modules_(&memory_.pool),
+      module_state_(&memory_.pool), fluid_cache_(&memory_.pool),
+      previous_velocity_(&memory_.pool),
+      previous_angular_velocity_(&memory_.pool),
+      observation_objects_(&memory_.pool), scene(owned_model(model_)),
+      bodies(&memory_.pool), contacts(&memory_.pool),
+      wrenches(&memory_.pool) {
   require(bool(backend_), "missing backend");
+  if (!model_->frozen())
+    model_->finalize();
   scene.validate();
   require(backend_->api.integrators & (1u << scene.header.integrator),
           "requested integrator is unsupported by backend");
   if (scene.header.native_hydrodynamics)
     require(backend_->api.capabilities & SIM_CAP_NATIVE_HYDRO,
             "backend does not support native hydrodynamics");
-  for (auto &module : scene.modules)
+  for (auto &module : scene.run.modules)
     modules_.push_back(module.text);
   if (scene.header.native_hydrodynamics)
     std::erase(modules_, "hydrodynamics");
@@ -79,15 +93,11 @@ World::World(Scene s, std::shared_ptr<Backend> backend, ForceRegistry registry)
   require(contributions.contains("gravity"),
           "gravity compensation module is required");
   char error[1024]{};
-  auto scenario = scene.binary();
-  require(scenario.size() <= std::numeric_limits<uint32_t>::max(),
-          "scene snapshot exceeds the backend argument");
+  const auto view = scene.view();
   try {
-    backend_->check(backend_->api.world_create(
-                        reinterpret_cast<const char *>(scenario.data()),
-                        uint32_t(scenario.size()), &world_, error,
-                        sizeof(error)),
-                    error);
+    backend_->check(
+        backend_->api.world_create(&view, &world_, error, sizeof(error)),
+        error);
     reset();
   } catch (...) {
     if (world_)
@@ -95,19 +105,23 @@ World::World(Scene s, std::shared_ptr<Backend> backend, ForceRegistry registry)
     throw;
   }
 }
+World::World(const Main &source, std::shared_ptr<Backend> backend,
+             ForceRegistry registry, std::pmr::memory_resource *upstream)
+    : World(source.clone(), std::move(backend), std::move(registry), upstream) {
+}
 World::~World() {
   if (world_)
     backend_->api.world_destroy(world_);
 }
 void World::read() {
   uint32_t count = 0;
-  bodies.resize(scene.bodies.size());
+  bodies.resize(scene.objects.size());
   backend_->check(
       backend_->api.read_state(world_, bodies.data(), bodies.size(), &count),
       "");
   require(count == bodies.size(), "backend returned wrong body count");
   for (size_t i = 0; i < count; ++i)
-    require(bodies[i].id == scene.bodies[i].id &&
+    require(bodies[i].id == scene.objects[i].id &&
                 finite(bodies[i].pose.position) &&
                 finite(bodies[i].pose.orientation) &&
                 std::abs(norm2(bodies[i].pose.orientation) - 1) < 1e-5 &&
@@ -127,7 +141,7 @@ void World::read() {
                 std::isfinite(c.normal_force),
             "non-finite contact");
 }
-void World::reset(const std::vector<SimBodyState> &state) {
+void World::reset(std::span<const SimBodyState> state) {
   char error[1024]{};
   backend_->check(backend_->api.reset(world_,
                                       state.empty() ? nullptr : state.data(),
@@ -135,10 +149,13 @@ void World::reset(const std::vector<SimBodyState> &state) {
                   error);
   tick = 0;
   module_state_.clear();
-  rotors.assign(scene.thrusters.size(), {});
-  commands.assign(scene.thrusters.size(), 0);
-  input_commands = commands;
-  fluid_cache_.assign(scene.bodies.size(), {});
+  rotors = std::span(rotor_storage_).first(scene.robot.motor_count);
+  commands = std::span(command_storage_).first(scene.robot.motor_count);
+  input_commands = std::span(input_storage_).first(scene.robot.motor_count);
+  std::fill(rotors.begin(), rotors.end(), RotorState{});
+  std::fill(commands.begin(), commands.end(), 0);
+  std::fill(input_commands.begin(), input_commands.end(), 0);
+  fluid_cache_.assign(scene.objects.size(), {});
   wrenches = fluid_cache_;
   read();
   previous_velocity_.clear();
@@ -150,21 +167,21 @@ void World::reset(const std::vector<SimBodyState> &state) {
 }
 uint64_t World::timestamp_ns() const {
   __extension__ typedef unsigned __int128 TickProduct;
-  TickProduct n = static_cast<TickProduct>(tick) *
-                  scene.header.dt_numerator * 1000000000ULL;
+  TickProduct n = static_cast<TickProduct>(tick) * scene.header.dt_numerator *
+                  1000000000ULL;
   n /= scene.header.dt_denominator;
   require(n <= UINT64_MAX, "simulation timestamp overflow");
   return uint64_t(n);
 }
-void World::step(const std::vector<double> &input) {
+void World::step(std::span<const double> input) {
   require(input.size() == commands.size(), "wrong thruster command count");
   require(tick < UINT64_MAX, "tick counter exhausted");
-  commands = input;
-  input_commands = input;
+  std::copy(input.begin(), input.end(), commands.begin());
+  std::copy(input.begin(), input.end(), input_commands.begin());
   for (double v : commands)
     require(std::isfinite(v) && v >= -1 && v <= 1,
             "commands must be finite in [-1,1]");
-  for (const auto &f : scene.faults)
+  for (const auto &f : scene.run.faults)
     if (tick >= f.start && tick < f.end) {
       if (f.kind == FaultKind::Dead || f.kind == FaultKind::Weak) {
         auto index = f.thruster;
@@ -173,14 +190,19 @@ void World::step(const std::vector<double> &input) {
       }
     }
   for (size_t i = 0; i < wrenches.size(); ++i) {
-    wrenches[i] = {scene.bodies[i].id, {}, {}};
+    wrenches[i] = {scene.objects[i].id, {}, {}};
     previous_velocity_[i] = bodies[i].linear_velocity;
     previous_angular_velocity_[i] = bodies[i].angular_velocity;
   }
-  ForceContext context{scene, bodies, commands,     tick,
-                       dt(),  rotors, fluid_cache_, module_state_};
+  ForceContext context{scene,        bodies,        commands,
+                       tick,         dt(),          rotors,
+                       fluid_cache_, module_state_, &memory_.scratch};
+  // Common force modules use the imported body calibration, hull geometry,
+  // thruster mounts and latest body state. Both backends receive the resulting
+  // per-body forces/torques; the selected engine owns integration and contacts.
   for (auto &module : modules_)
     registry_.get(module)(context, wrenches);
+  memory_.scratch.release();
   for (auto &w : wrenches)
     require(finite(w.force) && finite(w.torque),
             "non-finite force model output");
@@ -189,6 +211,8 @@ void World::step(const std::vector<double> &input) {
                                      error, sizeof(error)),
                   error);
   ++tick;
+  // Read the engine's new state before producing controller observations or
+  // publishing preview poses. Blender's display does not advance physics.
   read();
   for (auto &b : bodies) {
     require(norm(b.pose.position) <= scene.header.bounds.position,
@@ -201,7 +225,8 @@ void World::step(const std::vector<double> &input) {
 }
 Observation World::observe() const {
   Observation o;
-  const auto &c = scene.header.camera;
+  observation_objects_.clear();
+  const auto &c = scene.robot.camera;
   const auto &b = bodies[c.body];
   o.camera = compose(b.pose, c.pose);
   o.imu = b.pose.orientation;
@@ -220,7 +245,7 @@ Observation World::observe() const {
   double focal =
       c.width * .5 / std::tan(c.horizontal_fov * std::numbers::pi / 360);
   for (size_t i = 0; i < bodies.size(); ++i) {
-    const auto &description = scene.bodies[i];
+    const auto &description = scene.objects[i];
     if (!description.tracked)
       continue;
     SimVec3 lo{INFINITY, INFINITY, INFINITY},
@@ -229,11 +254,11 @@ Observation World::observe() const {
       lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
       hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
     };
-    for (uint32_t k = 0; k < description.shape_count; ++k) {
-      auto &g = scene.shapes[description.shape_begin + k];
+    for (const auto &collider : scene.objects.block(i).colliders) {
+      const auto &g = collider.data;
       if (g.kind == SIM_MESH) {
         for (uint32_t v = 0; v < g.vertex_count; ++v)
-          add(point(g.pose, scene.vertices[g.vertex_begin + v]));
+          add(point(g.pose, scene.positions(collider)[v]));
       } else {
         SimVec3 size = g.size;
         if (g.kind == SIM_SPHERE)
@@ -276,13 +301,13 @@ Observation World::observe() const {
       object.x1 = std::clamp(x1, 0.0, double(c.width - 1));
       object.y1 = std::clamp(y1, 0.0, double(c.height - 1));
     }
-    o.objects.push_back(object);
+    observation_objects_.push_back(object);
   }
-  for (const auto &f : scene.faults)
+  for (const auto &f : scene.run.faults)
     if (tick >= f.start && tick < f.end) {
       if (f.kind == FaultKind::Tracking) {
         o.position_ok = false;
-        o.objects.clear();
+        observation_objects_.clear();
       } else if (f.kind == FaultKind::Imu) {
         o.attitude_ok = false;
         o.imu_ok = false;
@@ -292,6 +317,7 @@ Observation World::observe() const {
       else if (f.kind == FaultKind::Depth)
         o.depth += f.magnitude;
     }
+  o.objects = observation_objects_;
   return o;
 }
 uint64_t World::state_hash() const {
@@ -323,9 +349,9 @@ uint64_t World::state_hash() const {
   }
   return h.value;
 }
-std::vector<double> generated_commands(const Scene &scene, uint64_t seed,
+std::vector<double> generated_commands(const Main &scene, uint64_t seed,
                                        uint64_t tick) {
-  std::vector<double> out(scene.thrusters.size());
+  std::vector<double> out(scene.robot.thrusters().size());
   for (size_t i = 0; i < out.size(); ++i)
     out[i] = (random(seed, 1000 + i, tick / 72) * 2 - 1) * .2;
   return out;

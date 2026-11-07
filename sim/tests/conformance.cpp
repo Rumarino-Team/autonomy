@@ -7,12 +7,12 @@ void expect(bool value, const char *message) {
   if (!value)
     throw std::runtime_error(message);
 }
-void modules(Scene &scene, std::initializer_list<const char *> names) {
-  scene.modules.clear();
+void modules(Main &scene, std::initializer_list<const char *> names) {
+  scene.run.modules.clear();
   for (auto name : names) {
     NameRec module{};
     copy_text(module.text, sizeof(module.text), name);
-    scene.modules.push_back(module);
+    scene.run.modules.push_back(module);
   }
 }
 BodyRec make_body(uint32_t id, uint32_t motion, SimVec3 position, double mass) {
@@ -36,18 +36,17 @@ ShapeRec make_box(SimVec3 size, bool collisions = true) {
   shape.friction = 0.5;
   return shape;
 }
-void add_body(Scene &scene, BodyRec body, ShapeRec shape) {
-  body.shape_begin = scene.shapes.size();
-  body.shape_count = 1;
-  scene.bodies.push_back(body);
-  scene.shapes.push_back(shape);
+void add_body(Main &scene, BodyRec body, ShapeRec shape) {
+  const Collider collider{shape};
+  scene.add_object(body, {&collider, 1});
 }
-Scene fixture() {
-  Scene scene;
+MainPtr fixture() {
+  auto owner = std::make_unique<Main>();
+  auto &scene = *owner;
   scene.header.gravity = {0, 0, 0};
   add_body(scene, make_body(7, SIM_DYNAMIC, {0, 0, 2}, 2),
            make_box({.1, .2, .3}));
-  return scene;
+  return owner;
 }
 int main(int argc, char **argv) {
   try {
@@ -56,21 +55,22 @@ int main(int argc, char **argv) {
     auto &api = backend->api;
     char error[1024]{};
     void *world = nullptr;
-    expect(api.world_create(nullptr, 0, &world, error, sizeof(error)) ==
+    expect(api.world_create(nullptr, &world, error, sizeof(error)) ==
                SIM_INVALID,
            "null scenario accepted");
-    auto invalid = fixture();
-    invalid.header.dt_denominator = 0;
-    auto bytes = invalid.binary();
-    expect(api.world_create(reinterpret_cast<const char *>(bytes.data()),
-                            bytes.size(), &world, error, sizeof(error)) ==
+    auto invalid_owner = fixture();
+    auto &invalid = *invalid_owner;
+    invalid.finalize();
+    auto invalid_view = invalid.view();
+    invalid_view.model.dt_denominator = 0;
+    expect(api.world_create(&invalid_view, &world, error, sizeof(error)) ==
                SIM_INVALID,
            "invalid timestep accepted");
     ForceRegistry registry;
-    registry.add("test_force", [](ForceContext &, std::vector<SimWrench> &w) {
-      w[0].force.x += 2;
-    });
-    auto j = fixture();
+    registry.add("test_force",
+                 [](ForceContext &, WrenchBuffer &w) { w[0].force.x += 2; });
+    auto j_owner = fixture();
+    auto &j = *j_owner;
     modules(j, {"gravity_compensation", "test_force"});
     World forced(j, backend, registry);
     uint32_t count = 0;
@@ -82,13 +82,13 @@ int main(int argc, char **argv) {
     expect(std::abs(forced.bodies[0].pose.position.x - 1.0 / (360 * 360)) <
                1e-9,
            "fixed integration failed");
-    auto offset = fixture();
-    offset.bodies[0].center_of_mass.position = {.2, 0, 0};
-    offset.bodies[0].initial_pose.orientation =
-        euler(0, 0, 1.5707963267948966);
+    auto offset_owner = fixture();
+    auto &offset = *offset_owner;
+    offset.objects[0].center_of_mass.position = {.2, 0, 0};
+    offset.objects[0].initial_pose.orientation = euler(0, 0, 1.5707963267948966);
     modules(offset, {"gravity_compensation", "lever"});
     ForceRegistry lever;
-    lever.add("lever", [](ForceContext &c, std::vector<SimWrench> &out) {
+    lever.add("lever", [](ForceContext &c, WrenchBuffer &out) {
       auto p = point(c.bodies[0].pose, {1.2, 0, 0});
       add_force(out[0], {2, 0, 0}, p, c.bodies[0].center_of_mass);
     });
@@ -99,7 +99,8 @@ int main(int argc, char **argv) {
     expect(std::abs(torque.bodies[0].angular_velocity.z + 2.0 / 360) < 1e-9,
            "angular acceleration failed");
     if (api.integrators & (1u << SIM_INTEGRATOR_RK4)) {
-      auto rk4 = j;
+      auto rk4_owner = j.clone();
+      auto &rk4 = *rk4_owner;
       rk4.header.integrator = SIM_INTEGRATOR_RK4;
       World integrated(rk4, backend, registry);
       integrated.step({});
@@ -109,7 +110,8 @@ int main(int argc, char **argv) {
     } else {
       bool rejected = false;
       try {
-        auto rk4 = j;
+        auto rk4_owner = j.clone();
+        auto &rk4 = *rk4_owner;
         rk4.header.integrator = SIM_INTEGRATOR_RK4;
         World unsupported(rk4, backend, registry);
       } catch (const std::invalid_argument &) {
@@ -119,10 +121,11 @@ int main(int argc, char **argv) {
     }
     ForceRegistry duplicate;
     duplicate.add(
-        "second_fluid", [](ForceContext &, std::vector<SimWrench> &) {},
-        "hydrodynamics");
-    auto conflict = fixture();
-    modules(conflict, {"gravity_compensation", "hydrodynamics", "second_fluid"});
+        "second_fluid", [](ForceContext &, WrenchBuffer &) {}, "hydrodynamics");
+    auto conflict_owner = fixture();
+    auto &conflict = *conflict_owner;
+    modules(conflict,
+            {"gravity_compensation", "hydrodynamics", "second_fluid"});
     bool rejected = false;
     try {
       World invalid_world(conflict, backend, duplicate);
@@ -153,43 +156,68 @@ int main(int argc, char **argv) {
       reset.push_back(forced.state_hash());
     }
     expect(expected == reset, "cold reset replay diverged");
-    auto collision = fixture();
-    collision.header.gravity = {0, 0, 9.81};
-    collision.bodies[0].initial_pose.position = {0, 0, .5};
-    add_body(collision, make_body(8, SIM_STATIC, {0, 0, 1.1}, 0),
-             make_box({2, 2, .1}));
-    World contact(collision, backend);
-    bool touched = false;
-    for (int i = 0; i < 180; ++i) {
-      contact.step({});
-      touched |= !contact.contacts.empty();
+    for (auto kind : {SIM_BOX, SIM_SPHERE, SIM_CYLINDER, SIM_MESH}) {
+      auto collision_owner = fixture();
+      auto &collision = *collision_owner;
+      collision.header.gravity = {0, 0, 9.81};
+      collision.objects[0].initial_pose.position = {0, 0, .5};
+      auto &shape = collision.edit_collider(0, 0).data;
+      shape.kind = kind;
+      if (kind == SIM_MESH) {
+        // Use nonzero ranges so mesh indices must remain local to the shape.
+        collision.vertices.push_back({10, 10, 10});
+        collision.triangles.push_back({0, 0, 0});
+        shape.vertex_begin = shape.triangle_begin = 1;
+        auto faces = surface(SIM_BOX, shape.size, nullptr, nullptr, 0, 0);
+        for (auto &face : faces) {
+          uint32_t v = shape.vertex_count;
+          collision.triangles.push_back({v, v + 1, v + 2});
+          for (auto vertex : face)
+            collision.vertices.push_back(vertex);
+          shape.vertex_count += 3;
+          ++shape.triangle_count;
+        }
+      }
+      add_body(collision, make_body(8, SIM_STATIC, {0, 0, 1.1}, 0),
+               make_box({2, 2, .1}));
+      World contact(collision, backend);
+      bool touched = false;
+      for (int i = 0; i < 180; ++i) {
+        contact.step({});
+        touched |= !contact.contacts.empty();
+      }
+      expect(touched, "shape produced no collision");
+      double height = kind == SIM_SPHERE ? .1 : .3;
+      expect(std::abs(contact.bodies[0].pose.position.z - (1 - height)) < .03,
+             "shape did not rest at its expected height above the floor");
     }
-    expect(touched, "no collision reported");
-    expect(contact.bodies[0].pose.position.z < .85, "body fell through floor");
-    auto pass = fixture();
-    pass.bodies[0].initial_linear_velocity = {0, 1, 0};
+    auto pass_owner = fixture();
+    auto &pass = *pass_owner;
+    pass.objects[0].initial_linear_velocity = {0, 1, 0};
     add_body(pass, make_body(8, SIM_KINEMATIC, {0, .5, 2}, 0),
              make_box({1, .1, 1}, false));
     World noncolliding(pass, backend);
     for (int i = 0; i < 360; ++i) {
       noncolliding.step({});
-      expect(noncolliding.contacts.empty(), "disabled obstacle produced a contact");
+      expect(noncolliding.contacts.empty(),
+             "disabled obstacle produced a contact");
     }
     expect(std::abs(noncolliding.bodies[0].pose.position.y - 1) < 1e-8,
            "disabled obstacle blocked the vehicle");
-    pass.bodies[0].initial_linear_velocity = {};
-    pass.bodies[1].initial_pose.position = {0, 0, 2};
+    pass.objects[0].initial_linear_velocity = {};
+    pass.objects[1].initial_pose.position = {0, 0, 2};
     World overlapping_disabled(pass, backend);
     overlapping_disabled.step({});
     expect(overlapping_disabled.contacts.empty(),
            "initially overlapping disabled geometry generated contacts");
-    auto floating = fixture();
+    auto floating_owner = fixture();
+    auto &floating = *floating_owner;
     floating.header.gravity = {0, 0, 9.81};
-    floating.bodies[0].volume = 2.0 / 1025;
-    auto faces = surface(floating.shapes[0].kind, floating.shapes[0].size,
+    floating.objects[0].volume = 2.0 / 1025;
+    auto faces = surface(floating.objects.block(0).colliders[0].data.kind, floating.objects.block(0).colliders[0].data.size,
                          nullptr, nullptr, 0, 0);
     HullRec hull{};
-    hull.pose = floating.shapes[0].pose;
+    hull.pose = floating.objects.block(0).colliders[0].data.pose;
     hull.drag = {1, 1, 1};
     hull.skin = {.1, .1, .1};
     hull.volume = 2.0 / 1025;
@@ -198,7 +226,7 @@ int main(int argc, char **argv) {
       for (auto vertex : face)
         floating.hull_vertices.push_back(vertex);
     hull.vertex_count = floating.hull_vertices.size();
-    floating.hulls.push_back(hull);
+    floating.robot.add_hull(hull);
     World buoyant(floating, backend);
     buoyant.step({});
     expect(std::abs(buoyant.bodies[0].linear_velocity.z) < 1e-9,

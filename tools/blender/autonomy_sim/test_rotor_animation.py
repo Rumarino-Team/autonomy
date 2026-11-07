@@ -20,8 +20,7 @@ bpy.context.view_layer.update()
 original = {ob.name: ob.matrix_world.copy() for name in vehicle_names
             for ob in bpy.data.objects[name].children if ob.type == "MESH"}
 link.register()
-snapshot=link.exporter.export_scene(source,Path(__file__).resolve().parents[3]/'sim/profiles')
-scene=link.preview.ensure(source,snapshot)
+scene=link.preview.ensure(source,identity='rotor-animation-test')
 vehicle_names=rotors.VEHICLES
 # Preview datablock names can differ; the viewer resolves display names/IDs.
 original={}

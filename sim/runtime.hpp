@@ -29,33 +29,47 @@ struct Observation {
   double depth = 0;
   bool position_ok = true, attitude_ok = true, gyro_ok = true, imu_ok = true,
        depth_ok = true;
-  std::vector<ObjectObservation> objects;
+  // Borrowed until the next observe() call or destruction of the World.
+  std::span<const ObjectObservation> objects;
 };
 class World {
+  MainPtr model_;
+  Memory memory_;
   std::shared_ptr<Backend> backend_;
   void *world_ = nullptr;
   ForceRegistry registry_;
-  std::vector<std::string> modules_;
-  std::map<std::string, std::vector<double>> module_state_;
-  std::vector<SimWrench> fluid_cache_;
-  std::vector<SimVec3> previous_velocity_, previous_angular_velocity_;
+  std::pmr::vector<std::string> modules_;
+  ModuleState module_state_;
+  WrenchBuffer fluid_cache_;
+  std::pmr::vector<SimVec3> previous_velocity_, previous_angular_velocity_;
+  mutable std::pmr::vector<ObjectObservation> observation_objects_;
+  std::array<RotorState, Robot::max_thrusters> rotor_storage_{};
+  std::array<double, Robot::max_thrusters> command_storage_{}, input_storage_{};
   void read();
 
 public:
-  Scene scene;
-  std::vector<SimBodyState> bodies;
-  std::vector<SimContact> contacts;
-  std::vector<RotorState> rotors;
-  std::vector<double> commands, input_commands;
-  std::vector<SimWrench> wrenches;
+  const Main &scene;
+  std::pmr::vector<SimBodyState> bodies;
+  std::pmr::vector<SimContact> contacts;
+  std::span<RotorState> rotors;
+  std::span<double> commands, input_commands;
+  WrenchBuffer wrenches;
   uint64_t tick = 0;
-  explicit World(Scene scene, std::shared_ptr<Backend> backend,
-                 ForceRegistry registry = ForceRegistry{});
+  explicit World(
+      MainPtr scene, std::shared_ptr<Backend> backend,
+      ForceRegistry registry = ForceRegistry{},
+      std::pmr::memory_resource *upstream = std::pmr::get_default_resource());
+  World(const Main &scene, std::shared_ptr<Backend> backend,
+        ForceRegistry registry = ForceRegistry{},
+        std::pmr::memory_resource *upstream = std::pmr::get_default_resource());
   ~World();
   World(const World &) = delete;
   World &operator=(const World &) = delete;
-  void reset(const std::vector<SimBodyState> &state = {});
-  void step(const std::vector<double> &commands);
+  void reset(std::span<const SimBodyState> state = {});
+  void step(std::span<const double> commands);
+  void step(std::initializer_list<double> commands) {
+    step(std::span(commands.begin(), commands.size()));
+  }
   double dt() const {
     return double(scene.header.dt_numerator) / scene.header.dt_denominator;
   }
@@ -65,7 +79,7 @@ public:
   const Backend &backend() const { return *backend_; }
   std::shared_ptr<Backend> backend_handle() const { return backend_; }
 };
-std::vector<double> generated_commands(const Scene &, uint64_t seed,
+std::vector<double> generated_commands(const Main &, uint64_t seed,
                                        uint64_t tick);
-Scene draw_case(Scene scene, uint64_t seed);
+MainPtr draw_case(const Main &scene, uint64_t seed);
 } // namespace sim

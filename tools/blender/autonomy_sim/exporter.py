@@ -1,11 +1,13 @@
-"""Evaluated Blender -> owned portable scene. No preset world-object merging."""
+"""Offline evaluation/calibration helpers and reference data for tests.
+
+Simulation launch reads the saved .blend directly in C++; export_scene is not
+called by Run live, Record run, native CLI loading or controller generation.
+"""
 import copy
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
-import tempfile
 import base64
 
 import bpy
@@ -58,19 +60,6 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
-
-
-def atomic_json(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=path.name+'.', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w') as output:
-            output.write(canonical(value)+'\n')
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 def fail(obj, message):
@@ -202,7 +191,7 @@ def calibration_matches(shapes,reference,tolerance=1e-4):
     return True
 
 
-def export_scene(scene, profiles_dir, frame=1, output=None, check_calibration=True):
+def export_scene(scene, profiles_dir, frame=1, check_calibration=True):
     if scene.get('sim_preview'):
         raise ValueError('preview scenes cannot be simulation sources')
     if scene.get('sim_schema') != VERSION:
@@ -219,12 +208,12 @@ def export_scene(scene, profiles_dir, frame=1, output=None, check_calibration=Tr
         scene.frame_set(frame)
         depsgraph = bpy.context.evaluated_depsgraph_get()
         try:
-            return _export(scene, collection, depsgraph, Path(profiles_dir), frame, output, check_calibration)
+            return _export(scene, collection, depsgraph, Path(profiles_dir), frame, check_calibration)
         finally:
             scene.frame_set(old_frame, subframe=old_subframe)
 
 
-def _export(scene, collection, dg, profiles_dir, frame, output, check_calibration):
+def _export(scene, collection, dg, profiles_dir, frame, check_calibration):
     objects = sorted(collection.all_objects, key=lambda o: str(o.get('sim_id', o.name)))
     seen = set()
     for obj in objects:
@@ -334,7 +323,4 @@ def _export(scene, collection, dg, profiles_dir, frame, output, check_calibratio
                           'blender_version':bpy.app.version_string,'file':bpy.data.filepath,'scene':scene.name,
                           'frame':frame,'content_hash':identity,'profiles':profiles,'objects':origins,
                           'excluded':sorted(o.name for o in scene.objects if o not in objects or o.get('sim_role')=='visual')}
-    if output:
-        from . import wire
-        wire.write_atomic(output, wire.encode(document))
     return document

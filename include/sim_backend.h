@@ -1,12 +1,13 @@
 #ifndef AUTONOMY_SIM_BACKEND_H
 #define AUTONOMY_SIM_BACKEND_H
+#include "math.h"
 #include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define SIM_BACKEND_ABI_VERSION 2u
+#define SIM_BACKEND_ABI_VERSION 3u
 typedef int32_t SimResult;
 enum {
   SIM_OK,
@@ -29,13 +30,10 @@ enum {
   SIM_CAP_PROCESS_ISOLATED = 2u,
   SIM_CAP_NATIVE_HYDRO = 4u
 };
-typedef struct {
-  double x, y, z;
-} SimVec3;
+/* Shared double-precision math types; aliases retain existing ABI names. */
+typedef MathVector3d SimVec3;
 /* Unit xyzw quaternion, rotates body-local vectors into the parent frame. */
-typedef struct {
-  double x, y, z, w;
-} SimQuat;
+typedef MathQuaterniond SimQuat;
 typedef struct {
   SimVec3 position;
   SimQuat orientation;
@@ -87,13 +85,43 @@ typedef struct {
   SimVec3 position, normal;
   double normal_force;
 } SimContact;
+/* Borrowed, process-local model view. No C++ object or allocator crosses the
+ * ABI. Mesh arrays are shared read-only within the view; an adapter must copy
+ * anything it retains after world_create returns. UINT32_MAX means no mesh. */
+typedef struct {
+  const SimVec3 *positions;
+  uint32_t position_count;
+  const SimTriangle *triangles;
+  uint32_t triangle_count;
+} SimMeshDesc;
+typedef struct {
+  SimBody body;
+  char name[64];
+  uint32_t cls, tracked, fuzz, shape_begin, shape_count;
+  double dry_mass, volume;
+  SimVec3 buoyancy_center;
+} SimBodyDesc;
+typedef struct {
+  SimShape shape;
+  uint32_t body, mesh;
+} SimShapeDesc;
+typedef struct {
+  uint32_t struct_size;
+  SimModelDesc model;
+  const SimBodyDesc *bodies;
+  uint32_t body_count;
+  const SimShapeDesc *shapes;
+  uint32_t shape_count;
+  const SimMeshDesc *meshes;
+  uint32_t mesh_count;
+} SimSceneView;
 typedef struct {
   uint32_t struct_size, abi_version, capabilities;
   uint32_t integrators; /* bitmask: 1u << SIM_INTEGRATOR_* */
   char name[32], version[64];
-  /* scenario is the ASIMSC02 snapshot, borrowed for this call. */
-  SimResult (*world_create)(const char *scenario, uint32_t length, void **,
-                            char *, uint32_t);
+  /* scene and every pointed-to buffer are borrowed for this call only. */
+  SimResult (*world_create)(const SimSceneView *scene, void **, char *,
+                            uint32_t);
   void (*world_destroy)(void *);
   /* Reset is a cold reset, including solver history. NULL uses the model
    * initial state. */
@@ -106,10 +134,10 @@ typedef struct {
   uint64_t (*state_hash)(const void *);
 } SimBackendApi;
 /* Returns an independently compiled backend's API. Never throws across this
-   boundary. world_create borrows the scene snapshot and deep-copies it.
-   step borrows wrenches and writes no host memory. Different world handles
-   may be used concurrently. Serialize calls on the same world. Unload the
-   DSO after its worlds are destroyed. */
+   boundary. world_create borrows the scene view and deep-copies retained model
+   data. step borrows wrenches and writes no host memory. Different world
+   handles may be used concurrently. Serialize calls on the same world. Unload
+   the DSO after its worlds are destroyed. */
 typedef SimResult (*SimBackendGetApi)(uint32_t version, uint32_t size,
                                       SimBackendApi *);
 SimResult sim_backend_get_api(uint32_t version, uint32_t size, SimBackendApi *);

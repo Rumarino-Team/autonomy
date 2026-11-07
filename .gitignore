@@ -11,6 +11,11 @@ auvs/stonefish_sim/*
 !auvs/stonefish_sim/data/
 auvs/stonefish_sim/data/*
 !auvs/stonefish_sim/data/pool_scene.blend
+!auvs/stonefish_sim/data/robots/
+auvs/stonefish_sim/data/robots/*
+!auvs/stonefish_sim/data/robots/*.blend
+!auvs/stonefish_sim/data/robots/manifest.json
+!auvs/stonefish_sim/data/robots/README.md
 !auvs/stonefish_sim/data/textures/
 auvs/stonefish_sim/data/textures/*
 !auvs/stonefish_sim/data/textures/pool_*.png

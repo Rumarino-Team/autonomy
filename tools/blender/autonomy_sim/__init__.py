@@ -26,7 +26,7 @@ from bpy.props import (
 from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup, UIList
 from mathutils import Matrix, Quaternion, Vector
 
-from . import rotor_animation, exporter, preview, wire
+from . import rotor_animation, exporter, preview
 
 bl_info = {
     "name": "Autonomy Simulation",
@@ -135,6 +135,8 @@ def _apply_packet(payload):
         if not all(math.isfinite(v) for v in (px, py, pz, qw, qx, qy, qz)) or qw*qw+qx*qx+qy*qy+qz*qz < 1e-12:
             return
         obj = _ensure_driven_object(object_name,number)
+        # The publisher already converted NED coordinates to Blender's frame.
+        # Update the driven preview object; its children follow this transform.
         rotation = Quaternion((qw, qx, qy, qz)).to_matrix().to_4x4()
         rotation.translation = (px, py, pz)
         obj.matrix_world = rotation
@@ -149,6 +151,8 @@ def _drain():
     if sock is None:
         return
     latest = None
+    # Display the newest available pose rather than replaying a queue of stale
+    # frames. Physics keeps running independently if the Blender UI is busy.
     while True:
         try:
             payload, _addr = sock.recvfrom(65535)
@@ -282,6 +286,26 @@ def detach_takes(scene):
             obj.hide_viewport = True
 
 
+def _saved_source(source, tools, frame):
+    """Validate the saved file with the same native reader used by physics.
+
+    The add-on supplies a path and scene name, not an exported scene snapshot.
+    Refuse unsaved edits so the preview and the file read by C++ agree.
+    """
+    # In background Blender, is_dirty stays set even after save_as_mainfile:
+    # there is no interactive save/undo event cycle. Scripted launches still
+    # require an existing saved file; interactive launches also reject edits.
+    if not bpy.data.filepath or (not bpy.app.background and bpy.data.is_dirty):
+        raise ValueError("Save the .blend file before running; simulation reads the saved source directly")
+    path = Path(bpy.data.filepath).resolve()
+    env = {k: v for k, v in os.environ.items() if not k.startswith('AUTONOMY_SIM_')}
+    env.update(AUTONOMY_SIM_SOURCE_SCENE=source.name, AUTONOMY_SIM_SOURCE_FRAME=str(frame))
+    result = subprocess.run([str(tools['simctl']), 'validate', str(path)], env=env, capture_output=True)
+    if result.returncode:
+        raise ValueError("Saved scene rejected: " + result.stderr.decode('utf-8', 'replace').strip())
+    return path, json.loads(result.stdout)['source']['content_hash']
+
+
 def launch_take(scene, seed, live=False):
     """Run the current mission again from its scene, seed, and tick budget."""
     if _job["proc"] is not None:
@@ -290,12 +314,8 @@ def launch_take(scene, seed, live=False):
     requested = {key: getattr(scene.autonomy_sim, key) for key in ("backend", "port", "max_ticks", "randomize", "seed", "source_frame")}
     source = preview.source_scene(scene)
     frame = scene.autonomy_sim.source_frame
-    snapshot = exporter.export_scene(source, tools["profiles"], frame)
-    payload = wire.encode(snapshot)
-    validation = subprocess.run([str(tools["simctl"]), "validate", "-"], input=payload, capture_output=True)
-    if validation.returncode:
-        raise ValueError("Evaluated scene rejected: " + validation.stderr.decode("utf-8", "replace").strip())
-    scene = preview.ensure(source, snapshot)
+    source_path, identity = _saved_source(source, tools, frame)
+    scene = preview.ensure(source, identity=identity)
     for key, value in requested.items():
         setattr(scene.autonomy_sim, key, value)
     if live:
@@ -318,11 +338,11 @@ def launch_take(scene, seed, live=False):
 
     log = log_path.open("w", encoding="utf-8")
     env = {key: value for key, value in os.environ.items() if not key.startswith("AUTONOMY_SIM_")}
-    sender, receiver = socket.socketpair()
-    sender.settimeout(120)
     env.update(
         AUTONOMY_SIM_BACKEND=str(tools["backend"]),
-        AUTONOMY_SIM_SCENARIO=f"fd:{receiver.fileno()}",
+        AUTONOMY_SIM_SCENARIO=str(source_path),
+        AUTONOMY_SIM_SOURCE_SCENE=source.name,
+        AUTONOMY_SIM_SOURCE_FRAME=str(frame),
         AUTONOMY_SIM_MAX_TICKS=str(settings.max_ticks),
         AUTONOMY_SIM_BLENDER=str(int(live)),
         AUTONOMY_SIM_REALTIME=str(int(live)),
@@ -339,10 +359,7 @@ def launch_take(scene, seed, live=False):
     try:
         proc = subprocess.Popen(
             command, cwd=str(tools["repo"]), env=env, stdout=log, stderr=subprocess.STDOUT,
-            pass_fds=(receiver.fileno(),),
         )
-        receiver.close()
-        sender.sendall(payload)
     except OSError:
         if "proc" in locals():
             proc.terminate()
@@ -350,9 +367,6 @@ def launch_take(scene, seed, live=False):
         log.close()
         take.status = "failed to start"
         raise
-    finally:
-        sender.close()
-        receiver.close()
     _job.update(
         proc=proc,
         log=log,
@@ -662,8 +676,8 @@ class AUTONOMY_OT_start_link(Operator):
         scene = context.scene
         if not scene.get('sim_preview'):
             source = preview.source_scene(scene)
-            snapshot = exporter.export_scene(source,_repo_dir()/'sim/profiles',scene.autonomy_sim.source_frame)
-            scene = preview.ensure(source,snapshot)
+            _, identity = _saved_source(source, _tool_paths(scene), scene.autonomy_sim.source_frame)
+            scene = preview.ensure(source, identity=identity)
         # Take keyframes would override the streamed poses on every frame change.
         detach_takes(scene)
         scene.autonomy_sim.take_index = -1
@@ -772,8 +786,8 @@ class AUTONOMY_PT_link(Panel):
         settings = context.scene.autonomy_sim
         layout.label(text='Source: '+str(context.scene.get('sim_source_scene',context.scene.name)))
         layout.prop(settings,'source_frame')
-        if context.scene.get('sim_snapshot_hash'):
-            layout.label(text='Snapshot: '+context.scene['sim_snapshot_hash'][:12])
+        if context.scene.get('sim_source_hash'):
+            layout.label(text='Saved source: '+context.scene['sim_source_hash'][:12])
         layout.prop(settings, "backend")
         layout.prop(settings, "port")
         layout.operator("autonomy_sim.build_scene", icon="MESH_CUBE")

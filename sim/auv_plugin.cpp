@@ -66,7 +66,7 @@ void note_depth() {
   if (!context.world)
     return;
   auto &w = *context.world;
-  double depth = w.bodies[w.scene.header.camera.body].pose.position.z;
+  double depth = w.bodies[w.scene.robot.camera.body].pose.position.z;
   if (!context.depth_seen) {
     context.min_depth = context.max_depth = depth;
     context.depth_seen = true;
@@ -95,9 +95,9 @@ void auv_init() {
   try {
     auto path =
         environment("AUTONOMY_SIM_SCENARIO", "auvs/stonefish_sim/data/pool_scene.blend");
-    auto scene = Scene::load(path);
+    auto scene = Main::load(path);
     if (std::getenv("AUTONOMY_SIM_SEED"))
-      scene = draw_case(std::move(scene), integer("AUTONOMY_SIM_SEED", 0));
+      scene = draw_case(*scene, integer("AUTONOMY_SIM_SEED", 0));
     Dl_info info{};
     require(dladdr(reinterpret_cast<void *>(&auv_init), &info) &&
                 info.dli_fname,
@@ -110,7 +110,7 @@ void auv_init() {
     context.world = std::make_unique<World>(std::move(scene), context.backend);
     context.limit = integer("AUTONOMY_SIM_MAX_TICKS", 21600);
     require(context.limit > 0, "simulation tick budget must be positive");
-    context.commands.assign(context.world->scene.thrusters.size(), 0);
+    context.commands.assign(context.world->scene.robot.thrusters().size(), 0);
     require(context.commands.size() <= 8,
             "AUV bridge supports at most eight thrusters");
     context.realtime = integer("AUTONOMY_SIM_REALTIME", 0) != 0;
@@ -138,9 +138,9 @@ bool auv_begin_fuzz(uint64_t seed) {
   try {
     auto path =
         environment("AUTONOMY_SIM_SCENARIO", "auvs/stonefish_sim/data/pool_scene.blend");
-    auto scene = draw_case(Scene::load(path), seed);
+    auto scene = draw_case(*Main::load(path), seed);
     auto world = std::make_unique<World>(std::move(scene), context.backend);
-    context.commands.assign(world->scene.thrusters.size(), 0);
+    context.commands.assign(world->scene.robot.thrusters().size(), 0);
     require(context.commands.size() <= 8, "AUV bridge supports at most eight thrusters");
     context.world = std::move(world);
     context.status = {};
@@ -193,7 +193,7 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
       context.blender->publish(w, o);
     // Existing mission controllers consume the vehicle origin and body attitude
     // here.
-    pose(frame->camera_pose, w.bodies[w.scene.header.camera.body].pose);
+    pose(frame->camera_pose, w.bodies[w.scene.robot.camera.body].pose);
     quaternion(frame->imu_quat, o.imu);
     frame->timestamp = w.timestamp_ns();
     frame->position_ok = {o.position_ok, o.position_ok, o.position_ok};
@@ -202,8 +202,8 @@ void auv_yield_until_next_frame(AuvFrame *frame) {
     vector(frame->gyro, o.gyro);
     frame->pressure_depth = o.depth;
     frame->pressure_depth_ok = o.depth_ok;
-    frame->image_width = w.scene.header.camera.width;
-    frame->image_height = w.scene.header.camera.height;
+    frame->image_width = w.scene.robot.camera.width;
+    frame->image_height = w.scene.robot.camera.height;
     for (auto &object : o.objects) {
       if (frame->objects_len >= AUV_FRAME_MAX_OBJECTS)
         break;

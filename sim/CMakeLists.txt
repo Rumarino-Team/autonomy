@@ -9,12 +9,10 @@ add_library(sim_headers INTERFACE)
 target_include_directories(sim_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}" "${SIM_JSON_INCLUDE}")
 # -iquote keeps the repository's include/math.h out of <cmath>'s system lookup.
 target_compile_options(sim_headers INTERFACE "-iquote${PROJECT_SOURCE_DIR}/include" -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
-add_library(sim_scene STATIC image.cpp blend_loader.cpp)
+add_library(sim_scene STATIC database.cpp scene_codec.cpp image.cpp blend_loader.cpp)
 set_target_properties(sim_scene PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_compile_definitions(sim_scene PRIVATE
-  SIM_BLENDER_EXPORT_SCRIPT="${PROJECT_SOURCE_DIR}/tools/blender/export_scene.py"
-  SIM_BLENDER_PROFILES="${CMAKE_CURRENT_SOURCE_DIR}/profiles")
-target_link_libraries(sim_scene PUBLIC sim_headers)
+add_subdirectory(blend)
+target_link_libraries(sim_scene PUBLIC sim_headers autonomy_blend_reader)
 add_library(autonomy_sim SHARED json_io.cpp forces.cpp runtime.cpp)
 target_link_libraries(autonomy_sim PUBLIC sim_scene PRIVATE ${CMAKE_DL_LIBS})
 set_target_properties(autonomy_sim PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
@@ -70,8 +68,8 @@ add_test(NAME sim_stonefish_contract COMMAND sim_conformance $<TARGET_FILE:sim_b
 set_tests_properties(sim_mujoco_contract sim_stonefish_contract PROPERTIES TIMEOUT 180)
 install(TARGETS autonomy_sim sim_backend_mujoco sim_backend_stonefish LIBRARY DESTINATION lib COMPONENT simulation)
 install(TARGETS sim_stonefish_worker RUNTIME DESTINATION lib COMPONENT simulation)
-install(FILES "${PROJECT_SOURCE_DIR}/include/sim_backend.h" DESTINATION include COMPONENT simulation)
-install(FILES "${PROJECT_SOURCE_DIR}/tools/blender/export_scene.py" DESTINATION share/autonomy/blender COMPONENT simulation)
+install(FILES "${PROJECT_SOURCE_DIR}/include/sim_backend.h"
+              "${PROJECT_SOURCE_DIR}/include/math.h" DESTINATION include COMPONENT simulation)
 install(DIRECTORY "${PROJECT_SOURCE_DIR}/tools/blender/autonomy_sim" DESTINATION share/autonomy/blender COMPONENT simulation
   FILES_MATCHING PATTERN "*.py" PATTERN "test_*" EXCLUDE PATTERN "__pycache__" EXCLUDE)
 
@@ -85,16 +83,8 @@ target_link_libraries(simctl PRIVATE autonomy_sim)
 install(TARGETS simctl RUNTIME DESTINATION bin COMPONENT simulation)
 set_target_properties(simctl PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
 
-option(SIM_BUILD_BLEND_IMPORTER "Build the optional pinned CBlend importer" OFF)
-if(SIM_BUILD_BLEND_IMPORTER)
-  add_subdirectory(blend)
-  add_executable(sim_import_blend blend_import.cpp)
-  target_link_libraries(sim_import_blend PRIVATE autonomy_sim autonomy_blend_reader)
-  install(TARGETS sim_import_blend RUNTIME DESTINATION bin COMPONENT simulation)
-endif()
-
 add_executable(sim_abi_c tests/abi.c)
-target_link_libraries(sim_abi_c PRIVATE sim_headers)
+target_link_libraries(sim_abi_c PRIVATE sim_headers ${CMAKE_DL_LIBS})
 add_test(NAME sim_c_abi COMMAND sim_abi_c)
 add_executable(sim_scenarios tests/scenarios.cpp)
 target_link_libraries(sim_scenarios PRIVATE autonomy_sim)
@@ -102,25 +92,21 @@ add_executable(sim_forces tests/forces.cpp)
 target_link_libraries(sim_forces PRIVATE autonomy_sim)
 add_executable(sim_blender_source tests/blender_source.cpp)
 target_link_libraries(sim_blender_source PRIVATE autonomy_sim)
-add_test(NAME sim_rotor_response COMMAND sim_forces "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/hydrus.asim")
 add_dependencies(sim_scenarios sim_backend_mujoco sim_backend_stonefish)
-foreach(engine mujoco stonefish)
-  foreach(vehicle hydrus proteus bluerov)
-    add_test(NAME sim_${engine}_${vehicle} COMMAND sim_scenarios $<TARGET_FILE:sim_backend_${engine}> "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/${vehicle}.asim")
-    set_tests_properties(sim_${engine}_${vehicle} PROPERTIES TIMEOUT 180)
-  endforeach()
-endforeach()
 
+# Saved-file physics tests run headlessly; Blender is needed only to author
+# mutation fixtures and exercise its presentation add-on.
+set(SIM_POOL_SCENE "${PROJECT_SOURCE_DIR}/auvs/stonefish_sim/data/pool_scene.blend")
+add_test(NAME sim_rotor_response COMMAND sim_forces "${SIM_POOL_SCENE}")
+set_tests_properties(sim_rotor_response PROPERTIES TIMEOUT 180)
 find_program(SIM_BLENDER_EXECUTABLE NAMES blender)
 if(SIM_BLENDER_EXECUTABLE)
-  set(SIM_SOURCE_FIXTURES "${CMAKE_CURRENT_BINARY_DIR}/blender-source-fixtures")
   add_test(NAME sim_blender_source_export COMMAND "${SIM_BLENDER_EXECUTABLE}"
-    --background --factory-startup "${PROJECT_SOURCE_DIR}/auvs/stonefish_sim/data/pool_scene.blend"
-    --python-exit-code 1 --python "${PROJECT_SOURCE_DIR}/tools/blender/test_source.py" -- "${SIM_SOURCE_FIXTURES}")
-  set_tests_properties(sim_blender_source_export PROPERTIES TIMEOUT 120 FIXTURES_SETUP BlenderSource RUN_SERIAL TRUE)
+    --background --factory-startup "${SIM_POOL_SCENE}"
+    --python-exit-code 1 --python "${PROJECT_SOURCE_DIR}/tools/blender/test_source.py" --
+    $<TARGET_FILE:sim_blender_source> $<TARGET_FILE:sim_backend_mujoco> $<TARGET_FILE:sim_backend_stonefish>)
+  set_tests_properties(sim_blender_source_export PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
   foreach(engine mujoco stonefish)
-    add_test(NAME sim_${engine}_blender_source COMMAND sim_blender_source $<TARGET_FILE:sim_backend_${engine}> "${SIM_SOURCE_FIXTURES}")
-    set_tests_properties(sim_${engine}_blender_source PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED BlenderSource)
     add_test(NAME sim_${engine}_blender_integration COMMAND "${SIM_BLENDER_EXECUTABLE}"
       --background --factory-startup
       --python-exit-code 1 --python "${PROJECT_SOURCE_DIR}/tools/blender/test_blender.py" -- ${engine})
@@ -132,16 +118,12 @@ if(SIM_BLENDER_EXECUTABLE)
   set_tests_properties(sim_blender_rotor_animation PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()
 add_custom_target(sim_all DEPENDS simctl auv_sim sim_backend_mujoco sim_backend_stonefish sim_conformance sim_scenarios sim_abi_c sim_forces sim_blender_source)
-if(TARGET sim_import_blend)
-  add_dependencies(sim_all sim_import_blend)
-endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-if(SIM_BLENDER_EXECUTABLE)
-  add_test(NAME sim_blender_direct COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/blender/test_direct.py"
-    $<TARGET_FILE:simctl> $<TARGET_FILE:sim_backend_mujoco> $<TARGET_FILE:sim_backend_stonefish>)
-  set_tests_properties(sim_blender_direct PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
-endif()
+add_test(NAME sim_blender_direct COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/blender/test_direct.py"
+  $<TARGET_FILE:simctl> $<TARGET_FILE:sim_backend_mujoco> $<TARGET_FILE:sim_backend_stonefish>)
+set_tests_properties(sim_blender_direct PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
 add_test(NAME sim_controller_allocation COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/controller.py")
+set_tests_properties(sim_controller_allocation PROPERTIES TIMEOUT 180)
 foreach(engine mujoco stonefish)
   add_test(NAME sim_${engine}_harness COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/harness.py" $<TARGET_FILE:simctl> $<TARGET_FILE:sim_backend_${engine}>)
   set_tests_properties(sim_${engine}_harness PROPERTIES TIMEOUT 180)
@@ -152,21 +134,48 @@ get_filename_component(SIM_MUJOCO_LIBDIR "${SIM_MUJOCO_LIBRARY}" DIRECTORY)
 get_filename_component(SIM_STONEFISH_LIBDIR "${SIM_STONEFISH_LIBRARY}" DIRECTORY)
 install(DIRECTORY "${SIM_MUJOCO_LIBDIR}/" DESTINATION lib COMPONENT simulation FILES_MATCHING PATTERN "libmujoco.so*")
 install(DIRECTORY "${SIM_STONEFISH_LIBDIR}/" DESTINATION lib COMPONENT simulation FILES_MATCHING PATTERN "libStonefish.so*")
-set(SIM_MISSION_SCENE "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/pool.asim")
-if(SIM_BLENDER_EXECUTABLE)
-  set(SIM_MISSION_SCENE "${PROJECT_SOURCE_DIR}/auvs/stonefish_sim/data/pool_scene.blend")
-endif()
 foreach(engine mujoco stonefish)
   add_test(NAME sim_${engine}_mission COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/mission.py"
     "${PROJECT_SOURCE_DIR}/zig-out/bin/src_3" $<TARGET_FILE:auv_sim> $<TARGET_FILE:sim_backend_${engine}>
-    "${SIM_MISSION_SCENE}" "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/controller.json" $<TARGET_FILE:simctl>)
+    "${SIM_POOL_SCENE}" "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/controller.json" $<TARGET_FILE:simctl>)
   set_tests_properties(sim_${engine}_mission PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
   add_test(NAME sim_${engine}_mission_budget COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/mission.py"
     "${PROJECT_SOURCE_DIR}/zig-out/bin/src_3" $<TARGET_FILE:auv_sim> $<TARGET_FILE:sim_backend_${engine}>
-    "${SIM_MISSION_SCENE}" "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/controller.json" $<TARGET_FILE:simctl> --bounded)
+    "${SIM_POOL_SCENE}" "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/controller.json" $<TARGET_FILE:simctl> --bounded)
   set_tests_properties(sim_${engine}_mission_budget PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
   add_test(NAME sim_${engine}_blender_link COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/blender_link.py"
     "${PROJECT_SOURCE_DIR}/zig-out/bin/src_3" $<TARGET_FILE:auv_sim> $<TARGET_FILE:sim_backend_${engine}>
-    "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/pool.asim" "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/controller.json")
+    "${SIM_POOL_SCENE}" "${CMAKE_CURRENT_SOURCE_DIR}/scenarios/controller.json")
   set_tests_properties(sim_${engine}_blender_link PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
 endforeach()
+
+# Storage/transport tests exercise the real adapters as well as isolated pools.
+add_executable(sim_database tests/database.cpp backends/wire.cpp)
+target_link_libraries(sim_database PRIVATE autonomy_sim)
+add_dependencies(sim_database sim_backend_mujoco sim_backend_stonefish)
+foreach(engine mujoco stonefish)
+  add_test(NAME sim_${engine}_database COMMAND sim_database $<TARGET_FILE:sim_backend_${engine}>)
+  add_test(NAME sim_${engine}_c_view COMMAND sim_abi_c $<TARGET_FILE:sim_backend_${engine}>)
+  set_tests_properties(sim_${engine}_database sim_${engine}_c_view PROPERTIES TIMEOUT 180)
+endforeach()
+add_dependencies(sim_all sim_database)
+
+# Each fixed asset is a complete one-robot scene. Qualify both adapters using
+# the existing replay, cold reset and concurrent-world scenario checks.
+set(SIM_ROBOT_ASSETS "${PROJECT_SOURCE_DIR}/auvs/stonefish_sim/data/robots")
+foreach(robot hydrus proteus bluerov girona500)
+  foreach(engine mujoco stonefish)
+    add_test(NAME sim_${engine}_${robot}_asset COMMAND sim_scenarios
+      $<TARGET_FILE:sim_backend_${engine}> "${SIM_ROBOT_ASSETS}/${robot}.blend")
+    set_tests_properties(sim_${engine}_${robot}_asset PROPERTIES TIMEOUT 180)
+  endforeach()
+endforeach()
+if(SIM_BLENDER_EXECUTABLE)
+  add_test(NAME sim_fixed_robot_assets COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/blender/test_robot_assets.py"
+    $<TARGET_FILE:simctl> "${SIM_ROBOT_ASSETS}" "${SIM_BLENDER_EXECUTABLE}")
+  set_tests_properties(sim_fixed_robot_assets PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+endif()
+install(DIRECTORY "${SIM_ROBOT_ASSETS}/" DESTINATION share/autonomy/robots
+  COMPONENT simulation FILES_MATCHING PATTERN "*.blend" PATTERN "manifest.json"
+  PATTERN "README.md")

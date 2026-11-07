@@ -88,7 +88,7 @@ zig build
 python3 tools/blender/package_addon.py
 ```
 
-In Blender 4.5+, install `build/portable/autonomy_sim.zip` (Preferences → Add-ons → Install from Disk), enable **Autonomy Simulation**, and set **Repository** to this checkout. In the 3D View sidebar, open **Autonomy**, click **Load pool scene** (or open the `.blend` directly), choose **MuJoCo** or **Stonefish**, then **Run live** for real-time preview and a baked take. **Record run** runs the same mission as fast as possible. **Cancel** stops an in-flight run.
+In Blender 4.5+, install `build/portable/autonomy_sim.zip` (Preferences → Add-ons → Install from Disk), enable **Autonomy Simulation**, and set **Repository** to this checkout. In the 3D View sidebar, open **Autonomy**, click **Load pool scene** (or open the `.blend` directly), choose **MuJoCo** or **Stonefish**, save the `.blend`, then **Run live** for real-time preview and a baked take. **Record run** runs the same mission as fast as possible. **Cancel** stops an in-flight run.
 
 To start from a terminal while Blender listens (**Start link** in the panel):
 
@@ -99,7 +99,7 @@ python3 tools/blender/from_blender.py \
   --blender-link --realtime
 ```
 
-Use `--backend stonefish` for the other engine. Refresh the checked-in pool snapshot at `sim/scenarios/pool.asim` when the authored scene changes.
+Use `--backend stonefish` for the other engine. The C++ simulator reads the saved pool `.blend` directly, including embedded calibration. Save after authoring changes; launch no longer uses a Python exporter snapshot or background Blender.
 
 ### Live poses in Blender
 

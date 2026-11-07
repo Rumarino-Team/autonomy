@@ -6,20 +6,34 @@ The quadratic_rpm curve converts those fractions to normalized shaft speed.
 No external numerical libraries are required.
 """
 import argparse
-import importlib.util
 import json
 import math
 from pathlib import Path
+import subprocess
 
-def load_scene(path):
+def evaluate_blend(path, scene_name='AutonomySource', frame=1):
+    """Inspect the saved file through the simulator's native C++ reader."""
+    import os
+    root = Path(__file__).resolve().parents[1]
+    simctl = root/'build/portable/sim/simctl'
+    if not simctl.is_file():
+        raise SystemExit('Build simctl before generating a controller')
+    env = {key: value for key, value in os.environ.items() if not key.startswith('AUTONOMY_SIM_')}
+    env.update(AUTONOMY_SIM_SOURCE_SCENE=scene_name, AUTONOMY_SIM_SOURCE_FRAME=str(frame))
+    result = subprocess.run([str(simctl), 'inspect', str(Path(path).resolve())],
+                            env=env, capture_output=True, text=True)
+    if result.returncode:
+        raise SystemExit(result.stderr.strip() or 'Native Blender scene loading failed')
+    return json.loads(result.stdout)
+
+
+def load_scene(path, scene_name='AutonomySource', frame=1):
     path = Path(path)
     if path.suffix == '.json':
         return json.loads(path.read_text())
-    spec = importlib.util.spec_from_file_location(
-        "scene_wire", Path(__file__).resolve().parents[1]/"tools/blender/autonomy_sim/wire.py")
-    wire = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(wire)
-    return wire.decode(path.read_bytes())
+    if path.suffix != '.blend':
+        raise ValueError('scenario must be a .blend file')
+    return evaluate_blend(path, scene_name, frame)
 
 
 def cross(a, b):
@@ -96,7 +110,7 @@ def configuration(scene):
 if __name__ == '__main__':
     root = Path(__file__).resolve().parent
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scenario',type=Path,default=root/'scenarios/pool.asim')
+    parser.add_argument('--scenario',type=Path,default=root.parent/'auvs/stonefish_sim/data/pool_scene.blend')
     parser.add_argument('--output',type=Path,default=root/'scenarios/controller.json')
     args=parser.parse_args()
     scene = load_scene(args.scenario)

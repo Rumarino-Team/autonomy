@@ -18,14 +18,14 @@ static SimVec3 coefficients(SimVec3 force, SimQuat basis, SimVec3 cd,
                              std::abs(d.z) * cd.z) /
                             len);
 }
-static void gravity(ForceContext &c, std::vector<SimWrench> &w) {
+static void gravity(ForceContext &c, WrenchBuffer &w) {
   for (size_t i = 0; i < w.size(); ++i)
-    if (c.scene.bodies[i].motion == SIM_DYNAMIC)
-      w[i].force = w[i].force + c.scene.header.gravity *
-                                    (c.scene.bodies[i].dry_mass -
-                                     c.scene.bodies[i].mass);
+    if (c.scene.objects[i].motion == SIM_DYNAMIC)
+      w[i].force = w[i].force +
+                   c.scene.header.gravity *
+                       (c.scene.objects[i].dry_mass - c.scene.objects[i].mass);
 }
-static void hydro(ForceContext &c, std::vector<SimWrench> &w) {
+static void hydro(ForceContext &c, WrenchBuffer &w) {
   if (c.scene.header.native_hydrodynamics)
     return;
   if (c.tick % c.scene.header.hydro_period == 0) {
@@ -33,16 +33,17 @@ static void hydro(ForceContext &c, std::vector<SimWrench> &w) {
       f.force = {};
       f.torque = {};
     }
-    std::vector<double> minz(w.size(), INFINITY), maxz(w.size(), -INFINITY);
+    std::pmr::vector<double> minz(w.size(), INFINITY, c.scratch),
+        maxz(w.size(), -INFINITY, c.scratch);
     struct Wet {
       double lo = INFINITY, hi = -INFINITY;
     };
-    std::vector<Wet> wet(c.scene.hulls.size());
-    for (size_t p = 0; p < c.scene.hulls.size(); ++p) {
-      auto &h = c.scene.hulls[p];
+    std::array<Wet, Robot::max_hulls> wet{};
+    for (size_t p = 0; p < c.scene.robot.hulls().size(); ++p) {
+      auto &h = c.scene.robot.hulls()[p];
       auto transform = compose(c.bodies[h.body].pose, h.pose);
       for (uint32_t v = 0; v < h.vertex_count; ++v) {
-        double z = point(transform, c.scene.hull_vertices[h.vertex_begin + v]).z;
+        double z = point(transform, c.scene.positions(h)[v]).z;
         wet[p].lo = std::min(wet[p].lo, z);
         wet[p].hi = std::max(wet[p].hi, z);
       }
@@ -52,12 +53,12 @@ static void hydro(ForceContext &c, std::vector<SimWrench> &w) {
     for (size_t i = 0; i < w.size(); ++i)
       if (minz[i] > 0 && std::isfinite(minz[i]))
         add_force(c.fluid_cache[i],
-                  c.scene.header.gravity *
-                      (-c.scene.header.water_density * c.scene.bodies[i].volume),
-                  point(c.bodies[i].pose, c.scene.bodies[i].buoyancy_center),
+                  c.scene.header.gravity * (-c.scene.header.water_density *
+                                            c.scene.objects[i].volume),
+                  point(c.bodies[i].pose, c.scene.objects[i].buoyancy_center),
                   c.bodies[i].center_of_mass);
-    for (size_t p = 0; p < c.scene.hulls.size(); ++p) {
-      auto &h = c.scene.hulls[p];
+    for (size_t p = 0; p < c.scene.robot.hulls().size(); ++p) {
+      auto &h = c.scene.robot.hulls()[p];
       auto &b = c.bodies[h.body];
       if (maxz[h.body] <= 0)
         continue;
@@ -66,17 +67,16 @@ static void hydro(ForceContext &c, std::vector<SimWrench> &w) {
       if (minz[h.body] <= 0 && wet[p].hi > 0) {
         double fraction =
             wet[p].lo > 0 ? 1 : wet[p].hi / (wet[p].hi - wet[p].lo);
-        add_force(
-            out,
-            c.scene.header.gravity *
-                (-fraction * h.volume * c.scene.header.water_density),
-            point(transform, h.centroid), b.center_of_mass);
+        add_force(out,
+                  c.scene.header.gravity *
+                      (-fraction * h.volume * c.scene.header.water_density),
+                  point(transform, h.centroid), b.center_of_mass);
       }
-      SimVec3 fd{}, td{}, fs{}, ts{};
+      MathVector6d pressure_drag{}, skin_drag{};
       for (uint32_t t = 0; t < h.vertex_count; t += 3) {
-        auto a = point(transform, c.scene.hull_vertices[h.vertex_begin + t]),
-             b1 = point(transform, c.scene.hull_vertices[h.vertex_begin + t + 1]),
-             d = point(transform, c.scene.hull_vertices[h.vertex_begin + t + 2]);
+        auto a = point(transform, c.scene.positions(h)[t]),
+             b1 = point(transform, c.scene.positions(h)[t + 1]),
+             d = point(transform, c.scene.positions(h)[t + 2]);
         auto normal = cross(b1 - a, d - a);
         double twice = norm(normal);
         if (twice < 1e-6)
@@ -91,29 +91,33 @@ static void hydro(ForceContext &c, std::vector<SimWrench> &w) {
         double vn = dot(relative, normal);
         if (vn < -1e-12) {
           auto force = relative * (norm(relative) * -vn * .5 * twice);
-          fd = fd + force;
-          td = td + cross(arm, force);
+          pressure_drag.linear = pressure_drag.linear + force;
+          pressure_drag.angular = pressure_drag.angular + cross(arm, force);
         }
         auto tangent = relative - normal * vn;
         if (dot(tangent, tangent) > 1e-9) {
           auto force = tangent * (.5 * twice);
-          fs = fs + force;
-          ts = ts + cross(arm, force);
+          skin_drag.linear = skin_drag.linear + force;
+          skin_drag.angular = skin_drag.angular + cross(arm, force);
         }
       }
       double rho = c.scene.header.water_density;
       out.force =
           out.force +
-          coefficients(fd, multiply(b.pose.orientation, h.coefficient_frame),
-                       h.drag, .5 * rho) +
-          coefficients(fs, multiply(b.pose.orientation, h.coefficient_frame),
-                       h.skin, rho);
+          coefficients(pressure_drag.linear,
+                       multiply(b.pose.orientation, h.coefficient_frame), h.drag,
+                       .5 * rho) +
+          coefficients(skin_drag.linear,
+                       multiply(b.pose.orientation, h.coefficient_frame), h.skin,
+                       rho);
       out.torque =
           out.torque +
-          coefficients(td, multiply(b.pose.orientation, h.coefficient_frame),
-                       h.drag, .5 * rho) +
-          coefficients(ts, multiply(b.pose.orientation, h.coefficient_frame),
-                       h.skin, rho);
+          coefficients(pressure_drag.angular,
+                       multiply(b.pose.orientation, h.coefficient_frame), h.drag,
+                       .5 * rho) +
+          coefficients(skin_drag.angular,
+                       multiply(b.pose.orientation, h.coefficient_frame), h.skin,
+                       rho);
     }
   }
   for (size_t i = 0; i < w.size(); ++i) {
@@ -121,9 +125,9 @@ static void hydro(ForceContext &c, std::vector<SimWrench> &w) {
     w[i].torque = w[i].torque + c.fluid_cache[i].torque;
   }
 }
-static void thrusters(ForceContext &c, std::vector<SimWrench> &w) {
-  for (size_t i = 0; i < c.scene.thrusters.size(); ++i) {
-    auto &t = c.scene.thrusters[i];
+static void thrusters(ForceContext &c, WrenchBuffer &w) {
+  for (size_t i = 0; i < c.scene.robot.thrusters().size(); ++i) {
+    auto &t = c.scene.robot.thrusters()[i];
     auto &r = c.rotors[i];
     auto &b = c.bodies[t.body];
     auto &s = t.spec;
@@ -134,10 +138,11 @@ static void thrusters(ForceContext &c, std::vector<SimWrench> &w) {
     // 1 - dt*kp/inertia (about -0.90 for Hydrus at 360 Hz), which excites the
     // outer controller and becomes unstable at lower physics rates.
     double damping = r.omega > 0 ? std::abs(r.torque) : -std::abs(r.torque);
-    r.omega = std::clamp(
-        (s.inertia * r.omega + c.dt * (s.kp * target + s.ki * r.integral - damping)) /
-            (s.inertia + c.dt * s.kp),
-        -2 * max, 2 * max);
+    r.omega =
+        std::clamp((s.inertia * r.omega +
+                    c.dt * (s.kp * target + s.ki * r.integral - damping)) /
+                       (s.inertia + c.dt * s.kp),
+                   -2 * max, 2 * max);
     r.integral = std::clamp(r.integral + error * c.dt, -5.0, 5.0);
     auto p = point(b.pose, t.position),
          axis = rotate(b.pose.orientation, t.direction);
