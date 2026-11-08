@@ -12,7 +12,7 @@ pub fn write(w: *Io.Writer, value: anytype) !void {
             try w.writeAll(&buf);
         },
         .float => |info| {
-            const Bits = std.meta.Int(.unsigned, info.bits);
+            const Bits = @Int(.unsigned, info.bits);
             try write(w, @as(Bits, @bitCast(value)));
         },
         .bool => try write(w, @as(u8, @intFromBool(value))),
@@ -38,8 +38,12 @@ pub fn write(w: *Io.Writer, value: anytype) !void {
                 for (value) |item| try write(w, item);
             }
         },
-        .@"struct" => |info| inline for (info.fields) |field| {
-            try write(w, @field(value, field.name));
+        .@"struct" => |info| {
+            if (@hasField(@TypeOf(info), "fields")) {
+                inline for (info.fields) |field| try write(w, @field(value, field.name));
+            } else {
+                inline for (info.field_names) |name| try write(w, @field(value, name));
+            }
         },
         else => @compileError("unsupported serial type " ++ @typeName(T)),
     }

@@ -1,5 +1,5 @@
 #include "runtime_internal.hpp"
-#include <dlfcn.h>
+#include "dynlib.h"
 #include <numbers>
 using namespace core;
 
@@ -64,10 +64,10 @@ extern "C" {
 SimResult physics_backend_open(PhysicsBackend *b, const char *path, char *e, uint32_t n) {
     return guard(e, n, [&] {
         require(b && !b->library && path, "invalid backend loader arguments");
-        auto *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        auto *lib = dynlib_open(path);
         require(lib, "cannot load backend shared library", SIM_BACKEND_ERROR);
         try {
-            auto *symbol = dlsym(lib, "sim_backend_get_api");
+            auto *symbol = dynlib_symbol(lib, "sim_backend_get_api");
             require(symbol, "missing backend entrypoint", SIM_UNSUPPORTED);
             PhysicsBackendGetApi get;
             static_assert(sizeof(get) == sizeof(symbol));
@@ -84,7 +84,7 @@ SimResult physics_backend_open(PhysicsBackend *b, const char *path, char *e, uin
             b->api = api;
             b->library = lib;
         } catch (...) {
-            dlclose(lib);
+            dynlib_close(lib);
             throw;
         }
     });
@@ -93,7 +93,7 @@ SimResult physics_backend_open(PhysicsBackend *b, const char *path, char *e, uin
 void physics_backend_close(PhysicsBackend *b) {
     if (b) {
         if (b->library)
-            dlclose(b->library);
+            dynlib_close(b->library);
         *b = {};
     }
 }

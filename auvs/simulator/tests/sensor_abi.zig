@@ -1,8 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("simulation_types.h");
-    @cInclude("auv_simulator.h");
-});
+const c = @import("sim_c");
 extern fn simulator_sensor_abi_size() usize;
 extern fn simulator_sample_abi_size() usize;
 extern fn simulator_sensor_abi_alignment() usize;

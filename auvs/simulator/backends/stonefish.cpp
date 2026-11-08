@@ -1,6 +1,7 @@
 #include "wire.hpp"
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <filesystem>
 #include <signal.h>
 #include <spawn.h>

@@ -3,14 +3,12 @@
 const std = @import("std");
 const math = @import("math.zig");
 const Auv = @import("Auv.zig");
-pub const c = @cImport({
-    @cInclude("auv_simulator.h");
-    @cInclude("scene_presets.h");
-});
+const DynLib = @import("DynLib.zig").DynLib;
+pub const c = @import("sim_c");
 const SceneContext = @This();
 
 pub const Api = struct {
-    library: std.DynLib,
+    library: DynLib,
     backend: c.PhysicsBackend = std.mem.zeroes(c.PhysicsBackend),
     auv: Auv,
     robot: *const fn ([*c]const u8) callconv(.c) ?*const c.Robot,
@@ -26,7 +24,7 @@ pub const Api = struct {
     result: *const fn ([*c]c.AuvSimulatorResult, u32, [*c]u8, u32) callconv(.c) c.SimResult,
 
     pub fn load(path: []const u8) !Api {
-        var lib = try std.DynLib.open(path);
+        var lib = try DynLib.open(path);
         errdefer lib.close();
         return .{
             .library = lib,
@@ -50,7 +48,7 @@ pub const Api = struct {
             .result = try symbol(&lib, @FieldType(Api, "result"), "auv_simulator_read_result"),
         };
     }
-    fn symbol(lib: *std.DynLib, comptime T: type, comptime name: [:0]const u8) !T {
+    fn symbol(lib: *DynLib, comptime T: type, comptime name: [:0]const u8) !T {
         return lib.lookup(T, name) orelse error.MissingSimulatorApi;
     }
     pub fn pinBackend(api: *Api, path: [:0]const u8) !void {

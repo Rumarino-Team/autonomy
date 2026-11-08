@@ -1,8 +1,8 @@
 # Fixed vehicle assets
 
 These four saved Blender files accompany the compiled C ABI v5 templates in
-`../../robots.cpp`. They are copied unchanged from the previous simulator's
-`auvs/stonefish_sim/data/robots` directory. The manifest records their SHA-256
+`../../robots.cpp`. They are copied unchanged from the previous simulator.
+The manifest records their SHA-256
 digests and the previous double-precision configuration digests as
 `source_configuration_sha256`. Those source digests are provenance, not hashes
 of the new float representation.

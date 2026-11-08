@@ -1,3 +1,4 @@
+#if VIEWER_HAS_ZED
 #include <sl/Camera.hpp>
 #include <atomic>
 #include <cstring>
@@ -99,3 +100,17 @@ void video_close() {
   fresh = false;
   latest.clear();
 }
+#else
+#include <cstdio>
+
+bool video_open(const char *source, int *, int *) {
+  std::fprintf(stderr, "video unavailable without the ZED SDK: %s\n", source);
+  return false;
+}
+
+bool video_frame(unsigned char *) {
+  return false;
+}
+
+void video_close() {}
+#endif

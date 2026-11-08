@@ -1,11 +1,18 @@
 #define _POSIX_C_SOURCE 200809L
 #include "auv.h"
-#include <dlfcn.h>
+#include "../dynlib.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+__declspec(dllimport) int __stdcall SetEnvironmentVariableA(const char *name, const char *value);
+static int setenv(const char *name, const char *value, int overwrite) {
+    (void)overwrite;
+    return SetEnvironmentVariableA(name, value) ? 0 : -1;
+}
+#endif
 #define CHECK(x)                                                                                   \
     do {                                                                                           \
         if (!(x)) {                                                                                \
@@ -16,7 +23,7 @@
 
 int main(int argc, char **argv) {
     CHECK(argc == 3);
-    void *library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    void *library = dynlib_open(argv[1]);
     CHECK(library);
     AuvInitFunc *init;
     AuvDeinitFunc *destroy;
@@ -25,7 +32,7 @@ int main(int argc, char **argv) {
     bool (*status)(AuvSimulationStatus *);
 #define LOAD(field, name)                                                                          \
     do {                                                                                           \
-        void *symbol = dlsym(library, name);                                                       \
+        void *symbol = dynlib_symbol(library, name);                                               \
         CHECK(symbol);                                                                             \
         memcpy(&(field), &symbol, sizeof(field));                                                  \
     } while (0)
@@ -129,6 +136,6 @@ int main(int argc, char **argv) {
     const double elapsed = end.tv_sec - start.tv_sec + (end.tv_nsec - start.tv_nsec) * 1e-9;
     CHECK(elapsed >= .02);
     destroy();
-    dlclose(library);
+    dynlib_close(library);
     return 0;
 }

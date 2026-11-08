@@ -1,4 +1,5 @@
 const std = @import("std");
+const math = @import("math.zig");
 const MissionContext = @import("MissionContext.zig");
 const MissionArgs = @import("MissionArgs.zig");
 
@@ -9,7 +10,7 @@ pub fn execute(ctx: *MissionContext, args: MissionArgs) !void {
             else => return err,
         };
         // Make sure the target position starts with the initial odometry measurement.
-        ctx.target_position = ctx.frame.camera_pose.pos;
+        ctx.target_position = math.vec3(ctx.frame.camera_pose.pos);
 
         const mission_result = switch (args.mission_id) {
             .prequalify_coco => @import("missions/prequalify.zig").cocoMission(ctx),

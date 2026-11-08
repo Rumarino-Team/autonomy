@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,13 +66,30 @@ inline size_t bytes(size_t count, size_t width) {
 
 inline void *default_alloc(void *, size_t n, size_t alignment) {
     alignment = std::max(alignment, alignof(void *));
-    if (n > SIZE_MAX - (alignment - 1))
+    if (n > SIZE_MAX - alignment - sizeof(void *))
         return nullptr;
+#ifdef _WIN32
+    // MinGW's libc++ does not provide aligned_alloc. Keep the returned pointer
+    // freeable by remembering the original malloc block just before it.
+    void *raw = std::malloc(n + alignment + sizeof(void *));
+    if (!raw)
+        return nullptr;
+    auto aligned = reinterpret_cast<uintptr_t>(raw) + sizeof(void *);
+    aligned = (aligned + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
+    reinterpret_cast<void **>(aligned)[-1] = raw;
+    return reinterpret_cast<void *>(aligned);
+#else
     return std::aligned_alloc(alignment, (n + alignment - 1) & ~(alignment - 1));
+#endif
 }
 
 inline void default_free(void *, void *p, size_t, size_t) {
+#ifdef _WIN32
+    if (p)
+        std::free(reinterpret_cast<void **>(p)[-1]);
+#else
     std::free(p);
+#endif
 }
 
 inline SimAllocator allocator(SimAllocator a = {}) {

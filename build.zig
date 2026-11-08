@@ -86,6 +86,23 @@ pub fn build(b: *std.Build) !void {
     const runtime_options = b.addOptions();
     runtime_options.addOption(bool, "external_asan", b.option(bool, "external-asan", "Let externally preloaded ASan own signal handlers/stacks (does not instrument Zig)") orelse false);
     exe.root_module.addOptions("runtime_options", runtime_options);
+    const auv_c = b.addTranslateC(.{
+        .root_source_file = b.path("include/auv.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    auv_c.addIncludePath(b.path("include"));
+    const sim_c = b.addTranslateC(.{
+        .root_source_file = b.path("auvs/simulator/zig_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sim_c.addIncludePath(b.path("auvs/simulator"));
+    sim_c.addIncludePath(b.path("include"));
+    const auv_c_mod = auv_c.createModule();
+    const sim_c_mod = sim_c.createModule();
+    exe.root_module.addImport("auv_c", auv_c_mod);
+    exe.root_module.addImport("sim_c", sim_c_mod);
     exe.root_module.link_libc = true;
     exe.root_module.addIncludePath(b.path("include"));
     exe.root_module.addIncludePath(b.path("auvs/simulator"));
@@ -142,7 +159,10 @@ pub fn build(b: *std.Build) !void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
+    // Zig 0.17 forwards `zig build run -- …` through the run step. 0.16 exposed those strings as `b.args`.
+    if (@import("builtin").zig_version.minor >= 17) {
+        run_cmd.addPassthruArgs();
+    } else if (b.args) |args| {
         run_cmd.addArgs(args);
     }
 
@@ -179,6 +199,8 @@ pub fn build(b: *std.Build) !void {
     });
     fuzz_startup.root_module.addIncludePath(b.path("include"));
     fuzz_startup.root_module.addIncludePath(b.path("auvs/simulator"));
+    fuzz_startup.root_module.addImport("auv_c", auv_c_mod);
+    fuzz_startup.root_module.addImport("sim_c", sim_c_mod);
     fuzz_startup.root_module.addOptions("runtime_options", runtime_options);
     const startup_step = b.step("fuzz-startup-test", "Build the injectable fuzz worker startup fixture");
     const install_startup = b.addInstallArtifact(fuzz_startup, .{});
@@ -188,7 +210,9 @@ pub fn build(b: *std.Build) !void {
     const arduino_fqbn = b.option([]const u8, "arduino-fqbn", "Arduino board FQBN") orelse "arduino:avr:uno";
     const arduino_compile = b.addSystemCommand(&.{ arduino_cli, "compile", "--fqbn", arduino_fqbn });
     arduino_compile.addDirectoryArg(b.path("arduino/sketches/Proteus"));
-    _ = try arduino_compile.step.addDirectoryWatchInput(b.path("arduino/sketches/Proteus"));
+    if (@hasDecl(@TypeOf(arduino_compile.step), "addDirectoryWatchInput")) {
+        _ = try arduino_compile.step.addDirectoryWatchInput(b.path("arduino/sketches/Proteus"));
+    }
 
     const arduino_step = b.step("arduino", "Compile the Proteus Arduino sketch");
     arduino_step.dependOn(&arduino_compile.step);
@@ -211,7 +235,8 @@ pub fn build(b: *std.Build) !void {
         .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" },
     });
     const install_arduino_sender = b.addInstallArtifact(arduino_sender, .{});
-    b.getInstallStep().dependOn(&install_arduino_sender.step);
+    if (target.result.os.tag != .windows)
+        b.getInstallStep().dependOn(&install_arduino_sender.step);
 
     const arduino_sender_step = b.step("arduino-sender", "Build the Arduino sender executable");
     arduino_sender_step.dependOn(&install_arduino_sender.step);
@@ -253,8 +278,10 @@ pub fn build(b: *std.Build) !void {
     if (zed) {
         const lib_auv_proteus_hwd = b.addSystemCommand(&.{cxx});
         lib_auv_proteus_hwd.addArgs(&.{ "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror" });
-        lib_auv_proteus_hwd.addArg(if (optimize == .Debug) "-O0" else "-O2");
-        if (optimize == .Debug)
+        const opt_name = @tagName(optimize);
+        const is_debug = std.mem.eql(u8, opt_name, "Debug") or std.mem.eql(u8, opt_name, "debug");
+        lib_auv_proteus_hwd.addArg(if (is_debug) "-O0" else "-O2");
+        if (is_debug)
             lib_auv_proteus_hwd.addArg("-g");
 
         lib_auv_proteus_hwd.addArg("-o");
@@ -285,33 +312,33 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(&install_lib_auv_proteus_hwd.step);
     }
 
-    const cmake_configure = b.addSystemCommand(&.{
-        "cmake",
-        "-B",
-        "build",
-        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-    });
-    try cmake_configure.step.addWatchInput(b.path("CMakeLists.txt"));
-
     const cpu_count = std.Thread.getCpuCount() catch 1;
-    const cmake_build = b.addSystemCommand(&.{
-        "cmake",
-        "--build",
-        "build",
-        "--parallel",
-        b.fmt("{d}", .{cpu_count}),
-        "--target",
-    });
-    cmake_build.step.dependOn(&cmake_configure.step);
-
     const simulator = b.option(bool, "simulator", "Build/install the C simulator AUV bridge and MuJoCo") orelse false;
     if (simulator) {
-        if (target.result.os.tag != .linux or target.result.cpu.arch != b.graph.host.result.cpu.arch or target.result.abi != b.graph.host.result.abi)
-            return error.SimulatorRequiresNativeLinux;
+        const same_machine = target.result.os.tag == b.graph.host.result.os.tag and target.result.cpu.arch == b.graph.host.result.cpu.arch;
+        const supported = target.result.os.tag == .linux or target.result.os.tag == .windows;
+        if (!same_machine or !supported or (target.result.os.tag == .linux and target.result.abi != b.graph.host.result.abi))
+            return error.SimulatorRequiresNativeHost;
         const configure_simulator = b.addSystemCommand(&.{ "cmake", "-S", ".", "-B", "build/simulator", "-DAUTONOMY_BUILD_SIMULATOR=ON", "-DSIMULATOR_ENABLE_STONEFISH=OFF", "-DCMAKE_BUILD_TYPE=Release" });
+        if (target.result.os.tag == .windows) {
+            configure_simulator.addArgs(&.{
+                "-G",
+                "Ninja",
+                "-DCMAKE_C_COMPILER=tools/windows/zig-cc.exe",
+                "-DCMAKE_CXX_COMPILER=tools/windows/zig-cxx.exe",
+                "-DCMAKE_AR=tools/windows/zig-ar.exe",
+                "-DCMAKE_RANLIB=tools/windows/zig-ranlib.exe",
+                "-DCMAKE_C_COMPILER_AR=tools/windows/zig-ar.exe",
+                "-DCMAKE_CXX_COMPILER_AR=tools/windows/zig-ar.exe",
+                "-DCMAKE_C_COMPILER_RANLIB=tools/windows/zig-ranlib.exe",
+                "-DCMAKE_CXX_COMPILER_RANLIB=tools/windows/zig-ranlib.exe",
+                "-DCMAKE_RC_COMPILER=tools/windows/zig-rc.exe",
+            });
+        }
         const build_simulator = b.addSystemCommand(&.{ "cmake", "--build", "build/simulator", "--target", "simulator_all", "--parallel", b.fmt("{d}", .{@min(cpu_count, 8)}) });
         build_simulator.step.dependOn(&configure_simulator.step);
-        const install_simulator = b.addSystemCommand(&.{ "cmake", "--install", "build/simulator", "--prefix", b.getInstallPath(.prefix, ""), "--component", "simulator" });
+        const install_prefix = if (@hasDecl(@TypeOf(b.*), "getInstallPath")) b.getInstallPath(.prefix, "") else "zig-out";
+        const install_simulator = b.addSystemCommand(&.{ "cmake", "--install", "build/simulator", "--prefix", install_prefix, "--component", "simulator" });
         install_simulator.step.dependOn(&build_simulator.step);
         b.getInstallStep().dependOn(&install_simulator.step);
     }
@@ -325,26 +352,8 @@ pub fn build(b: *std.Build) !void {
     }) });
     sensor_abi.root_module.addIncludePath(b.path("include"));
     sensor_abi.root_module.addIncludePath(b.path("auvs/simulator"));
+    sensor_abi.root_module.addImport("sim_c", sim_c_mod);
     sensor_abi.root_module.addCSourceFile(.{ .file = b.path("auvs/simulator/tests/sensor_abi.c"), .flags = &.{ "-std=c11", "-pedantic-errors" } });
     const run_sensor_abi = b.addRunArtifact(sensor_abi);
     test_step.dependOn(&run_sensor_abi.step);
-
-    const stonefish = b.option(bool, "stonefish", "Build the Stonefish simulator plugin") orelse false;
-    if (stonefish) {
-        cmake_configure.addArg("-DSIMULATOR_ENABLE_STONEFISH=ON");
-        const cmake_target = "auv_stonefish_sim";
-        cmake_build.addArg(cmake_target);
-
-        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/stonefish_sim"));
-
-        const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
-        const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
-
-        const install_stonefish_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);
-        install_stonefish_sim.step.dependOn(&cmake_build.step);
-
-        b.getInstallStep().dependOn(&install_stonefish_sim.step);
-    }
-
-    cmake_build.step.dependOn(&cmake_configure.step);
 }

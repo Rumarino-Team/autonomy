@@ -1,8 +1,5 @@
 #pragma once
 #include "../internal.hpp"
-#include <cerrno>
-#include <sys/socket.h>
-#include <unistd.h>
 
 namespace core {
 inline constexpr char worker_step_magic[8] = {'A', 'S', 'I', 'M', 'S', 'T', '0', '2'},
@@ -39,18 +36,6 @@ struct WorkerRequest {
     Buffer<SimWrench> forces;
     Buffer<SimBodyState> states;
 };
-
-inline void transfer(int fd, void *buffer, size_t n, bool sending) {
-    auto *p = static_cast<char *>(buffer);
-    while (n) {
-        ssize_t k = sending ? ::send(fd, p, n, MSG_NOSIGNAL) : ::recv(fd, p, n, 0);
-        if (k < 0 && errno == EINTR)
-            continue;
-        require(k > 0, "worker disconnected or timed out", SIM_BACKEND_ERROR);
-        p += k;
-        n -= size_t(k);
-    }
-}
 
 void send_frame(int, const void *, size_t);
 void receive_frame(int, WireBuffer &);

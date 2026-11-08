@@ -1,9 +1,7 @@
 const std = @import("std");
 const math = @import("math.zig");
 
-pub const c = @cImport({
-    @cInclude("auv.h");
-});
+pub const c = @import("auv_c");
 
 pub const Object = extern struct {
     bbox: math.BoundingBox,
@@ -41,9 +39,9 @@ pub const Frame = extern struct {
     position_ok: AxisOk,
     /// Roll, pitch, yaw. A false axis means that attitude component is not usable.
     attitude_ok: AxisOk,
-    accel: math.Vector3f,
-    gyro: math.Vector3f,
-    imu_quat: math.Quaternionf,
+    accel: math.Vector3Storage,
+    gyro: math.Vector3Storage,
+    imu_quat: math.QuaternionStorage,
     objects2d: [max_objects]Object2d,
     objects2d_len: u8,
     image_width: u32,
@@ -82,12 +80,10 @@ fn assertSameLayout(comptime Zig: type, comptime C: type) void {
         if (c_info != .@"struct")
             @compileError("expected C struct for Zig vector");
 
-        const c_fields = c_info.@"struct".fields;
-
-        if (c_fields.len != 1)
+        if (structFieldCount(c_info.@"struct") != 1)
             @compileError("expected C struct with one field");
 
-        const CField = c_fields[0].type;
+        const CField = structFieldType(c_info.@"struct", 0);
         const c_field_info = @typeInfo(CField);
 
         if (c_field_info != .array)
@@ -102,14 +98,12 @@ fn assertSameLayout(comptime Zig: type, comptime C: type) void {
     if (zig_info != .@"struct" or c_info != .@"struct")
         return;
 
-    const zig_fields = zig_info.@"struct".fields;
-
-    if (zig_fields.len != c_info.@"struct".fields.len)
+    if (structFieldCount(zig_info.@"struct") != structFieldCount(c_info.@"struct"))
         @compileError("field count mismatch");
 
-    inline for (zig_fields) |field| {
-        const name = field.name;
-        const ZigField = field.type;
+    inline for (0..structFieldCount(zig_info.@"struct")) |i| {
+        const name = structFieldName(zig_info.@"struct", i);
+        const ZigField = structFieldType(zig_info.@"struct", i);
         const CField = @FieldType(C, name);
 
         if (@offsetOf(Zig, name) != @offsetOf(C, name))
@@ -122,18 +116,40 @@ fn assertSameLayout(comptime Zig: type, comptime C: type) void {
     }
 }
 
+fn structFieldCount(comptime info: anytype) usize {
+    if (@hasField(@TypeOf(info), "fields")) return info.fields.len;
+    return info.field_names.len;
+}
+
+fn structFieldName(comptime info: anytype, comptime index: usize) [:0]const u8 {
+    if (@hasField(@TypeOf(info), "fields")) return info.fields[index].name;
+    return info.field_names[index];
+}
+
+fn structFieldType(comptime info: anytype, comptime index: usize) type {
+    if (@hasField(@TypeOf(info), "fields")) return info.fields[index].type;
+    return info.field_types[index];
+}
+
 fn assertSameFunctionLayout(comptime Zig: type, comptime C: type) void {
     const zig_info = @typeInfo(Zig).@"fn";
     const c_info = @typeInfo(C).@"fn";
+    const zig_params = if (@hasField(@TypeOf(zig_info), "params")) zig_info.params.len else zig_info.param_types.len;
+    const c_params = if (@hasField(@TypeOf(c_info), "params")) c_info.params.len else c_info.param_types.len;
 
-    if (zig_info.params.len != c_info.params.len)
+    if (zig_params != c_params)
         @compileError("parameter count mismatch");
 
-    inline for (zig_info.params, c_info.params) |zp, cp| {
-        assertSameLayout(
-            zp.type orelse @compileError("missing Zig parameter type"),
-            cp.type orelse @compileError("missing C parameter type"),
-        );
+    inline for (0..zig_params) |i| {
+        const ZigParam = if (@hasField(@TypeOf(zig_info), "params"))
+            zig_info.params[i].type orelse @compileError("missing Zig parameter type")
+        else
+            zig_info.param_types[i] orelse @compileError("missing Zig parameter type");
+        const CParam = if (@hasField(@TypeOf(c_info), "params"))
+            c_info.params[i].type orelse @compileError("missing C parameter type")
+        else
+            c_info.param_types[i] orelse @compileError("missing C parameter type");
+        assertSameLayout(ZigParam, CParam);
     }
 
     assertSameLayout(

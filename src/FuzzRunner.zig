@@ -31,7 +31,9 @@ const Shared = struct {
 };
 fn env(allocator: std.mem.Allocator, name: [:0]const u8, fallback: []const u8) ![:0]const u8 {
     const value = std.c.getenv(name);
-    return allocator.dupeZ(u8, if (value) |v| std.mem.span(v) else fallback);
+    const text = if (value) |v| std.mem.span(v) else fallback;
+    if (@hasDecl(std.mem.Allocator, "dupeZ")) return allocator.dupeZ(u8, text);
+    return allocator.dupeSentinel(u8, text, 0);
 }
 fn number(allocator: std.mem.Allocator, name: [:0]const u8, fallback: []const u8) !u64 {
     return std.fmt.parseInt(u64, try env(allocator, name, fallback), 10);

@@ -1,15 +1,179 @@
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 #include "auv_frame.hpp"
 #include "auv_simulator.h"
 #include "scene_presets.h"
 #include "internal.hpp"
+#include "dynlib.h"
+#include <algorithm>
 #include <charconv>
 #include <chrono>
-#include <dlfcn.h>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <string>
 #include <thread>
+#include <vector>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
+#ifndef SIMULATOR_MUJOCO_BACKEND_FILENAME
+#define SIMULATOR_MUJOCO_BACKEND_FILENAME "libsimulator_backend_mujoco.so"
+#endif
 
 namespace {
 using namespace core;
+
+// AMJB version 2. NED maps to Blender with M = diag(-1, 1, -1).
+struct BlenderLink {
+#ifdef _WIN32
+    SOCKET socket = INVALID_SOCKET;
+#else
+    int socket = -1;
+#endif
+    uint16_t port = 9760;
+    double next_time = 0;
+    bool open_ok = false;
+    std::vector<unsigned char> packet;
+
+    void open() {
+        close();
+        const char *flag = std::getenv("AUTONOMY_SIM_BLENDER");
+        if (!flag || !*flag || flag[0] == '0')
+            return;
+        port = 9760;
+        if (const char *text = std::getenv("AUTONOMY_SIM_BLENDER_PORT")) {
+            unsigned value = 0;
+            auto [end, error] = std::from_chars(text, text + std::strlen(text), value);
+            if (error == std::errc() && !*end && value > 0 && value <= 65535)
+                port = static_cast<uint16_t>(value);
+        }
+#ifdef _WIN32
+        WSADATA data;
+        if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
+            return;
+        socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socket == INVALID_SOCKET) {
+            WSACleanup();
+            return;
+        }
+        u_long nonblocking = 1;
+        ioctlsocket(socket, FIONBIO, &nonblocking);
+#else
+        socket = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if (socket < 0)
+            return;
+#endif
+        open_ok = true;
+    }
+
+    void close() {
+        if (!open_ok &&
+#ifdef _WIN32
+            socket == INVALID_SOCKET
+#else
+            socket < 0
+#endif
+        )
+            return;
+#ifdef _WIN32
+        if (socket != INVALID_SOCKET)
+            closesocket(socket);
+        socket = INVALID_SOCKET;
+        if (open_ok)
+            WSACleanup();
+#else
+        if (socket >= 0)
+            ::close(socket);
+        socket = -1;
+#endif
+        open_ok = false;
+        next_time = 0;
+    }
+
+    void publish(
+        const SimulationRuntime *runtime, const Simulation &model, const Observation &observation,
+        uint64_t time_ns
+    ) {
+        if (!open_ok || !runtime)
+            return;
+        const double time = double(time_ns) * 1e-9;
+        if (time + 1e-9 < next_time)
+            return;
+        const SimBodyState *states = nullptr;
+        uint32_t count = 0;
+        if (simulation_runtime_states(runtime, &states, &count) != SIM_OK || !states)
+            return;
+        packet.clear();
+        uint16_t poses = 0;
+        auto pose = [&](uint32_t id, const char *name, MathPose value) {
+            if (!name || !name[0] || poses == 64)
+                return;
+            ++poses;
+            for (int i = 0; i < 4; ++i)
+                packet.push_back(static_cast<unsigned char>(id >> (8 * i)));
+            const auto offset = packet.size();
+            packet.resize(offset + 32, 0);
+            std::memcpy(packet.data() + offset, name, std::min<size_t>(std::strlen(name), 31));
+            auto number = [&](double x) {
+                uint64_t bits = 0;
+                std::memcpy(&bits, &x, sizeof bits);
+                for (int i = 0; i < 8; ++i)
+                    packet.push_back(static_cast<unsigned char>(bits >> (8 * i)));
+            };
+            number(-value.pos.buf[0]);
+            number(value.pos.buf[1]);
+            number(-value.pos.buf[2]);
+            number(value.quat.buf[3]);
+            number(-value.quat.buf[0]);
+            number(value.quat.buf[1]);
+            number(-value.quat.buf[2]);
+        };
+        for (uint32_t i = 0; i < model.object_count && i < count; ++i) {
+            const auto &body = model.object_table[i]->body;
+            if (body.motion_type != SIM_DYNAMIC && !body.tracked && !body.fuzz)
+                continue;
+            pose(body.id, body.name, states[i].pose);
+            if (std::strcmp(body.name, "gate opening") == 0)
+                pose(body.id, "gate", states[i].pose);
+        }
+        pose(UINT32_MAX, "camera", observation.camera);
+        std::vector<unsigned char> header;
+        header.insert(header.end(), {'A', 'M', 'J', 'B', 2, 0});
+        header.push_back(static_cast<unsigned char>(poses & 255));
+        header.push_back(static_cast<unsigned char>(poses >> 8));
+        uint64_t bits = 0;
+        std::memcpy(&bits, &time, sizeof bits);
+        for (int i = 0; i < 8; ++i)
+            header.push_back(static_cast<unsigned char>(bits >> (8 * i)));
+        header.insert(header.end(), packet.begin(), packet.end());
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#ifdef _WIN32
+        ::sendto(
+            socket, reinterpret_cast<const char *>(header.data()), static_cast<int>(header.size()), 0,
+            reinterpret_cast<sockaddr *>(&address), sizeof address
+        );
+#else
+        ::sendto(
+            socket, header.data(), header.size(), MSG_DONTWAIT, reinterpret_cast<sockaddr *>(&address),
+            sizeof address
+        );
+#endif
+        next_time = time + 1.0 / 30.0;
+    }
+};
 
 struct Context {
     Simulation owned_model{};
@@ -22,8 +186,10 @@ struct Context {
     double min_depth = 0, max_depth = 0;
     bool realtime = false, print_summary = true;
     std::chrono::steady_clock::time_point started;
+    BlenderLink link;
 
     void release() {
+        link.close();
         simulation_runtime_destroy(runtime);
         runtime = nullptr;
         physics_backend_close(&backend);
@@ -58,6 +224,88 @@ void error(const char *message) {
     ctx.status.tick = simulation_runtime_tick(ctx.runtime);
     std::snprintf(ctx.status.message, sizeof ctx.status.message, "%s", message);
     std::fill_n(ctx.commands, 8, 0.);
+}
+
+bool ends_with_ci(const std::string &value, const char *suffix) {
+    const size_t width = std::strlen(suffix);
+    if (value.size() < width)
+        return false;
+    for (size_t i = 0; i < width; ++i) {
+        char left = value[value.size() - width + i];
+        char right = suffix[i];
+        if (left >= 'A' && left <= 'Z')
+            left = char(left - 'A' + 'a');
+        if (right >= 'A' && right <= 'Z')
+            right = char(right - 'A' + 'a');
+        if (left != right)
+            return false;
+    }
+    return true;
+}
+
+std::filesystem::path snapshot_script(const std::filesystem::path &start) {
+    auto dir = start;
+    for (int i = 0; i < 8; ++i) {
+        auto candidate = dir / "tools" / "blender" / "export_snapshot.py";
+        if (std::filesystem::is_regular_file(candidate))
+            return candidate;
+        auto parent = dir.parent_path();
+        if (parent == dir)
+            break;
+        dir = parent;
+    }
+    return {};
+}
+
+std::filesystem::path blender_executable() {
+    if (const char *configured = std::getenv("AUTONOMY_BLENDER"))
+        if (*configured && std::filesystem::is_regular_file(configured))
+            return configured;
+#ifdef _WIN32
+    const char *installed = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe";
+    if (std::filesystem::is_regular_file(installed))
+        return installed;
+#endif
+    return "blender";
+}
+
+std::string quote_arg(const std::filesystem::path &path) {
+    std::string quoted = "\"";
+    for (char c : path.string()) {
+        if (c == '"')
+            quoted += "\\\"";
+        else
+            quoted.push_back(c);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+
+struct TemporarySnapshot {
+    std::filesystem::path path;
+
+    ~TemporarySnapshot() {
+        if (!path.empty())
+            std::filesystem::remove(path);
+    }
+};
+
+std::filesystem::path export_blend(const std::filesystem::path &blend, const std::filesystem::path &module_dir) {
+    require(std::filesystem::is_regular_file(blend), "cannot read blend file");
+    auto script = snapshot_script(module_dir);
+    require(!script.empty(), "cannot find blend snapshot exporter");
+    auto output = std::filesystem::temp_directory_path() /
+                  ("autonomy-scene-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                   ".json");
+    std::string command = quote_arg(blender_executable()) + " --background --factory-startup --disable-autoexec " +
+                          quote_arg(std::filesystem::absolute(blend)) + " --python " + quote_arg(script) + " -- " +
+                          quote_arg(output);
+#ifdef _WIN32
+    // cmd.exe /c drops the first and last quote when a line contains more than one pair.
+    command = "\"" + command + "\"";
+#endif
+    require(std::system(command.c_str()) == 0 && std::filesystem::is_regular_file(output), "blend export failed");
+    return output;
 }
 
 uint64_t timestamp() {
@@ -112,28 +360,44 @@ SIM_API void auv_init(void) {
     auto result = guard(message, sizeof message, [&] {
         const auto *robot = sim_robot_find(environment("AUTONOMY_SIM_ROBOT", "hydrus"));
         require(robot, "unknown robot preset");
-        check(
-            simulation_scene_create(
-                &ctx.owned_model,
-                environment("AUTONOMY_SIM_SCENE", "robosub_course"),
-                robot,
-                message,
-                sizeof message
-            ),
-            message
-        );
+        const std::string scene = environment("AUTONOMY_SIM_SCENE", "robosub_course");
+        TemporarySnapshot snapshot;
+        if (ends_with_ci(scene, ".blend") || ends_with_ci(scene, ".json")) {
+            std::filesystem::path source = scene;
+            if (ends_with_ci(scene, ".blend")) {
+                char module_path[32768];
+                require(
+                    dynlib_module_path(reinterpret_cast<void *>(&auv_init), module_path, sizeof module_path),
+                    "cannot locate simulator plugin"
+                );
+                snapshot.path = export_blend(source, std::filesystem::path(module_path).parent_path());
+                source = snapshot.path;
+            }
+            check(
+                simulation_scene_load(
+                    &ctx.owned_model, source.string().c_str(), robot, message, sizeof message
+                ),
+                message
+            );
+        } else {
+            check(
+                simulation_scene_create(&ctx.owned_model, scene.c_str(), robot, message, sizeof message),
+                message
+            );
+        }
         ctx.model = &ctx.owned_model;
-        Dl_info info{};
+        char module_path[32768];
         require(
-            dladdr(reinterpret_cast<void *>(&auv_init), &info) && info.dli_fname,
+            dynlib_module_path(reinterpret_cast<void *>(&auv_init), module_path, sizeof module_path),
             "cannot locate simulator plugin"
         );
-        auto path = std::filesystem::absolute(info.dli_fname).parent_path() /
-                    "libsimulator_backend_mujoco.so";
+        auto path = std::filesystem::absolute(module_path).parent_path() /
+                    SIMULATOR_MUJOCO_BACKEND_FILENAME;
+        const auto backend_path = path.string();
         check(
             physics_backend_open(
                 &ctx.backend,
-                environment("AUTONOMY_SIM_BACKEND", path.c_str()),
+                environment("AUTONOMY_SIM_BACKEND", backend_path.c_str()),
                 message,
                 sizeof message
             ),
@@ -154,6 +418,7 @@ SIM_API void auv_init(void) {
         );
         ctx.min_depth = ctx.max_depth = ctx.model->robot.object.body.initial_pose.pos.buf[2];
         ctx.started = std::chrono::steady_clock::now();
+        ctx.link.open();
     });
     if (result != SIM_OK) {
         error(message);
@@ -216,6 +481,7 @@ SIM_API void auv_yield_until_next_frame(AuvFrame *frame) {
         Observation o{};
         check(simulation_runtime_observe(ctx.runtime, &o, message, sizeof message), message);
         fill_auv_frame(frame, o, timestamp());
+        ctx.link.publish(ctx.runtime, *ctx.model, o, timestamp());
     });
     if (result != SIM_OK) {
         error(message);
@@ -266,6 +532,7 @@ SIM_API SimResult auv_simulator_init_scene(
         );
         ctx.min_depth = ctx.max_depth = model->robot.object.body.initial_pose.pos.buf[2];
         ctx.started = std::chrono::steady_clock::now();
+        ctx.link.open();
     });
     if (result != SIM_OK) {
         error(message ? message : "scene initialization failed");

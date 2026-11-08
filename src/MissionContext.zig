@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const MissionArgs = @import("MissionArgs.zig");
 const math = @import("math.zig");
@@ -28,6 +29,22 @@ var stop_requested = std.atomic.Value(bool).init(false);
 fn requestStop(_: std.posix.SIG) callconv(.c) void {
     stop_requested.store(true, .monotonic);
 }
+
+const ConsoleControl = if (builtin.os.tag == .windows) struct {
+    const windows = std.os.windows;
+    extern "kernel32" fn SetConsoleCtrlHandler(
+        handler: ?*const fn (ctrl: windows.DWORD) callconv(.winapi) windows.BOOL,
+        add: windows.BOOL,
+    ) callconv(.winapi) windows.BOOL;
+
+    fn handler(ctrl: windows.DWORD) callconv(.winapi) windows.BOOL {
+        if (ctrl == 0 or ctrl == 1) {
+            stop_requested.store(true, .monotonic);
+            return .TRUE;
+        }
+        return .FALSE;
+    }
+} else struct {};
 
 io: Io,
 batch: bool = false,
@@ -75,6 +92,10 @@ config_watcher: FileWatcher,
 
 pub fn installSignalHandlers() void {
     stop_requested.store(false, .monotonic);
+    if (builtin.os.tag == .windows) {
+        _ = ConsoleControl.SetConsoleCtrlHandler(&ConsoleControl.handler, .TRUE);
+        return;
+    }
     const stop: std.posix.Sigaction = .{ .handler = .{ .handler = requestStop }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.INT, &stop, null);
     std.posix.sigaction(.TERM, &stop, null);
@@ -128,8 +149,7 @@ pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext
     var auv_loader: AuvLoader = try .init(arena, args.auv_dynlib_path);
     errdefer auv_loader.deinit();
     const auv = auv_loader.load(io) catch |err| {
-        const dl_err = std.mem.span(std.c.dlerror()) orelse "NO_DL_ERROR";
-        std.log.err("dlerror: `{s}`", .{dl_err});
+        std.log.err("dlerror: `{s}`", .{@import("DynLib.zig").loadError()});
         std.log.err("failed to load auv: {s}", .{auv_loader.auv_path});
         return err;
     };
@@ -271,12 +291,12 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }) {
             if (ctx.config_loader.load(ctx.io)) |config| {
                 if (!ctx.batch and print_stuff) {
-                    std.log.debug("succesfully reloaded config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                    std.log.debug("succesfully reloaded config: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
                     std.log.debug("{any}", .{config});
                 }
                 ctx.config = config;
             } else |err| {
-                std.log.err("failed to reload config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                std.log.err("failed to reload config: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
                 std.log.err("{s}", .{@errorName(err)});
                 std.log.info("kept previous config", .{});
             }
@@ -289,7 +309,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
             ctx.auv.deinit();
             if (ctx.auv_loader.load(ctx.io)) |auv| {
                 if (!ctx.batch and print_stuff) {
-                    std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                    std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
                     std.log.debug("{any}", .{auv});
                 }
                 ctx.auv = auv;
@@ -299,7 +319,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
                 }
                 return error.RestartMission;
             } else |err| {
-                std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
+                std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
                 std.log.err("{s}", .{@errorName(err)});
                 return err;
             }
@@ -387,7 +407,7 @@ fn lookAtHeading(heading: f32) math.Vector3f {
 /// Point the camera at `target` from the current pose, clamped by `rotation_limit`.
 /// A coincident target keeps the previous look.
 fn setLookAtTarget(ctx: *MissionContext, target: math.Vector3f) !void {
-    const offset = target - ctx.frame.camera_pose.pos;
+    const offset = target - math.vec3(ctx.frame.camera_pose.pos);
     if (math.length3f(offset) <= 1e-6) return;
     const toward = math.normalize3f(offset);
     ctx.target_orientation = try bc.lookWithinLimits(ctx.config.camera_forward, toward, bc.identity, ctx.config.rotation_limit);
@@ -403,17 +423,17 @@ fn slew3(current: math.Vector3f, desired: math.Vector3f, max_step: f32) math.Vec
 
 /// World-frame translation toward `target`, with disallowed or invalid axes removed before the body rotation.
 fn bodyTranslationError(ctx: *const MissionContext, target: math.Vector3f, use_axis: Auv.AxisOk) math.Vector3f {
-    var world = bc.positionError(ctx.frame.camera_pose.pos, target) catch return .{ 0, 0, 0 };
+    var world = bc.positionError(math.vec3(ctx.frame.camera_pose.pos), target) catch return .{ 0, 0, 0 };
     const ok = ctx.frame.position_ok;
     if (!ok.x or !use_axis.x) world[0] = 0;
     if (!ok.y or !use_axis.y) world[1] = 0;
     if (!ok.z or !use_axis.z) world[2] = 0;
-    const body_q = bc.normalizedQuat(ctx.frame.camera_pose.quat) catch return .{ 0, 0, 0 };
+    const body_q = bc.normalizedQuat(math.vec4(ctx.frame.camera_pose.quat)) catch return .{ 0, 0, 0 };
     return math.quaternionRotate(math.quaternionConjugate(body_q), world);
 }
 
 fn attitudeToward(ctx: *const MissionContext, orientation: math.Quaternionf) ?math.Vector3f {
-    const current = bc.normalizedQuat(ctx.frame.camera_pose.quat) catch return null;
+    const current = bc.normalizedQuat(math.vec4(ctx.frame.camera_pose.quat)) catch return null;
     const desired = bc.normalizedQuat(orientation) catch return null;
     return bc.attitudeError(current, desired) catch null;
 }
@@ -471,7 +491,7 @@ fn visualBodyError(ctx: *MissionContext) ?[6]f32 {
         }
         return null;
     };
-    const current = bc.normalizedQuat(ctx.frame.camera_pose.quat) catch unreachable;
+    const current = bc.normalizedQuat(math.vec4(ctx.frame.camera_pose.quat)) catch unreachable;
     const yaw = math.quaternionToEuler(current)[2] + mapped[5];
     const look_q = bc.lookWithinLimits(
         ctx.config.camera_forward,
@@ -530,7 +550,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     };
 
     const thrust_direction = bc.ThrustDirections.fromTamLinearForces(ctx.config.tam) catch unreachable;
-    const current = ctx.frame.camera_pose.quat;
+    const current = math.vec4(ctx.frame.camera_pose.quat);
     const error_body: math.Vector3f = .{ body_error[0], body_error[1], body_error[2] };
     const rot: math.Vector3f = .{ body_error[3], body_error[4], body_error[5] };
     const delta = quaternionFromRotationVector(rot);
@@ -541,7 +561,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     if (dt) |t| {
         if (t > 0) {
             if (ctx.previous_position) |position| {
-                var velocity_world = (ctx.frame.camera_pose.pos - position) / @as(math.Vector3f, @splat(t));
+                var velocity_world = (math.vec3(ctx.frame.camera_pose.pos) - position) / @as(math.Vector3f, @splat(t));
                 if (!ctx.frame.position_ok.x) velocity_world[0] = 0;
                 if (!ctx.frame.position_ok.y) velocity_world[1] = 0;
                 if (!ctx.frame.position_ok.z) velocity_world[2] = 0;
@@ -549,7 +569,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
             }
         }
     }
-    ctx.previous_position = if (ctx.frame.position_ok.x and ctx.frame.position_ok.y and ctx.frame.position_ok.z) ctx.frame.camera_pose.pos else null;
+    ctx.previous_position = if (ctx.frame.position_ok.x and ctx.frame.position_ok.y and ctx.frame.position_ok.z) math.vec3(ctx.frame.camera_pose.pos) else null;
     var desired_tilt: math.Vector3f = .{ 0, 0, 0 };
     var force_error: math.Vector3f = .{ 0, 0, 0 };
     const moments = bc.ThrustDirections.fromTamMoments(ctx.config.tam) catch unreachable;
@@ -597,7 +617,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     inline for (0..3) |i| {
         const lane = i + 3;
         if (attitude_axis[i]) {
-            rotation[i] = ctx.pid[lane].step(attitude_error[i], if (odom.derivative_on_measurement) ctx.frame.gyro[i] else null, dt, odom.kp[lane], odom.ki[lane], odom.kd[lane], odom.integral_limit[lane], odom.output_limit[lane]);
+            rotation[i] = ctx.pid[lane].step(attitude_error[i], if (odom.derivative_on_measurement) ctx.frame.gyro.buf[i] else null, dt, odom.kp[lane], odom.ki[lane], odom.kd[lane], odom.integral_limit[lane], odom.output_limit[lane]);
         } else {
             ctx.pid[lane] = .{};
         }
@@ -666,21 +686,21 @@ const look_done: f32 = 0.1;
 fn reached(ctx: *const MissionContext, target: math.Vector3f) bool {
     const ok = ctx.frame.position_ok;
     if (!ok.x or !ok.y or !ok.z) return false;
-    return math.length3f(target - ctx.frame.camera_pose.pos) <= ctx.goal_dist_threshold;
+    return math.length3f(target - math.vec3(ctx.frame.camera_pose.pos)) <= ctx.goal_dist_threshold;
 }
 
 /// Horizontal unit direction from the vehicle toward the object. World +Y when they overlap.
 fn approachDirection(ctx: *const MissionContext, object: *const Auv.Object) math.Vector2f {
-    const delta = math.xy(object.bbox.pose.pos) - math.xy(ctx.frame.camera_pose.pos);
+    const delta = math.xy(math.vec3(object.bbox.pose.pos)) - math.xy(math.vec3(ctx.frame.camera_pose.pos));
     if (math.length2f(delta) <= 1e-4) return .{ 0, 1 };
     return math.normalize2f(delta);
 }
 
 /// Half the oriented box, measured along a horizontal unit direction.
 fn horizontalHalfExtent(object: *const Auv.Object, direction: math.Vector2f) f32 {
-    const rot = math.normalize4f(object.bbox.pose.quat);
+    const rot = math.normalize4f(math.vec4(object.bbox.pose.quat));
     const world_dir: math.Vector3f = .{ direction[0], direction[1], 0 };
-    const size = object.bbox.size;
+    const size = math.vec3(object.bbox.size);
     const axes = [3]math.Vector3f{
         math.quaternionRotate(rot, .{ 1, 0, 0 }),
         math.quaternionRotate(rot, .{ 0, 1, 0 }),
@@ -695,7 +715,7 @@ fn horizontalHalfExtent(object: *const Auv.Object, direction: math.Vector2f) f32
 fn standoffAlong(object: *const Auv.Object, direction: math.Vector2f, sign: f32) math.Vector3f {
     const reach = horizontalHalfExtent(object, direction) + object_clearance;
     const offset = direction * @as(math.Vector2f, @splat(sign * reach));
-    const center = object.bbox.pose.pos;
+    const center = math.vec3(object.bbox.pose.pos);
     return .{ center[0] + offset[0], center[1] + offset[1], center[2] };
 }
 
@@ -706,12 +726,12 @@ fn clearQueue(ctx: *MissionContext) void {
 
 /// Face `object` and hold position. Returns when the attitude error is small.
 pub fn yieldLookAt(ctx: *MissionContext, object: *const Auv.Object) !void {
-    ctx.target_position = ctx.frame.camera_pose.pos;
+    ctx.target_position = math.vec3(ctx.frame.camera_pose.pos);
     ctx.use_position = true;
     ctx.use_orientation = true;
     ctx.translation = null;
     while (true) {
-        try ctx.setLookAtTarget(object.bbox.pose.pos);
+        try ctx.setLookAtTarget(math.vec3(object.bbox.pose.pos));
         try ctx.yieldUntilNextFrameAndUpdate();
         const err = attitudeToward(ctx, ctx.target_orientation) orelse continue;
         if (math.length3f(err) <= look_done) return;
@@ -768,24 +788,24 @@ const circle_corners: [4]math.Vector2f = .{
 };
 
 fn circleCorner(object: *const Auv.Object, index: usize, depth: f32) math.Vector3f {
-    const local_2d = circle_corners[index] * math.xy(object.bbox.size);
-    const rotated = math.xy(math.quaternionRotate(math.normalize4f(object.bbox.pose.quat), .{ local_2d[0], local_2d[1], 0 }));
+    const local_2d = circle_corners[index] * math.xy(math.vec3(object.bbox.size));
+    const rotated = math.xy(math.quaternionRotate(math.normalize4f(math.vec4(object.bbox.pose.quat)), .{ local_2d[0], local_2d[1], 0 }));
     const outward = if (math.length2f(rotated) <= 1e-4) math.Vector2f{ 1, 0 } else math.normalize2f(rotated);
-    const pos = math.xy(object.bbox.pose.pos) + rotated + outward * @as(math.Vector2f, @splat(object_clearance));
+    const pos = math.xy(math.vec3(object.bbox.pose.pos)) + rotated + outward * @as(math.Vector2f, @splat(object_clearance));
     return .{ pos[0], pos[1], depth };
 }
 
 fn yieldPlaceLookingAt(ctx: *MissionContext, place: math.Vector3f, object: *const Auv.Object) !void {
     ctx.clearQueue();
-    try ctx.queue.pushBackBounded(.{ .position = place, .look_at = object.bbox.pose.pos });
+    try ctx.queue.pushBackBounded(.{ .position = place, .look_at = math.vec3(object.bbox.pose.pos) });
     try ctx.yieldQueue();
 }
 
 /// Visit the four outside corners of `object`, then return to the start.
 pub fn yieldCircle(ctx: *MissionContext, object: *const Auv.Object) !void {
     ctx.clearQueue();
-    const start = ctx.frame.camera_pose.pos;
-    const look_at = object.bbox.pose.pos;
+    const start = math.vec3(ctx.frame.camera_pose.pos);
+    const look_at = math.vec3(object.bbox.pose.pos);
     var corners: [circle_corners.len]math.Vector3f = undefined;
     for (0..circle_corners.len) |i| corners[i] = circleCorner(object, i, start[2]);
 

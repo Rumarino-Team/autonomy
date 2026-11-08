@@ -1,5 +1,11 @@
 #include "wire.hpp"
 #include <cstring>
+#ifndef _WIN32
+#include <cerrno>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace core {
 namespace {
@@ -133,6 +139,19 @@ struct Decode {
 constexpr size_t state_bytes = 132, force_bytes = 52, contact_bytes = 64;
 } // namespace
 
+#ifndef _WIN32
+void transfer(int fd, void *buffer, size_t n, bool sending) {
+    auto *p = static_cast<char *>(buffer);
+    while (n) {
+        ssize_t k = sending ? ::send(fd, p, n, MSG_NOSIGNAL) : ::recv(fd, p, n, 0);
+        if (k < 0 && errno == EINTR)
+            continue;
+        require(k > 0, "worker disconnected or timed out", SIM_BACKEND_ERROR);
+        p += k;
+        n -= size_t(k);
+    }
+}
+
 void send_frame(int fd, const void *data, size_t n) {
     require(n && n <= SIM_MAX_SCENE_BYTES, "worker message too large");
     uint32_t size = n;
@@ -152,6 +171,7 @@ void receive_frame(int fd, WireBuffer &out) {
     out.resize(n);
     transfer(fd, out.data(), n, false);
 }
+#endif
 
 void worker_step(WireBuffer &out, const SimWrench *forces, uint32_t count) {
     require(

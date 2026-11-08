@@ -1,12 +1,13 @@
 const std = @import("std");
 const Io = std.Io;
 const Auv = @import("Auv.zig");
+const DynLib = @import("DynLib.zig").DynLib;
 
 const AuvLoader = @This();
 
 auv_path: []const u8,
 auv_tmp_path: []const u8,
-prev_dynlib: ?std.DynLib,
+prev_dynlib: ?DynLib,
 use_tmp: bool,
 
 pub fn init(arena: std.mem.Allocator, auv_path: []const u8) !AuvLoader {
@@ -34,7 +35,7 @@ pub fn load(loader: *AuvLoader, io: Io) !Auv {
         try cwd.hardLink(loader.auv_path, cwd, loader.auv_tmp_path, io, .{});
     }
 
-    var dynlib = try std.DynLib.open(path);
+    var dynlib = try DynLib.open(path);
     errdefer dynlib.close();
 
     const auv: Auv = .{

@@ -50,14 +50,9 @@ It listens for binary telemetry on UDP 5600. The ZED H264 stream at `127.0.0.1:5
 
 Hold keys to command a body translation direction: W/S surge, A/D sway, R/F heave. Left/Right yaws about world +Z; Up/Down pitches about body X; I/K rolls about body +Y. Each packet is 28 bytes: three little-endian floats of body translation, then a world orientation quaternion `x, y, z, w`. Identity is level with the camera along body +Y. Releasing the translation keys leaves translation uncommanded. The orientation keys still apply.
 
-## Build & Run: libauv_stonefish_sim
+## Stonefish
 
-```sh
-zig build -Dstonefish run -- \
-    ./zig-out/lib/libauv_stonefish_sim.so  \
-    prequalify_robosub \
-    ./auvs/stonefish_sim/auv.json
-```
+Stonefish is a backend inside the data-oriented simulator, not a separate AUV plugin. Enable it with `-DSIMULATOR_ENABLE_STONEFISH=ON` when configuring `auvs/simulator`. The pool scene is `auvs/simulator/data/pool_scene.blend`.
 
 ## Build & Run: Proteus hardware (ZED 2i + Arduino)
 

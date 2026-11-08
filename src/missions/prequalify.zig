@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const math = @import("../math.zig");
 const MissionContext = @import("../MissionContext.zig");
 const MissionArgs = @import("../MissionArgs.zig");
@@ -21,23 +22,22 @@ pub fn teleopMission(ctx: *MissionContext) !void {
         else => return err,
     };
     defer sock.close(ctx.io);
+    // Zig 0.17's Windows Io.operateTimeout cannot receive on a socket
+    // (ConcurrencyUnavailable). Poll the AFD handle directly instead.
+    if (builtin.os.tag == .windows) try setAfdNonblocking(sock.handle);
 
     var recv_buf: [256]u8 = undefined;
-    const timeout: std.Io.Timeout = .{ .duration = .{
-        .clock = .awake,
-        .raw = .fromNanoseconds(0),
-    } };
 
     var translation: math.Vector3f = .{ 0, 0, 0 };
     var orientation: math.Quaternionf = .{ 0, 0, 0, 1 };
 
     while (true) {
-        if (sock.receiveTimeout(ctx.io, &recv_buf, timeout)) |msg| {
+        if (try pollTeleop(&sock, ctx.io, &recv_buf)) |data| {
             const packet_len = 7 * @sizeOf(f32);
-            if (msg.data.len != packet_len) continue;
+            if (data.len != packet_len) continue;
             var values: [7]f32 = undefined;
             for (0..values.len) |i| {
-                const bits = std.mem.readInt(u32, msg.data[i * 4 ..][0..4], .little);
+                const bits = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
                 values[i] = @bitCast(bits);
             }
             const next_translation: math.Vector3f = .{ values[0], values[1], values[2] };
@@ -49,9 +49,6 @@ pub fn teleopMission(ctx: *MissionContext) !void {
             if (!std.math.isFinite(n2) or n2 <= 1e-12) continue;
             translation = next_translation;
             orientation = math.normalize4f(next_orientation);
-        } else |err| switch (err) {
-            error.Timeout => {},
-            else => return err,
         }
 
         ctx.use_position = false;
@@ -63,6 +60,81 @@ pub fn teleopMission(ctx: *MissionContext) !void {
             ctx.translation = translation;
         }
         try ctx.yieldUntilNextFrameAndUpdate();
+    }
+}
+
+fn pollTeleop(sock: *const net.Socket, io: std.Io, buffer: []u8) !?[]u8 {
+    if (builtin.os.tag == .windows) return pollDatagramWindows(sock.handle, buffer);
+    const timeout: std.Io.Timeout = .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromNanoseconds(0),
+    } };
+    if (sock.receiveTimeout(io, buffer, timeout)) |msg| {
+        return msg.data;
+    } else |err| switch (err) {
+        error.Timeout => return null,
+        else => return err,
+    }
+}
+
+fn setAfdNonblocking(handle: net.Socket.Handle) !void {
+    const windows = std.os.windows;
+    var info: windows.AFD.INFORMATION = .{
+        .InformationType = .NONBLOCKING_MODE,
+        .Information = .{ .Boolean = .TRUE },
+    };
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    switch (windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        null,
+        null,
+        null,
+        &iosb,
+        windows.IOCTL.AFD.SET_INFORMATION,
+        &info,
+        @sizeOf(@TypeOf(info)),
+        null,
+        0,
+    )) {
+        .SUCCESS => {},
+        else => |status| return windows.unexpectedStatus(status),
+    }
+}
+
+fn pollDatagramWindows(handle: net.Socket.Handle, buffer: []u8) !?[]u8 {
+    const windows = std.os.windows;
+    var addr_storage: [128]u8 align(8) = undefined;
+    var addr_len: windows.ULONG = addr_storage.len;
+    var iov: [1]windows.AFD.WSABUF(.@"var") = .{.{
+        .len = @intCast(buffer.len),
+        .buf = buffer.ptr,
+    }};
+    var request = windows.AFD.RECV_DATAGRAM_INFO{
+        .BufferArray = &iov,
+        .BufferCount = 1,
+        .AfdFlags = .{},
+        .TdiFlags = .{ .NORMAL = true },
+        .Address = &addr_storage,
+        .AddressLength = &addr_len,
+    };
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    switch (windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        null,
+        null,
+        null,
+        &iosb,
+        windows.IOCTL.AFD.RECEIVE_DATAGRAM,
+        &request,
+        @sizeOf(@TypeOf(request)),
+        null,
+        0,
+    )) {
+        .SUCCESS => return buffer[0..iosb.Information],
+        // No datagram is queued. Overlapped AFD flags must stay off, or this
+        // returns STATUS_PENDING instead of completing inline.
+        .DEVICE_NOT_READY, .CANT_WAIT => return null,
+        else => |status| return windows.unexpectedStatus(status),
     }
 }
 

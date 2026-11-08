@@ -2,6 +2,7 @@
 #include "scene_presets.h"
 #include <atomic>
 #include <cassert>
+#include <cstdint>
 #include <cstdlib>
 #include <thread>
 #include <vector>
@@ -16,9 +17,20 @@ struct Allocations {
         auto &a = *static_cast<Allocations *>(u);
         if (a.fail)
             return nullptr;
-        void *p = nullptr;
-        if (posix_memalign(&p, alignment < sizeof(void *) ? sizeof(void *) : alignment, size))
+        const size_t align = alignment < sizeof(void *) ? sizeof(void *) : alignment;
+#ifdef _WIN32
+        void *raw = malloc(size + align + sizeof(void *));
+        if (!raw)
             return nullptr;
+        auto aligned = reinterpret_cast<uintptr_t>(raw) + sizeof(void *);
+        aligned = (aligned + align - 1) & ~(static_cast<uintptr_t>(align) - 1);
+        reinterpret_cast<void **>(aligned)[-1] = raw;
+        void *p = reinterpret_cast<void *>(aligned);
+#else
+        void *p = nullptr;
+        if (posix_memalign(&p, align, size))
+            return nullptr;
+#endif
         ++a.live;
         ++a.calls;
         return p;
@@ -27,7 +39,11 @@ struct Allocations {
     static void release(void *u, void *p, size_t, size_t) {
         if (p) {
             --static_cast<Allocations *>(u)->live;
+#ifdef _WIN32
+            free(reinterpret_cast<void **>(p)[-1]);
+#else
             free(p);
+#endif
         }
     }
 };

@@ -2,7 +2,7 @@ enable_language(C)
 
 include(CTest)
 
-add_library(simulator_core SHARED arena_allocator.c sim.cpp runtime.cpp forces.cpp robots.cpp sensors.cpp scene_presets.c)
+add_library(simulator_core SHARED arena_allocator.c dynlib.c sim.cpp runtime.cpp forces.cpp robots.cpp sensors.cpp scene_presets.c scene_snapshot.cpp)
 
 target_include_directories(
     simulator_core
@@ -97,6 +97,24 @@ else()
 
     FetchContent_MakeAvailable(simulator_mujoco)
 
+    if(WIN32 AND TARGET mujoco)
+        # Zig's thin LTO links a compiler-rt that does not resolve MinGW libm.
+        # Zig also rejects lld-link's /STACK and /OPT forms.
+        set_target_properties(mujoco PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        get_target_property(mujoco_link_options mujoco LINK_OPTIONS)
+        if(mujoco_link_options)
+            set(mujoco_gnu_link_options)
+            foreach(opt IN LISTS mujoco_link_options)
+                if(opt MATCHES "STACK|/OPT:|fuse-ld=lld-link")
+                    continue()
+                endif()
+                list(APPEND mujoco_gnu_link_options "${opt}")
+            endforeach()
+            list(APPEND mujoco_gnu_link_options "-Wl,--stack,16777216")
+            set_target_properties(mujoco PROPERTIES LINK_OPTIONS "${mujoco_gnu_link_options}")
+        endif()
+    endif()
+
     set(SIMULATOR_MUJOCO_LIB mujoco)
 
     set(SIMULATOR_MUJOCO_INCLUDE "${simulator_mujoco_SOURCE_DIR}/include")
@@ -107,6 +125,14 @@ add_library(simulator_backend_mujoco SHARED backends/mujoco.cpp)
 target_include_directories(simulator_backend_mujoco SYSTEM PRIVATE "${SIMULATOR_MUJOCO_INCLUDE}")
 
 target_link_libraries(simulator_backend_mujoco PRIVATE simulator_core ${SIMULATOR_MUJOCO_LIB})
+
+if(TARGET mujoco)
+    add_custom_command(
+        TARGET simulator_backend_mujoco
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:mujoco> $<TARGET_FILE_DIR:simulator_backend_mujoco>
+    )
+endif()
 
 if(SIMULATOR_ENABLE_STONEFISH)
 set(SIMULATOR_STONEFISH_PREFIX "" CACHE PATH "Existing Stonefish installation")
@@ -218,6 +244,10 @@ add_executable(simulator_core_tests tests/core.cpp)
 
 target_link_libraries(simulator_core_tests PRIVATE simulator_wire)
 
+add_executable(simulator_snapshot_tests tests/snapshot.cpp)
+
+target_link_libraries(simulator_snapshot_tests PRIVATE simulator_core)
+
 add_executable(simulator_engine_tests tests/engines.cpp)
 
 target_link_libraries(simulator_engine_tests PRIVATE simulator_core)
@@ -261,9 +291,10 @@ foreach(target IN LISTS simulator_plugins)
             C_VISIBILITY_PRESET hidden
             CXX_VISIBILITY_PRESET hidden
             VISIBILITY_INLINES_HIDDEN YES
-            BUILD_RPATH "$ORIGIN"
-            INSTALL_RPATH "$ORIGIN"
     )
+    if(UNIX)
+        set_target_properties(${target} PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+    endif()
 endforeach()
 
 if(SIMULATOR_ENABLE_STONEFISH)
@@ -278,8 +309,8 @@ endif()
 install(
     TARGETS
     ${simulator_plugins}
-    LIBRARY DESTINATION
-    lib
+    RUNTIME DESTINATION lib
+    LIBRARY DESTINATION lib
     COMPONENT simulator
 )
 
@@ -289,11 +320,9 @@ endif()
 
 install(TARGETS simulator_c_example RUNTIME DESTINATION bin COMPONENT simulator)
 
-set_target_properties(
-    simulator_c_example
-    PROPERTIES
-        INSTALL_RPATH "$ORIGIN/../lib"
-)
+if(UNIX)
+    set_target_properties(simulator_c_example PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+endif()
 
 install(
     FILES
@@ -384,18 +413,30 @@ add_dependencies(simulator_all simulator_trace)
 
 # Package the native shared libraries required by the adapters alongside them.
 if(TARGET mujoco)
-    install(TARGETS mujoco LIBRARY DESTINATION lib COMPONENT simulator)
+    install(TARGETS mujoco RUNTIME DESTINATION lib LIBRARY DESTINATION lib COMPONENT simulator)
 else()
     get_filename_component(mujoco_libdir "${SIMULATOR_MUJOCO_LIB}" DIRECTORY)
 
-    install(
-        DIRECTORY
-        "${mujoco_libdir}/"
-        DESTINATION lib
-        COMPONENT simulator
-        FILES_MATCHING
-        PATTERN "libmujoco.so*"
-    )
+    if(WIN32)
+        install(
+            DIRECTORY
+            "${mujoco_libdir}/"
+            DESTINATION lib
+            COMPONENT simulator
+            FILES_MATCHING
+            PATTERN "mujoco.dll"
+            PATTERN "libmujoco.dll"
+        )
+    else()
+        install(
+            DIRECTORY
+            "${mujoco_libdir}/"
+            DESTINATION lib
+            COMPONENT simulator
+            FILES_MATCHING
+            PATTERN "libmujoco.so*"
+        )
+    endif()
 endif()
 
 if(SIMULATOR_ENABLE_STONEFISH)
@@ -532,15 +573,26 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-set_target_properties(simulator_robot_example PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+if(UNIX)
+    set_target_properties(simulator_robot_example PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+endif()
 install(TARGETS simulator_robot_example RUNTIME DESTINATION bin COMPONENT simulator)
 install(DIRECTORY data/robots DESTINATION share/autonomy/simulator/data COMPONENT simulator)
+install(FILES data/pool_scene.blend DESTINATION share/autonomy/simulator/data COMPONENT simulator)
+install(DIRECTORY data/textures DESTINATION share/autonomy/simulator/data COMPONENT simulator)
 
 add_library(auv_simulator SHARED auv_plugin.cpp)
 target_link_libraries(auv_simulator PRIVATE simulator_core ${CMAKE_DL_LIBS})
-set_target_properties(auv_simulator PROPERTIES CXX_VISIBILITY_PRESET hidden BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+if(WIN32)
+    target_link_libraries(auv_simulator PRIVATE ws2_32)
+endif()
+target_compile_definitions(auv_simulator PRIVATE "SIMULATOR_MUJOCO_BACKEND_FILENAME=\"$<TARGET_FILE_NAME:simulator_backend_mujoco>\"")
+set_target_properties(auv_simulator PROPERTIES CXX_VISIBILITY_PRESET hidden)
+if(UNIX)
+    set_target_properties(auv_simulator PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+endif()
 add_dependencies(simulator_all auv_simulator)
-install(TARGETS auv_simulator LIBRARY DESTINATION lib COMPONENT simulator)
+install(TARGETS auv_simulator RUNTIME DESTINATION lib LIBRARY DESTINATION lib COMPONENT simulator)
 install(FILES scene_presets.h auv_simulator.h "${PROJECT_SOURCE_DIR}/include/auv.h" "${PROJECT_SOURCE_DIR}/include/object_classes.h"
         DESTINATION include/autonomy/simulator COMPONENT simulator)
 
@@ -556,7 +608,10 @@ add_test(NAME simulator_sensors COMMAND simulator_sensor_tests)
 
 add_executable(simulator_auv_bridge_tests tests/auv_bridge.c)
 target_compile_options(simulator_auv_bridge_tests PRIVATE -std=c11 -pedantic-errors)
-target_link_libraries(simulator_auv_bridge_tests PRIVATE simulator_core ${CMAKE_DL_LIBS} m)
+target_link_libraries(simulator_auv_bridge_tests PRIVATE simulator_core ${CMAKE_DL_LIBS})
+if(UNIX)
+    target_link_libraries(simulator_auv_bridge_tests PRIVATE m)
+endif()
 if(SIMULATOR_SANITIZE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set_target_properties(simulator_auv_bridge_tests PROPERTIES LINKER_LANGUAGE CXX)
 endif()
@@ -567,9 +622,13 @@ set(simulator_zig_build_args)
 if(SIMULATOR_SANITIZE)
     list(APPEND simulator_zig_build_args -Dexternal-asan=true)
 endif()
+set(simulator_zig_target_args)
+if(WIN32)
+    list(APPEND simulator_zig_target_args -Dtarget=x86_64-windows-gnu)
+endif()
 add_custom_target(simulator_zig_controller
-    COMMAND ${SIMULATOR_ZIG_EXECUTABLE} build fuzz-startup-test ${simulator_zig_build_args} --prefix "${CMAKE_CURRENT_BINARY_DIR}/zig"
-    COMMAND ${SIMULATOR_ZIG_EXECUTABLE} build ${simulator_zig_build_args} --prefix "${CMAKE_CURRENT_BINARY_DIR}/zig"
+    COMMAND ${SIMULATOR_ZIG_EXECUTABLE} build fuzz-startup-test ${simulator_zig_build_args} ${simulator_zig_target_args} --prefix "${CMAKE_CURRENT_BINARY_DIR}/zig"
+    COMMAND ${SIMULATOR_ZIG_EXECUTABLE} build ${simulator_zig_build_args} ${simulator_zig_target_args} --prefix "${CMAKE_CURRENT_BINARY_DIR}/zig"
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/zig/bin/src_3"
     COMMENT "Building Zig mission controller"

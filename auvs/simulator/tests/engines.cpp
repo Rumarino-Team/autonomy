@@ -1,6 +1,6 @@
 #include "../examples/scene.h"
 #include "../internal.hpp"
-#include <dlfcn.h>
+#include "../dynlib.h"
 #include <future>
 #include <iostream>
 using namespace core;
@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
 
         test(backend.api.abi_version == 5, "ABI version");
         PhysicsBackendApi rejected{};
-        auto *symbol = dlsym(backend.library, "sim_backend_get_api");
+        auto *symbol = dynlib_symbol(backend.library, "sim_backend_get_api");
         PhysicsBackendGetApi get;
         std::memcpy(&get, &symbol, sizeof get);
         test(get(4, sizeof rejected, &rejected) == SIM_UNSUPPORTED, "ABI v4 rejection");

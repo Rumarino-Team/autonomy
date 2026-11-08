@@ -5,14 +5,33 @@ pub const Vector3f = @Vector(3, f32);
 pub const Vector6f = @Vector(6, f32);
 pub const Quaternionf = @Vector(4, f32);
 
+/// Zig 0.17 forbids `@Vector` fields in `extern` structs. These match `MathVector3f` and `MathQuaternionf`.
+pub const Vector3Storage = extern struct {
+    buf: [3]f32 align(16),
+};
+
+pub const QuaternionStorage = extern struct {
+    buf: [4]f32 align(16),
+};
+
+pub inline fn vec3(value: anytype) Vector3f {
+    const buf = if (@hasField(@TypeOf(value), "buf")) value.buf else value;
+    return .{ buf[0], buf[1], buf[2] };
+}
+
+pub inline fn vec4(value: anytype) Quaternionf {
+    const buf = if (@hasField(@TypeOf(value), "buf")) value.buf else value;
+    return .{ buf[0], buf[1], buf[2], buf[3] };
+}
+
 pub const Pose = extern struct {
-    pos: Vector3f,
-    quat: Quaternionf,
+    pos: Vector3Storage,
+    quat: QuaternionStorage,
 };
 
 pub const BoundingBox = extern struct {
     pose: Pose,
-    size: Vector3f,
+    size: Vector3Storage,
 };
 
 pub inline fn xy(v: Vector3f) Vector2f {
@@ -231,8 +250,8 @@ pub fn rotationBetween(forward: Vector3f, dir: Vector3f) Quaternionf {
 }
 
 pub inline fn poseTo6f(pose: Pose) Vector6f {
-    const x, const y, const z = pose.pos;
-    const rot = normalize4f(pose.quat);
+    const x, const y, const z = pose.pos.buf;
+    const rot = normalize4f(vec4(pose.quat));
     const roll, const pitch, const yaw = quaternionToEuler(rot);
 
     return .{ x, y, z, roll, pitch, yaw };
