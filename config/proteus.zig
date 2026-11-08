@@ -1,0 +1,19 @@
+// Controller values migrated without retuning.
+const Config = @import("../src/Configuration.zig").Controller;
+pub const controller: Config = .{
+    .teleop_port = 8080,
+    .camera_forward = .{ 0, 1, 0 },
+    .rotation_limit = .{ 0.3, 0, 100 },
+    .tam = &.{ .{ 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 }, .{ 0.0, 1.0, 0.0, 0.0, 0.0, -1.0 }, .{ 0.0, 0.0, -1.0, 1.0, 1.0, 0.0 }, .{ 0.0, 0.0, -1.0, 1.0, -1.0, 0.0 }, .{ 0.0, 0.0, -1.0, -1.0, 1.0, 0.0 }, .{ 0.0, 0.0, -1.0, -1.0, -1.0, 0.0 } },
+    .odometry = .{
+        .rotation_gate = 0.392699081688714,
+        .kp = .{ 1.0, 1.0, 2.2, 2.4, 2.4, 2.0 },
+        .ki = .{ 0.0, 0.0, 0.05, 0.05, 0.05, 0.0 },
+        .kd = .{ 0.1, 0.1, 0.4, 0.2, 0.2, 2.0 },
+    },
+    .ibvs = .{
+        .center_deadband = 0.05,
+        .target_height = 0.35,
+        .interaction = &.{ &.{ 0, 0, 0 }, &.{ 0, 0, 1 }, &.{ 0, 0, 0 }, &.{ 0, 0, 0 }, &.{ 0, 0, 0 }, &.{ -1, 0, 0 } },
+    },
+};

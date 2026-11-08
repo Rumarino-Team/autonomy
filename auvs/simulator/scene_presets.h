@@ -8,7 +8,7 @@ extern "C" {
  * Failure destroys only storage allocated by this call. */
 SIM_API SimResult
 simulation_scene_create(Simulation *, const char *scene, const Robot *, char *, uint32_t);
-/* Version-1 scene snapshot. The robot preset supplies the vehicle; its start
+/* AUVDATA1 binary scene snapshot, schema 1 (JSON is rejected). The robot preset supplies the vehicle; its start
  * pose comes from the snapshot body with the same name. Other bodies are
  * scenery. Failure destroys only storage allocated by this call. */
 SIM_API SimResult

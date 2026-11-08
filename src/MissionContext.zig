@@ -7,23 +7,20 @@ const bc = @import("BodyControl.zig");
 const Pid = @import("Pid.zig");
 
 const Auv = @import("Auv.zig");
-const AuvLoader = @import("AuvLoader.zig");
 const ConfigLoader = @import("ConfigLoader.zig");
-const FileWatcher = @import("FileWatcher.zig");
 const SerialBinaryWriter = @import("SerialBinaryWriter.zig");
 
 const MissionContext = @This();
 const print_stuff = true;
 const clear_print_stuff = true;
-const telemetry_log_path: ?[]const u8 = null;
-const telemetry_addr: []const u8 = "127.0.0.1:5600";
 const queue_capacity = 32;
 
-const Goal = struct {
+pub const Goal = struct {
     position: math.Vector3f,
     look_at: math.Vector3f,
 };
 
+pub var cancellation: ?*const fn () callconv(.c) bool = null;
 var stop_requested = std.atomic.Value(bool).init(false);
 
 fn requestStop(_: std.posix.SIG) callconv(.c) void {
@@ -75,20 +72,15 @@ force_error: math.Vector3f = .{ 0, 0, 0 },
 pid_prev_timestamp_ns: ?u64,
 
 step: []const u8,
-telemetry_file: ?Io.File = null,
-telemetry_socket: Io.net.Socket = undefined,
-telemetry_dest: Io.net.IpAddress = undefined,
 
 seen_objects2d: [Auv.Frame.max_objects]Auv.Object2d = undefined,
 seen_objects2d_len: u8 = 0,
 
 auv: Auv,
-auv_loader: AuvLoader,
-auv_watcher: FileWatcher,
-
 config: ConfigLoader.Config,
-config_loader: ConfigLoader,
-config_watcher: FileWatcher,
+telemetry: ?*const fn ([*]const u8, usize) callconv(.c) void = null,
+teleop: ?*const fn ([*]f32) callconv(.c) bool = null,
+verbose: bool = false,
 
 pub fn installSignalHandlers() void {
     stop_requested.store(false, .monotonic);
@@ -102,7 +94,7 @@ pub fn installSignalHandlers() void {
 }
 
 pub fn stopRequested() bool {
-    return stop_requested.load(.monotonic);
+    return stop_requested.load(.monotonic) or (if (cancellation) |f| f() else false);
 }
 pub fn requestCancellation() void {
     stop_requested.store(true, .monotonic);
@@ -110,15 +102,16 @@ pub fn requestCancellation() void {
 
 // The caller owns the active adapter world and its loaded code. No watches,
 // sockets, plugin initialization, or process signal changes occur in a batch.
-pub fn initBatch(arena: std.mem.Allocator, io: Io, args: MissionArgs, auv: Auv, config_contents: []const u8) !MissionContext {
-    const config = try ConfigLoader.parse(arena, config_contents);
+pub fn initBatch(arena: std.mem.Allocator, io: Io, args: MissionArgs, auv: Auv, config: ConfigLoader.Config) !MissionContext {
+    try ConfigLoader.validate(config);
     const goals = try arena.alloc(Goal, queue_capacity);
     return .{
         .io = io,
         .batch = true,
-        .frame = undefined,
-        .seen_objects = undefined,
+        .frame = std.mem.zeroes(Auv.Frame),
+        .seen_objects = std.mem.zeroes([Auv.Frame.max_objects]Auv.Object),
         .seen_objects_len = 0,
+        .seen_objects2d = std.mem.zeroes([Auv.Frame.max_objects]Auv.Object2d),
         .goal_dist_threshold = args.goal_dist_threshold,
         .log_counter = 0,
         .log_freq_div = 120,
@@ -127,98 +120,13 @@ pub fn initBatch(arena: std.mem.Allocator, io: Io, args: MissionArgs, auv: Auv, 
         .pid_prev_timestamp_ns = null,
         .step = "",
         .auv = auv,
-        .auv_loader = undefined,
-        .auv_watcher = undefined,
         .config = config,
-        .config_loader = undefined,
-        .config_watcher = undefined,
     };
 }
 
-pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
-    var config_loader: ConfigLoader = try .init(arena, args.live_config_path);
-    const config = config_loader.load(io) catch |err| {
-        std.log.err("failed to load config: {s}", .{config_loader.config_path});
-        return err;
-    };
-    if (print_stuff) {
-        std.log.debug("succesfully loaded config: {s}", .{config_loader.config_path});
-        std.log.debug("{any}", .{config});
-    }
-
-    var auv_loader: AuvLoader = try .init(arena, args.auv_dynlib_path);
-    errdefer auv_loader.deinit();
-    const auv = auv_loader.load(io) catch |err| {
-        std.log.err("dlerror: `{s}`", .{@import("DynLib.zig").loadError()});
-        std.log.err("failed to load auv: {s}", .{auv_loader.auv_path});
-        return err;
-    };
-    auv.init();
-    errdefer auv.deinit();
-    if (print_stuff) {
-        std.log.debug("succesfully loaded auv: {s}", .{auv_loader.auv_path});
-        std.log.debug("{any}", .{auv});
-    }
-
-    const telemetry_dest = try Io.net.IpAddress.parseLiteral(telemetry_addr);
-    const telemetry_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
-    const telemetry_socket = try telemetry_bind.bind(io, .{ .mode = .dgram });
-    errdefer telemetry_socket.close(io);
-    const telemetry_file: ?Io.File = if (telemetry_log_path) |path|
-        try Io.Dir.cwd().createFile(io, path, .{})
-    else
-        null;
-
-    errdefer if (telemetry_file) |file| file.close(io);
-    const goals = try arena.alloc(Goal, queue_capacity);
-    var auv_watcher = try FileWatcher.init(arena, args.auv_dynlib_path);
-    errdefer auv_watcher.deinit();
-    var config_watcher = try FileWatcher.init(arena, args.live_config_path);
-    errdefer config_watcher.deinit();
-
-    return .{
-        .frame = undefined,
-
-        .seen_objects = undefined,
-        .seen_objects_len = 0,
-
-        .goal_dist_threshold = args.goal_dist_threshold,
-
-        .log_counter = 0,
-        .log_freq_div = 120,
-
-        .target_position = @splat(0),
-        .queue = .initBuffer(goals),
-
-        .pid_prev_timestamp_ns = null,
-
-        .step = "",
-        .telemetry_file = telemetry_file,
-        .telemetry_socket = telemetry_socket,
-        .telemetry_dest = telemetry_dest,
-
-        .auv = auv,
-        .auv_loader = auv_loader,
-        .auv_watcher = auv_watcher,
-
-        .config = config,
-        .config_loader = config_loader,
-        .config_watcher = config_watcher,
-
-        .io = io,
-    };
-}
-
-pub fn deinit(ctx: *MissionContext) void {
-    ctx.stopThrusters();
-    if (ctx.batch) return;
-    ctx.auv.deinit();
-    ctx.auv_loader.deinit();
-    ctx.auv_watcher.deinit();
-    ctx.config_watcher.deinit();
-    ctx.telemetry_socket.close(ctx.io);
-    if (ctx.telemetry_file) |file| file.close(ctx.io);
-}
+// Borrowed native resources belong to the host/SceneContext. Destruction during
+// reload must neither stop motors nor destroy the retained world.
+pub fn deinit(_: *MissionContext) void {}
 
 pub fn stopThrusters(ctx: *MissionContext) void {
     var zero: [8]f32 = @splat(0);
@@ -247,11 +155,11 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         var status: Auv.c.AuvSimulationStatus = undefined;
         if (!read_status(&status)) return error.SimulationStatusUnavailable;
         if (status.code != 0) {
-            if (!ctx.batch) std.log.err("simulation step={d}: {s}", .{ status.tick, std.mem.sliceTo(&status.message, 0) });
+            if (ctx.verbose) std.log.err("simulation step={d}: {s}", .{ status.tick, std.mem.sliceTo(&status.message, 0) });
             return if (status.code == 1) error.SimulationTickBudget else error.SimulationFailed;
         }
     }
-    if (stop_requested.load(.monotonic)) return error.Stopped;
+    if (stopRequested()) return error.Stopped;
 
     // std.log.debug("updating seen_objects...", .{});
     for (ctx.frame.objects[0..ctx.frame.objects_len]) |frame_object| {
@@ -284,55 +192,13 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }
     }
 
-    if (!ctx.batch) {
-        if (ctx.config_watcher.changed() catch |err| blk: {
-            std.log.err("{s}", .{@errorName(err)});
-            break :blk false;
-        }) {
-            if (ctx.config_loader.load(ctx.io)) |config| {
-                if (!ctx.batch and print_stuff) {
-                    std.log.debug("succesfully reloaded config: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
-                    std.log.debug("{any}", .{config});
-                }
-                ctx.config = config;
-            } else |err| {
-                std.log.err("failed to reload config: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
-                std.log.err("{s}", .{@errorName(err)});
-                std.log.info("kept previous config", .{});
-            }
-        }
-
-        if (ctx.auv_watcher.changed() catch |err| blk: {
-            std.log.err("{s}", .{@errorName(err)});
-            break :blk false;
-        }) {
-            ctx.auv.deinit();
-            if (ctx.auv_loader.load(ctx.io)) |auv| {
-                if (!ctx.batch and print_stuff) {
-                    std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
-                    std.log.debug("{any}", .{auv});
-                }
-                ctx.auv = auv;
-                ctx.auv.init();
-                if (!ctx.batch and print_stuff) {
-                    std.log.debug("restarted auv loop", .{});
-                }
-                return error.RestartMission;
-            } else |err| {
-                std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.directory(), ctx.auv_watcher.fileName() });
-                std.log.err("{s}", .{@errorName(err)});
-                return err;
-            }
-        }
-    }
-
     var thruster_buffer: [math.max_thrusters]f32 = @splat(0);
     const thruster_values = ctx.controlStep(&thruster_buffer);
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
     ctx.publishToUdp(thruster_values);
 
     const elapsed = start.untilNow(ctx.io);
-    if (!ctx.batch and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+    if (ctx.verbose and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
     }
     ctx.log_counter +%= 1;
@@ -356,7 +222,7 @@ const TelemetryPacket = struct {
 };
 
 fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
-    if (ctx.batch) return;
+    if (ctx.telemetry == null) return;
     const nobj = @min(@as(usize, ctx.seen_objects_len), ctx.seen_objects.len);
     const nbox = @min(@as(usize, ctx.seen_objects2d_len), ctx.seen_objects2d.len);
     var goals: [queue_capacity]Goal = undefined;
@@ -386,11 +252,7 @@ fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
     }) catch return;
     const packet = w.buffered();
 
-    if (ctx.telemetry_file) |file| file.writeStreamingAll(ctx.io, packet) catch |err| {
-        std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
-    };
-    // udp never blocks, even with the laptop unplugged
-    ctx.telemetry_socket.send(ctx.io, &ctx.telemetry_dest, packet) catch {};
+    if (ctx.telemetry) |send| send(packet.ptr, packet.len);
 }
 
 pub fn resetOdometryPid(ctx: *MissionContext) void {
@@ -626,7 +488,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
         translation_body[0], translation_body[1], translation_body[2],
         rotation[0],         rotation[1],         rotation[2],
     };
-    if (!ctx.batch and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+    if (ctx.verbose and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         if (clear_print_stuff) {
             std.debug.print("\x1b[2J\x1b[H", .{});
         }
@@ -658,26 +520,10 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     if (ctx.config.thruster_curve == .quadratic_rpm) {
         for (thruster_values) |*value| value.* = std.math.sign(value.*) * @sqrt(@abs(value.*));
     }
-    if (!ctx.batch and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+    if (ctx.verbose and print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }
     return thruster_values;
-}
-
-/// Search while holding still. Returns the first object of `cls`.
-pub fn yieldFind(ctx: *MissionContext, cls: u8) !*const Auv.Object {
-    ctx.use_position = true;
-    ctx.use_orientation = true;
-    ctx.translation = null;
-    var seen: usize = 0;
-
-    while (true) {
-        for (ctx.seen_objects[seen..ctx.seen_objects_len]) |*object| {
-            if (object.cls == cls) return object;
-            seen += 1;
-        }
-        try ctx.yieldUntilNextFrameAndUpdate();
-    }
 }
 
 const object_clearance: f32 = 2;
@@ -724,60 +570,40 @@ fn clearQueue(ctx: *MissionContext) void {
     ctx.queue.len = 0;
 }
 
-/// Face `object` and hold position. Returns when the attitude error is small.
-pub fn yieldLookAt(ctx: *MissionContext, object: *const Auv.Object) !void {
-    ctx.target_position = math.vec3(ctx.frame.camera_pose.pos);
-    ctx.use_position = true;
-    ctx.use_orientation = true;
-    ctx.translation = null;
-    while (true) {
-        try ctx.setLookAtTarget(math.vec3(object.bbox.pose.pos));
-        try ctx.yieldUntilNextFrameAndUpdate();
-        const err = attitudeToward(ctx, ctx.target_orientation) orelse continue;
-        if (math.length3f(err) <= look_done) return;
-    }
-}
-
-/// Drive to the near side of `object`, looking at the far side.
-pub fn yieldMoveTo(ctx: *MissionContext, object: *const Auv.Object) !void {
+pub fn preparePass(ctx: *MissionContext, object: *const Auv.Object) !void {
     ctx.clearQueue();
     const direction = approachDirection(ctx, object);
     const far = standoffAlong(object, direction, 1);
-    try ctx.queue.pushBackBounded(.{
-        .position = standoffAlong(object, direction, -1),
-        .look_at = far,
-    });
-    try ctx.yieldQueue();
+    try ctx.queue.pushBackBounded(.{ .position = standoffAlong(object, direction, -1), .look_at = far });
+    try ctx.queue.pushBackBounded(.{ .position = far, .look_at = far });
 }
-
-/// Stop short of `object`, then continue the same distance past it.
-pub fn yieldPass(ctx: *MissionContext, object: *const Auv.Object) !void {
-    ctx.clearQueue();
-    const direction = approachDirection(ctx, object);
-    const far = standoffAlong(object, direction, 1);
-    try ctx.queue.pushBackBounded(.{
-        .position = standoffAlong(object, direction, -1),
-        .look_at = far,
-    });
-    try ctx.queue.pushBackBounded(.{
-        .position = far,
-        .look_at = far,
-    });
-    try ctx.yieldQueue();
+pub fn prepareMove(ctx: *MissionContext, object: *const Auv.Object) !void {
+    try ctx.preparePass(object);
+    ctx.queue.len = 1;
 }
-
-/// Drive the queued goals in order. Returns when the queue is empty.
-pub fn yieldQueue(ctx: *MissionContext) !void {
+pub fn prepareGoal(ctx: *MissionContext) !bool {
+    const goal = ctx.queue.front() orelse return false;
     ctx.use_position = true;
     ctx.use_orientation = true;
     ctx.translation = null;
-    while (ctx.queue.len != 0) {
-        const goal = ctx.queue.front().?;
-        ctx.target_position = goal.position;
-        try ctx.setLookAtTarget(goal.look_at);
-        try ctx.yieldUntilNextFrameAndUpdate();
+    ctx.target_position = goal.position;
+    try ctx.setLookAtTarget(goal.look_at);
+    return true;
+}
+pub fn finishGoal(ctx: *MissionContext) void {
+    if (ctx.queue.front()) |goal| {
         if (reached(ctx, goal.position)) _ = ctx.queue.popFront();
     }
+}
+pub fn prepareLook(ctx: *MissionContext, object: *const Auv.Object) !void {
+    ctx.use_position = true;
+    ctx.use_orientation = true;
+    ctx.translation = null;
+    try ctx.setLookAtTarget(math.vec3(object.bbox.pose.pos));
+}
+pub fn lookFinished(ctx: *const MissionContext) bool {
+    const err = attitudeToward(ctx, ctx.target_orientation) orelse return false;
+    return math.length3f(err) <= look_done;
 }
 
 const circle_corners: [4]math.Vector2f = .{
@@ -795,14 +621,8 @@ fn circleCorner(object: *const Auv.Object, index: usize, depth: f32) math.Vector
     return .{ pos[0], pos[1], depth };
 }
 
-fn yieldPlaceLookingAt(ctx: *MissionContext, place: math.Vector3f, object: *const Auv.Object) !void {
-    ctx.clearQueue();
-    try ctx.queue.pushBackBounded(.{ .position = place, .look_at = math.vec3(object.bbox.pose.pos) });
-    try ctx.yieldQueue();
-}
-
 /// Visit the four outside corners of `object`, then return to the start.
-pub fn yieldCircle(ctx: *MissionContext, object: *const Auv.Object) !void {
+pub fn prepareCircle(ctx: *MissionContext, object: *const Auv.Object) !void {
     ctx.clearQueue();
     const start = math.vec3(ctx.frame.camera_pose.pos);
     const look_at = math.vec3(object.bbox.pose.pos);
@@ -828,5 +648,70 @@ pub fn yieldCircle(ctx: *MissionContext, object: *const Auv.Object) !void {
         });
     }
     try ctx.queue.pushBackBounded(.{ .position = start, .look_at = look_at });
-    try ctx.yieldQueue();
+}
+
+/// Every value needed after a frame boundary. Resource wrappers and borrowed
+/// configuration are reconstructed, not serialized. Object references use IDs.
+pub const Saved = struct {
+    frame: Auv.Frame,
+    seen_objects: []const Auv.Object,
+    seen_objects2d: []const Auv.Object2d,
+    goals: []const Goal,
+    target_position: math.Vector3f,
+    target_orientation: math.Quaternionf,
+    use_position: bool,
+    use_orientation: bool,
+    position_axes: Auv.AxisOk,
+    desired: math.Vector2f,
+    desired_height: ?f32,
+    translation: ?math.Vector3f,
+    pid: [6]Pid,
+    previous_position: ?math.Vector3f,
+    tilt_correction: math.Vector3f,
+    force_error: math.Vector3f,
+    pid_prev_timestamp_ns: ?u64,
+    log_counter: u32,
+};
+pub fn save(ctx: *const MissionContext, allocator: std.mem.Allocator) !Saved {
+    const goals = try allocator.alloc(Goal, ctx.queue.len);
+    var iter = ctx.queue.iterator();
+    var i: usize = 0;
+    while (iter.next()) |goal| {
+        goals[i] = goal;
+        i += 1;
+    }
+    return .{
+        .frame = ctx.frame,
+        .seen_objects = ctx.seen_objects[0..ctx.seen_objects_len],
+        .seen_objects2d = ctx.seen_objects2d[0..ctx.seen_objects2d_len],
+        .goals = goals,
+        .target_position = ctx.target_position,
+        .target_orientation = ctx.target_orientation,
+        .use_position = ctx.use_position,
+        .use_orientation = ctx.use_orientation,
+        .position_axes = ctx.position_axes,
+        .desired = ctx.desired,
+        .desired_height = ctx.desired_height,
+        .translation = ctx.translation,
+        .pid = ctx.pid,
+        .previous_position = ctx.previous_position,
+        .tilt_correction = ctx.tilt_correction,
+        .force_error = ctx.force_error,
+        .pid_prev_timestamp_ns = ctx.pid_prev_timestamp_ns,
+        .log_counter = ctx.log_counter,
+    };
+}
+pub fn restore(ctx: *MissionContext, state: Saved) !void {
+    if (state.seen_objects.len > ctx.seen_objects.len or state.seen_objects2d.len > ctx.seen_objects2d.len or state.goals.len > queue_capacity)
+        return error.InvalidMissionState;
+    if (state.frame.objects_len > Auv.Frame.max_objects or state.frame.objects2d_len > Auv.Frame.max_objects)
+        return error.InvalidMissionState;
+    @memcpy(ctx.seen_objects[0..state.seen_objects.len], state.seen_objects);
+    @memcpy(ctx.seen_objects2d[0..state.seen_objects2d.len], state.seen_objects2d);
+    ctx.seen_objects_len = @intCast(state.seen_objects.len);
+    ctx.seen_objects2d_len = @intCast(state.seen_objects2d.len);
+    ctx.clearQueue();
+    for (state.goals) |goal| try ctx.queue.pushBackBounded(goal);
+    inline for (.{ "frame", "target_position", "target_orientation", "use_position", "use_orientation", "position_axes", "desired", "desired_height", "translation", "pid", "previous_position", "tilt_correction", "force_error", "pid_prev_timestamp_ns", "log_counter" }) |name|
+        @field(ctx, name) = @field(state, name);
 }

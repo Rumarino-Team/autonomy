@@ -57,6 +57,14 @@ struct BlenderLink {
             if (error == std::errc() && !*end && value > 0 && value <= 65535)
                 port = static_cast<uint16_t>(value);
         }
+        open(true, port);
+    }
+
+    void open(bool enabled, uint16_t target_port) {
+        close();
+        port = target_port;
+        if (!enabled || !port)
+            return;
 #ifdef _WIN32
         WSADATA data;
         if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
@@ -101,7 +109,9 @@ struct BlenderLink {
     }
 
     void publish(
-        const SimulationRuntime *runtime, const Simulation &model, const Observation &observation,
+        const SimulationRuntime *runtime,
+        const Simulation &model,
+        const Observation &observation,
         uint64_t time_ns
     ) {
         if (!open_ok || !runtime)
@@ -162,12 +172,20 @@ struct BlenderLink {
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 #ifdef _WIN32
         ::sendto(
-            socket, reinterpret_cast<const char *>(header.data()), static_cast<int>(header.size()), 0,
-            reinterpret_cast<sockaddr *>(&address), sizeof address
+            socket,
+            reinterpret_cast<const char *>(header.data()),
+            static_cast<int>(header.size()),
+            0,
+            reinterpret_cast<sockaddr *>(&address),
+            sizeof address
         );
 #else
         ::sendto(
-            socket, header.data(), header.size(), MSG_DONTWAIT, reinterpret_cast<sockaddr *>(&address),
+            socket,
+            header.data(),
+            header.size(),
+            MSG_DONTWAIT,
+            reinterpret_cast<sockaddr *>(&address),
             sizeof address
         );
 #endif
@@ -249,6 +267,9 @@ std::filesystem::path snapshot_script(const std::filesystem::path &start) {
         auto candidate = dir / "tools" / "blender" / "export_snapshot.py";
         if (std::filesystem::is_regular_file(candidate))
             return candidate;
+        candidate = dir / "share" / "autonomy" / "tools" / "blender" / "export_snapshot.py";
+        if (std::filesystem::is_regular_file(candidate))
+            return candidate;
         auto parent = dir.parent_path();
         if (parent == dir)
             break;
@@ -285,26 +306,34 @@ struct TemporarySnapshot {
     std::filesystem::path path;
 
     ~TemporarySnapshot() {
-        if (!path.empty())
-            std::filesystem::remove(path);
+        if (!path.empty()) {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
     }
 };
 
-std::filesystem::path export_blend(const std::filesystem::path &blend, const std::filesystem::path &module_dir) {
+std::filesystem::path
+export_blend(const std::filesystem::path &blend, const std::filesystem::path &module_dir) {
     require(std::filesystem::is_regular_file(blend), "cannot read blend file");
     auto script = snapshot_script(module_dir);
     require(!script.empty(), "cannot find blend snapshot exporter");
-    auto output = std::filesystem::temp_directory_path() /
-                  ("autonomy-scene-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                   ".json");
-    std::string command = quote_arg(blender_executable()) + " --background --factory-startup --disable-autoexec " +
-                          quote_arg(std::filesystem::absolute(blend)) + " --python " + quote_arg(script) + " -- " +
-                          quote_arg(output);
+    auto output =
+        std::filesystem::temp_directory_path() /
+        ("autonomy-scene-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
+    std::string command = quote_arg(blender_executable()) +
+                          " --background --factory-startup --disable-autoexec " +
+                          quote_arg(std::filesystem::absolute(blend)) + " --python " +
+                          quote_arg(script) + " -- --output " + quote_arg(output);
 #ifdef _WIN32
     // cmd.exe /c drops the first and last quote when a line contains more than one pair.
     command = "\"" + command + "\"";
 #endif
-    require(std::system(command.c_str()) == 0 && std::filesystem::is_regular_file(output), "blend export failed");
+    require(
+        std::system(command.c_str()) == 0 && std::filesystem::is_regular_file(output),
+        "blend export failed"
+    );
     return output;
 }
 
@@ -337,10 +366,45 @@ void depth() {
 } // namespace
 
 extern "C" {
+SIM_API SimResult auv_simulator_load_scene(
+    Simulation *model, const char *path, const Robot *robot, char *error, uint32_t capacity
+) {
+    return guard(error, capacity, [&] {
+        require(model && path && robot, "missing scene arguments");
+        TemporarySnapshot snapshot;
+        std::filesystem::path source(path);
+        if (ends_with_ci(path, ".blend")) {
+            char module_path[4096];
+            require(
+                dynlib_module_path(
+                    reinterpret_cast<void *>(&auv_init), module_path, sizeof module_path
+                ),
+                "cannot locate simulator plugin"
+            );
+            snapshot.path = export_blend(source, std::filesystem::path(module_path).parent_path());
+            source = snapshot.path;
+        }
+        char message[512];
+        check(
+            simulation_scene_load(model, source.string().c_str(), robot, message, sizeof message),
+            message
+        );
+    });
+}
+
+SIM_API void auv_simulator_configure_blender(uint32_t enabled, uint16_t port) {
+    ctx.link.open(enabled != 0, port);
+}
+
+SIM_API void auv_simulator_rebase_pacing(void) {
+    ctx.started =
+        std::chrono::steady_clock::now() - std::chrono::nanoseconds(ctx.runtime ? timestamp() : 0);
+}
+
 SIM_API void auv_deinit(void) {
     if (ctx.runtime && ctx.print_summary) {
         std::printf(
-            "{\"steps\":%llu,\"hash\":%llu,\"min_depth\":%.9g,\"max_depth\":%.9g,\"status\":%u}\n",
+            "simulation steps=%llu hash=%llu min_depth=%.9g max_depth=%.9g status=%u\n",
             (unsigned long long)simulation_runtime_tick(ctx.runtime),
             (unsigned long long)simulation_runtime_hash(ctx.runtime),
             ctx.min_depth,
@@ -362,15 +426,18 @@ SIM_API void auv_init(void) {
         require(robot, "unknown robot preset");
         const std::string scene = environment("AUTONOMY_SIM_SCENE", "robosub_course");
         TemporarySnapshot snapshot;
-        if (ends_with_ci(scene, ".blend") || ends_with_ci(scene, ".json")) {
+        if (ends_with_ci(scene, ".blend") || ends_with_ci(scene, ".bin")) {
             std::filesystem::path source = scene;
             if (ends_with_ci(scene, ".blend")) {
                 char module_path[32768];
                 require(
-                    dynlib_module_path(reinterpret_cast<void *>(&auv_init), module_path, sizeof module_path),
+                    dynlib_module_path(
+                        reinterpret_cast<void *>(&auv_init), module_path, sizeof module_path
+                    ),
                     "cannot locate simulator plugin"
                 );
-                snapshot.path = export_blend(source, std::filesystem::path(module_path).parent_path());
+                snapshot.path =
+                    export_blend(source, std::filesystem::path(module_path).parent_path());
                 source = snapshot.path;
             }
             check(
@@ -381,14 +448,18 @@ SIM_API void auv_init(void) {
             );
         } else {
             check(
-                simulation_scene_create(&ctx.owned_model, scene.c_str(), robot, message, sizeof message),
+                simulation_scene_create(
+                    &ctx.owned_model, scene.c_str(), robot, message, sizeof message
+                ),
                 message
             );
         }
         ctx.model = &ctx.owned_model;
         char module_path[32768];
         require(
-            dynlib_module_path(reinterpret_cast<void *>(&auv_init), module_path, sizeof module_path),
+            dynlib_module_path(
+                reinterpret_cast<void *>(&auv_init), module_path, sizeof module_path
+            ),
             "cannot locate simulator plugin"
         );
         auto path = std::filesystem::absolute(module_path).parent_path() /

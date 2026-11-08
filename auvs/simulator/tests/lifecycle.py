@@ -1,74 +1,66 @@
-"""Exercise a real AuvLoader reload, SIGINT cleanup, and the legacy plugin."""
-import json
-import os
+"""Live application replacement, rollback, fresh restart, SIGINT and legacy AUV."""
 from pathlib import Path
-import shutil
+import re
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
 import time
+from app_fixture import Application
+_,plugin,backend,_,stationary,_=sys.argv[1:7]
+preload=sys.argv[7] if len(sys.argv)>7 else None
 
-executable, plugin, backend, config, stationary, stationary_config = map(lambda p: str(Path(p).resolve()), sys.argv[1:7])
-env = {k: v for k, v in os.environ.items() if not k.startswith("AUTONOMY_SIM_")}
-env.update(AUTONOMY_SIM_BACKEND=backend, AUTONOMY_SIM_SCENE="robot_only", AUTONOMY_SIM_REALTIME="1")
-if len(sys.argv) > 7:
-    env["LD_PRELOAD"] = sys.argv[7] + (":" + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else "")
+def wait(process,path,needle,count=1):
+    deadline=time.monotonic()+45
+    while time.monotonic()<deadline:
+        text=path.read_text()
+        if text.count(needle)>=count:return text
+        assert process.poll() is None,text[-8000:]
+        time.sleep(.05)
+    raise AssertionError(path.read_text()[-8000:])
 
-def wait_for(process, path, condition):
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        text = path.read_text()
-        if condition(text):
-            return
-        assert process.poll() is None, text[-4000:]
-        time.sleep(.01)
-    raise AssertionError(path.read_text()[-4000:])
-
-def controller_config(source, destination):
-    with socket.socket() as port:
-        port.bind(("127.0.0.1", 0))
-        number = port.getsockname()[1]
-    value = json.loads(Path(source).read_text())
-    value["teleop_port"] = number
-    destination.write_text(json.dumps(value))
-
-with tempfile.TemporaryDirectory(prefix="sim-zig-lifecycle-") as temporary:
-    root = Path(temporary)
-    local_plugin = root / "libauv_test.so"
-    shutil.copy2(plugin, local_plugin)
-    cfg = root / "controller.json"
-    controller_config(config, cfg)
-    stdout_path, stderr_path = root / "out", root / "err"
-    with stdout_path.open("w") as out, stderr_path.open("w") as err:
-        process = subprocess.Popen([executable, str(local_plugin), "teleop", str(cfg)], env=env, cwd=root, stdout=out, stderr=err)
+with tempfile.TemporaryDirectory(prefix='sim-app-reload-') as tmp:
+    root=Path(tmp)
+    app=Application(root/'reload',plugin,backend,preload,mission='.teleop',scene='robot_only',realtime=True,
+                    reload='.{ .watch=true, .preserve_state=true }')
+    outpath,errpath=root/'out',root/'err'
+    with outpath.open('w') as out,errpath.open('w') as err:
+        p=subprocess.Popen([str(app.exe),'run'],cwd=app.root,env=app.env,stdout=out,stderr=err)
         try:
-            wait_for(process, stderr_path, lambda s: "control:" in s)
-            replacement = root / "replacement.so"
-            shutil.copy2(plugin, replacement)
-            os.replace(replacement, local_plugin)  # MOVED_TO event; never overwrite a mapped ELF.
-            wait_for(process, stderr_path, lambda s: "restarted auv loop" in s)
-            time.sleep(.05)
-            process.send_signal(signal.SIGINT)
-            assert process.wait(timeout=15) == 0, stderr_path.read_text()[-4000:]
+            wait(p,errpath,'application ready')
+            source=app.root/'src/MissionContext.zig'
+            source.write_text(source.read_text()+'\n// rebuilt MissionContext code\n')
+            wait(p,errpath,'state preserved')
+            # Invalid source must not replace/destroy the running generation.
+            cfg=app.root/'config/application.zig';valid=cfg.read_text()
+            cfg.write_text(valid+'this is not valid Zig;\n')
+            wait(p,errpath,'build failed; kept previous application')
+            cfg.write_text(valid)
+            wait(p,errpath,'state preserved',2)
+            app.configure(scene='robosub_course')
+            wait(p,errpath,'StructuralChangeRequiresRestart')
+            app.configure(scene='robot_only',reload='.{ .watch=true, .preserve_state=false }')
+            wait(p,errpath,'fresh world')
+            p.send_signal(signal.SIGINT)
+            assert p.wait(timeout=15)==0,errpath.read_text()[-5000:]
         finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-    summaries = [json.loads(s) for s in stdout_path.read_text().splitlines() if s.startswith('{"steps":')]
-    assert len(summaries) == 2 and all(s["status"] == 0 and s["steps"] > 0 for s in summaries), summaries
-    assert "RestartMission" not in stderr_path.read_text(), stderr_path.read_text()[-4000:]
-    controller_config(stationary_config, cfg)
-    with stdout_path.open("w") as out, stderr_path.open("w") as err:
-        process = subprocess.Popen([executable, stationary, "teleop", str(cfg)], env=env, cwd=root, stdout=out, stderr=err)
+            if p.poll() is None:p.kill();p.wait()
+    summaries=[line for line in outpath.read_text().splitlines() if line.startswith('simulation ')]
+    assert len(summaries)==2,summaries
+    log=errpath.read_text()
+    pauses=re.findall(r'paused tick=(\d+) hash=(\d+)',log)
+    resumes=re.findall(r'resumed tick=(\d+) hash=(\d+)',log)
+    assert len(pauses)==len(resumes)>=3,(pauses,resumes,log[-5000:])
+    # Fresh world is deliberately excluded from preserve/rollback assertions.
+    assert pauses[:-1]==resumes[:-1],(pauses,resumes)
+    assert int(resumes[-1][0])==0,resumes
+    # Stationary hardware-compatible plugin is retained across application reload.
+    legacy=Application(root/'legacy',stationary,backend,preload,mission='.teleop',controller='@import("stationary.zig").controller',reload='.{ .watch=false, .preserve_state=true }')
+    with errpath.open('w') as err:
+        p=subprocess.Popen([str(legacy.exe),'run'],cwd=legacy.root,env=legacy.env,stdout=subprocess.DEVNULL,stderr=err)
         try:
-            wait_for(process, stderr_path, lambda s: "control:" in s)
-            time.sleep(.05)
-            process.send_signal(signal.SIGINT)
-            assert process.wait(timeout=15) == 0, stderr_path.read_text()[-4000:]
+            wait(p,errpath,'application ready');time.sleep(.1);p.send_signal(signal.SIGINT)
+            assert p.wait(timeout=15)==0,errpath.read_text()[-4000:]
         finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-print("same-ABI plugin reload creates a fresh world; legacy stationary plugin and SIGINT cleanup passed")
+            if p.poll() is None:p.kill();p.wait()
+print('Application code reload, preserved physics, rollback, fresh restart and stationary plugin passed.')

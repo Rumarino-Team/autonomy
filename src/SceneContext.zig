@@ -3,64 +3,10 @@
 const std = @import("std");
 const math = @import("math.zig");
 const Auv = @import("Auv.zig");
-const DynLib = @import("DynLib.zig").DynLib;
-pub const c = @import("sim_c");
+pub const c = @import("SimulatorApi.zig").c;
 const SceneContext = @This();
 
-pub const Api = struct {
-    library: DynLib,
-    backend: c.PhysicsBackend = std.mem.zeroes(c.PhysicsBackend),
-    auv: Auv,
-    robot: *const fn ([*c]const u8) callconv(.c) ?*const c.Robot,
-    create: *const fn ([*c]c.Simulation, [*c]const u8, [*c]const c.Robot, [*c]u8, u32) callconv(.c) c.SimResult,
-    clone: *const fn ([*c]const c.Simulation, [*c]c.Simulation, [*c]u8, u32) callconv(.c) c.SimResult,
-    destroy: *const fn ([*c]c.Simulation) callconv(.c) void,
-    finalize: *const fn ([*c]c.Simulation, [*c]u8, u32) callconv(.c) c.SimResult,
-    draft: *const fn ([*c]c.Simulation, u32, [*c][*c]c.ObjectBlock, [*c]u8, u32) callconv(.c) c.SimResult,
-    fault: *const fn ([*c]c.Simulation, [*c]const c.FaultBlock, [*c]u8, u32) callconv(.c) c.SimResult,
-    open_backend: *const fn ([*c]c.PhysicsBackend, [*c]const u8, [*c]u8, u32) callconv(.c) c.SimResult,
-    close_backend: *const fn ([*c]c.PhysicsBackend) callconv(.c) void,
-    init_scene: *const fn ([*c]const c.Simulation, [*c]const c.AuvSimulatorOptions, [*c]u8, u32) callconv(.c) c.SimResult,
-    result: *const fn ([*c]c.AuvSimulatorResult, u32, [*c]u8, u32) callconv(.c) c.SimResult,
-
-    pub fn load(path: []const u8) !Api {
-        var lib = try DynLib.open(path);
-        errdefer lib.close();
-        return .{
-            .library = lib,
-            .auv = .{
-                .init = lib.lookup(*const Auv.InitFunc, "auv_init") orelse return error.MissingSimulatorApi,
-                .deinit = lib.lookup(*const Auv.DeinitFunc, "auv_deinit") orelse return error.MissingSimulatorApi,
-                .yieldUntilNextFrame = lib.lookup(*const Auv.YieldUntilNextFrameFunc, "auv_yield_until_next_frame") orelse return error.MissingSimulatorApi,
-                .setThrustorValues = lib.lookup(*const Auv.SetThrustorValuesFunc, "auv_set_thrustor_values") orelse return error.MissingSimulatorApi,
-                .simulationStatus = lib.lookup(*const Auv.SimulationStatusFunc, "auv_simulation_status") orelse return error.MissingSimulatorApi,
-            },
-            .robot = lib.lookup(*const fn ([*c]const u8) callconv(.c) ?*const c.Robot, "sim_robot_find") orelse return error.MissingSimulatorApi,
-            .create = try symbol(&lib, @FieldType(Api, "create"), "simulation_scene_create"),
-            .clone = try symbol(&lib, @FieldType(Api, "clone"), "simulation_clone"),
-            .destroy = try symbol(&lib, @FieldType(Api, "destroy"), "simulation_destroy"),
-            .finalize = try symbol(&lib, @FieldType(Api, "finalize"), "simulation_finalize"),
-            .draft = try symbol(&lib, @FieldType(Api, "draft"), "simulation_draft_object"),
-            .fault = try symbol(&lib, @FieldType(Api, "fault"), "simulation_add_fault"),
-            .open_backend = try symbol(&lib, @FieldType(Api, "open_backend"), "physics_backend_open"),
-            .close_backend = try symbol(&lib, @FieldType(Api, "close_backend"), "physics_backend_close"),
-            .init_scene = try symbol(&lib, @FieldType(Api, "init_scene"), "auv_simulator_init_scene"),
-            .result = try symbol(&lib, @FieldType(Api, "result"), "auv_simulator_read_result"),
-        };
-    }
-    fn symbol(lib: *DynLib, comptime T: type, comptime name: [:0]const u8) !T {
-        return lib.lookup(T, name) orelse error.MissingSimulatorApi;
-    }
-    pub fn pinBackend(api: *Api, path: [:0]const u8) !void {
-        var detail: [512]u8 = undefined;
-        try check(api.open_backend(&api.backend, path, &detail, detail.len));
-        if (!std.mem.eql(u8, std.mem.sliceTo(&api.backend.api.name, 0), "mujoco")) return error.FuzzRequiresMuJoCo;
-    }
-    pub fn deinit(api: *Api) void {
-        api.close_backend(&api.backend);
-        api.library.close();
-    }
-};
+pub const Api = @import("SimulatorApi.zig").Api;
 
 pub const Range = struct {
     min: f64,
@@ -87,6 +33,14 @@ pub const FuzzProfile = struct {
     actuator_fault: bool = true,
     sensor_fault: bool = true,
     placements: bool = true,
+    actuator_start_min: u64 = 36,
+    actuator_start_max: u64 = 360,
+    actuator_duration: u64 = 180,
+    dead_probability: f64 = 0.25,
+    weak: Range = .{ .min = 0.3, .max = 0.7 },
+    sensor_start: u64 = 360,
+    sensor_end: u64 = 720,
+    sensor_bias: Range = .{ .min = -0.05, .max = 0.05 },
     groups: []const PlacementGroup = &default_groups,
     pub fn validate(profile: FuzzProfile) !void {
         for (profile.position ++ profile.rotation ++ [_]f64{ profile.velocity, profile.angular_velocity }) |v|
@@ -96,6 +50,12 @@ pub const FuzzProfile = struct {
                 return error.InvalidFuzzProfile;
             if ((i == 0 or i == 1 or i == 3 or i == 4) and range.min == 0) return error.InvalidFuzzProfile;
         }
+        if (profile.actuator_start_max < profile.actuator_start_min or profile.actuator_duration == 0 or
+            profile.sensor_end <= profile.sensor_start or !std.math.isFinite(profile.dead_probability) or
+            profile.dead_probability < 0 or profile.dead_probability > 1 or
+            !std.math.isFinite(profile.weak.min) or !std.math.isFinite(profile.weak.max) or profile.weak.min < 0 or profile.weak.max > 1 or profile.weak.max < profile.weak.min or
+            !std.math.isFinite(profile.sensor_bias.min) or !std.math.isFinite(profile.sensor_bias.max) or profile.sensor_bias.max < profile.sensor_bias.min)
+            return error.InvalidFuzzProfile;
         for (profile.groups, 0..) |group, i| {
             var anchors: usize = 0;
             for (group.members, 0..) |id, j| {
@@ -137,8 +97,25 @@ detail: [512]u8 = @splat(0),
 
 pub fn init(self: *SceneContext, api: *const Api, scene_name: [:0]const u8, robot_name: [:0]const u8) !void {
     self.* = .{ .api = api };
-    const robot = api.robot(robot_name) orelse return error.UnknownRobot;
-    try check(api.create(&self.baseline, scene_name, robot, &self.detail, self.detail.len));
+    try @import("scenes/ApplicationScene.zig").construct(api, &self.baseline, scene_name, robot_name, .{ .dt_numerator = @as(u32, 1), .dt_denominator = @as(u32, 360), .hydro_period = @as(u32, 7) }, &self.detail);
+}
+// Baseline settings are configured through an independent draft; frozen roots
+// are never mutated or moved by assigning a Simulation value.
+pub fn configureBaseline(self: *SceneContext, numerator: u32, denominator: u32, hydro_period: u32) !void {
+    const allocator = std.heap.page_allocator;
+    const draft = try allocator.create(c.Simulation);
+    draft.* = std.mem.zeroes(c.Simulation);
+    defer {
+        self.api.destroy(draft);
+        allocator.destroy(draft);
+    }
+    try check(self.api.clone(&self.baseline, draft, &self.detail, self.detail.len));
+    draft.settings.dt_numerator = numerator;
+    draft.settings.dt_denominator = denominator;
+    draft.settings.hydro_period = hydro_period;
+    self.api.destroy(&self.baseline);
+    try check(self.api.clone(draft, &self.baseline, &self.detail, self.detail.len));
+    try check(self.api.finalize(&self.baseline, &self.detail, self.detail.len));
 }
 pub fn endCase(self: *SceneContext) void {
     if (self.active) self.api.auv.deinit();
@@ -168,22 +145,15 @@ pub fn start(self: *SceneContext, backend_path: [:0]const u8, max_ticks: u64, fr
     };
     try check(self.api.init_scene(&self.scene, &options, &self.detail, self.detail.len));
     self.active = true;
+    if (self.api.configure_blender) |configure| configure(0, 9760);
 }
 pub fn readResult(self: *SceneContext) !c.AuvSimulatorResult {
     var result: c.AuvSimulatorResult = undefined;
     try check(self.api.result(&result, @sizeOf(c.AuvSimulatorResult), &self.detail, self.detail.len));
     return result;
 }
-pub fn check(result: c.SimResult) !void {
-    return switch (result) {
-        c.SIM_OK => {},
-        c.SIM_CAPACITY => error.SceneCapacity,
-        c.SIM_NO_MEMORY => error.OutOfMemory,
-        c.SIM_UNSUPPORTED => error.SimulatorUnsupported,
-        c.SIM_BACKEND_ERROR => error.SimulatorBackend,
-        else => error.InvalidScene,
-    };
-}
+pub const check = @import("SimulatorApi.zig").check;
+
 fn object(self: *SceneContext, id: u32) !*c.ObjectBlock {
     var out: [*c]c.ObjectBlock = null;
     try check(self.api.draft(&self.scene, id, &out, &self.detail, self.detail.len));
@@ -281,10 +251,10 @@ pub fn randomize(self: *SceneContext, random: std.Random, profile: FuzzProfile) 
         f.id.uid = uid;
         uid = std.math.add(u32, uid, 1) catch return error.FaultIdOverflow;
         f.thruster = random.intRangeLessThan(u32, 0, s.robot.thruster_count);
-        f.start = random.intRangeAtMost(u64, 36, 360);
-        f.end = f.start + 180;
-        f.kind = if (random.float(f64) < 0.25) c.SIM_FAULT_DEAD else c.SIM_FAULT_WEAK;
-        f.magnitude = (Range{ .min = 0.3, .max = 0.7 }).sample(random);
+        f.start = random.intRangeAtMost(u64, profile.actuator_start_min, profile.actuator_start_max);
+        f.end = std.math.add(u64, f.start, profile.actuator_duration) catch return error.InvalidFuzzProfile;
+        f.kind = if (random.float(f64) < profile.dead_probability) c.SIM_FAULT_DEAD else c.SIM_FAULT_WEAK;
+        f.magnitude = profile.weak.sample(random);
         try check(self.api.fault(s, &f, &self.detail, self.detail.len));
     }
     if (profile.sensor_fault) {
@@ -308,9 +278,9 @@ pub fn randomize(self: *SceneContext, random: std.Random, profile: FuzzProfile) 
             f.id.uid = uid;
             f.kind = target.kind;
             f.sensor = target.sensor;
-            f.start = 360;
-            f.end = 720;
-            const bias = (Range{ .min = -0.05, .max = 0.05 }).sample(random);
+            f.start = profile.sensor_start;
+            f.end = profile.sensor_end;
+            const bias = profile.sensor_bias.sample(random);
             f.magnitude = if (f.kind == c.SIM_FAULT_GYRO or f.kind == c.SIM_FAULT_DEPTH) bias else 0;
             try check(self.api.fault(s, &f, &self.detail, self.detail.len));
         }

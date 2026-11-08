@@ -5,7 +5,12 @@ called by Run live, Record run, native CLI loading or controller generation.
 """
 import copy
 import hashlib
-import json
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+try:
+    from . import data_binary as binary
+except ImportError:
+    import data_binary as binary
 import math
 from pathlib import Path
 import base64
@@ -27,9 +32,9 @@ def embed_profiles(scene, profiles_dir):
     names=sorted({str(o.get('sim_profile')) for o in collection.all_objects if o.get('sim_profile')})
     mapping=dict(scene.get('sim_profile_texts',{}))
     for name in names:
-        path=Path(profiles_dir)/(name+'.json')
+        path=Path(profiles_dir)/(name+'.bin')
         if not path.is_file(): raise ValueError('missing profile '+name)
-        profile=json.loads(path.read_text())
+        profile=binary.read(path, kind="metadata")
         previous=mapping.get(name)
         text_name=previous.name if isinstance(previous,bpy.types.Text) else previous or f'.autonomy/{scene.name}/profile/{name}'
         text=bpy.data.texts.get(text_name) or bpy.data.texts.new(text_name)
@@ -49,13 +54,17 @@ def read_profile(scene, name, profiles_dir):
         header,separator,data=text.as_string().partition('\n')
         if header!='ASIM_PROFILE_1' or not separator: raise ValueError('unsupported embedded profile '+name)
         return wire.unpack(base64.b64decode(data,validate=True))
-    path=profiles_dir/(name+'.json')
+    path=profiles_dir/(name+'.bin')
     if not path.is_file(): raise ValueError('missing profile '+name)
-    return json.loads(path.read_text())
+    return binary.read(path, kind="metadata")
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    def ordered(v):
+        if isinstance(v, dict): return {k:ordered(v[k]) for k in sorted(v)}
+        if isinstance(v, (list, tuple)): return [ordered(x) for x in v]
+        return v
+    return 'AUVDATA1:' + base64.b64encode(binary.encode(ordered(value), 'metadata')).decode('ascii')
 
 
 def digest(value):

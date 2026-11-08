@@ -1,6 +1,8 @@
 """Direct .blend loading, binary compatibility, failure handling and replay."""
 import importlib.util
-import json
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+import data_binary as binary
 import os
 from pathlib import Path
 import subprocess
@@ -52,19 +54,19 @@ else: raise AssertionError('nonfinite wire accepted')
 with tempfile.TemporaryDirectory(prefix='sim-direct-blender-') as temporary:
     folder=Path(temporary)
     source=repo/'auvs/simulator/data/pool_scene.blend'
-    original=json.loads(run('validate',source).stdout)
+    original=binary.decode(run('validate',source).stdout)
     assert original['bodies']==8 and original['source']['content_hash'] and original['source']['kind']=='blender_native'
     relocated=folder/'self contained pool.blend'
     shutil.copy2(source,relocated)
-    relocated_data=json.loads(run('validate',relocated).stdout)
+    relocated_data=binary.decode(run('validate',relocated).stdout)
     assert relocated_data['source']['content_hash']==original['source']['content_hash'], 'relocated .blend required external calibration'
     payload=run('resolve',source,7).stdout
     snapshot=wire.decode(payload)
-    native=json.loads(run('validate','-',input=payload).stdout)
-    roundtrip=json.loads(run('validate','-',input=wire.encode(snapshot)).stdout)
+    native=binary.decode(run('validate','-',input=payload).stdout)
+    roundtrip=binary.decode(run('validate','-',input=wire.encode(snapshot)).stdout)
     assert native['fingerprint']==roundtrip['fingerprint'] and native['status']=='valid'
     snapshot['case_seed']=2**64-1
-    seeded=json.loads(run('validate','-',input=wire.encode(snapshot)).stdout)
+    seeded=binary.decode(run('validate','-',input=wire.encode(snapshot)).stdout)
     assert seeded['status']=='valid'
     for malformed in (payload[:8],b'BADVERS!'+payload[8:],wire.HEADER.pack(wire.MAGIC,wire.MAX_BYTES+1),payload[:-1]):
         run('validate','-',input=malformed,success=False)
@@ -74,9 +76,9 @@ with tempfile.TemporaryDirectory(prefix='sim-direct-blender-') as temporary:
     wrong=environment.copy();wrong['AUTONOMY_SIM_BLENDER_EXECUTABLE']='/missing-blender-binary'
     run('validate',source,env=wrong)
     def result_line(stdout):
-        start=stdout.rfind(b'{"backend"')
+        start=stdout.rfind(b'AUVDATA1')
         if start<0: raise AssertionError(stdout[-500:])
-        return json.loads(stdout[start:])
+        return binary.decode(stdout[start:])
     for backend in backends:
         first=result_line(run('run',backend,source,36,7).stdout)
         second=result_line(run('run',backend,source,36,7).stdout)
@@ -89,6 +91,6 @@ with tempfile.TemporaryDirectory(prefix='sim-direct-blender-') as temporary:
     batch_env=environment.copy();batch_env['AUTONOMY_SIM_BLENDER_EXECUTABLE']=str(proxy)
     run('validate',source,'--twice',env=batch_env)
     assert not counter.exists(), 'native loading unexpectedly invoked Blender'
-    assert not list(folder.glob('*.json')), 'direct launch produced an intermediate JSON scene'
+    assert not list(folder.glob('*.bin')), 'direct launch produced an intermediate scene file'
     assert not list(folder.glob('*.asim')), 'direct launch wrote a scene file'
 print('DIRECT_BLEND_BINARY_AND_REPLAY_PASSED')

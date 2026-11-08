@@ -7,7 +7,9 @@ It never generates robot C++ definitions or reads a robot profile JSON file.
 """
 import argparse
 import hashlib
-import json
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+import data_binary as binary
 import math
 from pathlib import Path
 import subprocess
@@ -80,9 +82,8 @@ def main():
     args = parser.parse_args(sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else [])
     records = []
     for name in NAMES:
-        # JSON here is a read-only authoring report from typed C++ values. A
-        # normal simulator launch never runs this script or parses that report.
-        definition = json.loads(subprocess.check_output([str(args.simctl.resolve()), 'robot-config', name]))
+        # The authoring report is versioned binary data from typed C++ values.
+        definition = binary.decode(subprocess.check_output([str(args.simctl.resolve()), 'robot-config', name]))
         path = args.output.resolve() / (name + '.blend')
         bpy.ops.wm.open_mainfile(filepath=str(path))
         scene = bpy.data.scenes['AutonomySource']
@@ -97,8 +98,8 @@ def main():
     lines += ['  {"'+r['name']+'", "'+r['asset_sha256']+'"},' for r in records]
     lines += ['};', '']
     (REPO / 'sim/robots/asset_hashes.inc').write_text('\n'.join(lines))
-    (args.output / 'manifest.json').write_text(json.dumps({'version': 2, 'robots': records}, indent=2)+'\n')
-    print('FIXED_ROBOT_CHECKSUMS_UPDATED', json.dumps(records))
+    binary.write(args.output / 'manifest.bin', {'version': 2, 'robots': records}, 'metadata')
+    print('FIXED_ROBOT_CHECKSUMS_UPDATED', records)
 
 
 if __name__ == '__main__':

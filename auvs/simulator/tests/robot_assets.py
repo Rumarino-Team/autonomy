@@ -1,12 +1,14 @@
 """Verify bundled saved Blender assets against the compiled preset provenance."""
 import hashlib
-import json
+
 from pathlib import Path
 import re
 import sys
 
 root = Path(sys.argv[1])
-manifest = json.loads((root / "data/robots/manifest.json").read_text())
+sys.path.insert(0,str(root.parents[1]/"tools"))
+from data_binary import read
+manifest = read(root / "data/robots/manifest.bin",kind="metadata")
 assert [r["name"] for r in manifest["robots"]] == ["hydrus", "proteus", "bluerov", "girona500"]
 source = (root / "robots.cpp").read_text()
 for robot in manifest["robots"]:

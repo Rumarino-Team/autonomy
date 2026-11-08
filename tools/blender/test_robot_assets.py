@@ -1,6 +1,8 @@
 """Check fixed-robot registration, isolation, relocation and checksum failures."""
 import hashlib
-import json
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+import data_binary as binary
 import os
 from pathlib import Path
 import shutil
@@ -15,13 +17,13 @@ environment['AUTONOMY_SIM_PROFILES'] = '/no-external-robot-calibration'
 
 def call(*args):
     return subprocess.run([str(simctl), *map(str, args)], env=environment,
-                          capture_output=True, text=True)
+                          capture_output=True)
 
 
-definitions = json.loads(call('robots').stdout)
+definitions = binary.decode(call('robots').stdout)
 expected = {'hydrus': 8, 'proteus': 6, 'bluerov': 8, 'girona500': 5}
 assert {d['name']: d['thrusters'] for d in definitions} == expected
-manifest = json.loads((assets / 'manifest.json').read_text())
+manifest = binary.read(assets / 'manifest.bin', kind='metadata')
 with tempfile.TemporaryDirectory(prefix='fixed-robot-check-') as folder:
     folder = Path(folder)
     for definition in definitions:
@@ -35,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='fixed-robot-check-') as folder:
         assert validation.returncode == 0, validation.stderr
         values = call('inspect', path)
         assert values.returncode == 0, values.stderr
-        model = json.loads(values.stdout)
+        model = binary.decode(values.stdout)
         assert len(model['bodies']) == 1 and model['bodies'][0]['name'] == name
         assert len(model['thrusters']) == expected[name]
         for actual, reference in zip(model['thrusters'], definition['mounts']):
@@ -48,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix='fixed-robot-check-') as folder:
         shutil.copyfile(path, relocated)
         again = call('validate', relocated)
         assert again.returncode == 0, again.stderr
-        assert json.loads(again.stdout)['fingerprint'] == json.loads(validation.stdout)['fingerprint']
+        assert binary.decode(again.stdout)['fingerprint'] == binary.decode(validation.stdout)['fingerprint']
     # Saving even an unrelated property changes the exact asset checksum. The
     # changed file must not quietly load with the old compiled configuration.
     changed = folder / 'changed.blend'
@@ -56,10 +58,10 @@ with tempfile.TemporaryDirectory(prefix='fixed-robot-check-') as folder:
             'bpy.ops.wm.save_as_mainfile(filepath=' + repr(str(changed)) + ')')
     process = subprocess.run([str(blender), '--background', '--factory-startup',
                               '--disable-autoexec', str(assets / 'hydrus.blend'),
-                              '--python-expr', code], capture_output=True, text=True)
+                              '--python-expr', code], capture_output=True)
     assert process.returncode == 0, process.stderr
     rejected = call('validate', changed)
-    assert rejected.returncode != 0 and 'SHA-256 mismatch' in rejected.stderr, rejected.stderr
+    assert rejected.returncode != 0 and b'SHA-256 mismatch' in rejected.stderr, rejected.stderr
     # The existing pool also resolves Hydrus from code, even if its old profile
     # Text reference is removed and no external profile directory is available.
     pool_copy = folder / 'pool-without-embedded-profile.blend'
@@ -67,10 +69,10 @@ with tempfile.TemporaryDirectory(prefix='fixed-robot-check-') as folder:
             'bpy.ops.wm.save_as_mainfile(filepath=' + repr(str(pool_copy)) + ')')
     process = subprocess.run([str(blender), '--background', '--factory-startup',
                               '--disable-autoexec', str(assets.parent / 'pool_scene.blend'),
-                              '--python-expr', code], capture_output=True, text=True)
+                              '--python-expr', code], capture_output=True)
     assert process.returncode == 0, process.stderr
     loaded = call('inspect', pool_copy)
     assert loaded.returncode == 0, loaded.stderr
-    robot = next(b for b in json.loads(loaded.stdout)['bodies'] if b['name'] == 'hydrus')
+    robot = next(b for b in binary.decode(loaded.stdout)['bodies'] if b['name'] == 'hydrus')
     assert robot['mass'] == next(d for d in definitions if d['name'] == 'hydrus')['body']['mass']
 print('Four fixed robots: compiled calibration, exact asset hashes, independent files, relocation and mismatch rejection passed')

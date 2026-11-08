@@ -12,6 +12,8 @@ pub fn step(self: *Pid, err: f32, measured_rate: ?f32, dt: ?f32, kp: f32, ki: f3
     const rate = if (measured_rate) |v| -v else if (self.previous != null and t > 0) (err - self.previous.?) / t else 0;
     self.previous = err;
     const pd = kp * err + kd * rate;
+    // Reconfigured limits apply to retained history immediately after reload.
+    self.sum = if (ki != 0) std.math.clamp(self.sum, -integral_limit / @abs(ki), integral_limit / @abs(ki)) else 0;
     const next_sum = if (ki != 0) std.math.clamp(self.sum + err * t, -integral_limit / @abs(ki), integral_limit / @abs(ki)) else 0;
     const candidate = pd + ki * next_sum;
     // Stop integrating further into saturation; permit integration out of it.
@@ -34,4 +36,10 @@ test "integrator bounds and saturation recovery" {
     try std.testing.expectApproxEqAbs(@as(f32, 3), pid.sum, 1e-5);
     try std.testing.expect(pid.step(-1, 0, 0.1, 2, 1, 0, 3, 10) < 1);
     try std.testing.expect(std.math.isFinite(pid.step(0, null, 0, 2, 1, 1, 3, 10)));
+}
+
+test "reloaded integral limit clamps retained history" {
+    var pid: Pid = .{ .sum = 3 };
+    _ = pid.step(100, 0, 0.01, 2, 1, 0, 0.1, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), pid.sum, 1e-6);
 }

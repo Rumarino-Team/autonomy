@@ -4,7 +4,12 @@ A take remembers the seed, tick budget, and scene. Play launches that run again.
 The pose link moves the view while the process is running.
 """
 
-import json
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+try:
+    from . import data_binary as binary
+except ImportError:
+    import data_binary as binary
 import math
 import os
 import re
@@ -258,7 +263,7 @@ def _course_tools(repo):
         "build/simulator/auvs/simulator/libauv_simulator.dll",
         "build/simulator/auvs/simulator/libauv_simulator.so",
     ))
-    config = _first_file(repo, ("auvs/simulator/config/hydrus.json",))
+    config = _first_file(repo, ("config/application.zig",))
     if executable is None or plugin is None or config is None:
         return None
     return {
@@ -287,7 +292,7 @@ def _tool_paths(scene):
     values = {
         "executable": prefs.executable if prefs else "zig-out/bin/src_3",
         "plugin": prefs.plugin if prefs else "build/portable/sim/libauv_sim.so",
-        "config": prefs.config if prefs else "sim/scenarios/controller.json",
+        "config": prefs.config if prefs else "config/application.zig",
         "simctl": "build/portable/sim/simctl",
         "backend": (prefs.backend if prefs else "build/portable/sim/libsim_backend_{backend}.so").format(backend=scene.autonomy_sim.backend),
     }
@@ -347,7 +352,7 @@ def _redraw():
 
 def detach_takes(scene):
     """Drop take actions so the live link or manual poses are not overridden."""
-    if not scene.get("sim_preview"):
+    if not scene.get("sim_preview") and not scene.autonomy_sim.takes:
         return
     legacy_names = {*rotor_animation.VEHICLES, "gate", "marker", "camera"}
     for obj in scene.objects:
@@ -390,7 +395,7 @@ def _saved_source(source, tools, frame):
     result = subprocess.run([str(tools['simctl']), 'validate', str(path)], env=env, capture_output=True)
     if result.returncode:
         raise ValueError("Saved scene rejected: " + result.stderr.decode('utf-8', 'replace').strip())
-    return path, json.loads(result.stdout)['source']['content_hash']
+    return path, binary.decode(result.stdout)['source']['content_hash']
 
 
 def _resolve_scene_source(scene, settings, name):
@@ -404,8 +409,8 @@ def _resolve_scene_source(scene, settings, name):
             raise ValueError("Choose a scene snapshot")
         return str(path.resolve())
     document = exporter.export_snapshot(scene, settings.source_frame)
-    path = _takes_dir() / f"{name}.scene.json"
-    path.write_text(json.dumps(document), encoding="utf-8")
+    path = _takes_dir() / f"{name}.scene.bin"
+    binary.write(path, document, "scene")
     return str(path.resolve())
 
 
@@ -413,9 +418,16 @@ def launch_take(scene, seed, live=False):
     """Run the current mission again from its scene, seed, and tick budget."""
     if _job["proc"] is not None:
         raise RuntimeError("A simulation is already running")
-    tools = _tool_paths(scene)
+    source = preview.source_scene(scene)
+    tools = _tool_paths(source)
     frame = scene.autonomy_sim.source_frame
-    source_path, _identity = _saved_source(scene, tools, frame)
+    source_path, _identity = _saved_source(source, tools, frame)
+    if tools.get("course"):
+        # Live poses always drive disposable Object copies. The saved authoring
+        # scene remains the source of geometry and must never receive telemetry.
+        identity = exporter.digest(exporter.export_snapshot(source, frame))
+        scene = preview.ensure(source, identity="application/"+identity)
+        rotor_animation.rig_scene(scene)
     if live:
         _link["scene"] = scene.name
     if live and not _link["running"]:
@@ -423,7 +435,7 @@ def launch_take(scene, seed, live=False):
             raise RuntimeError("could not start Blender pose receiver")
     settings = scene.autonomy_sim
     name = _next_take_name(settings)
-    scene_source = _resolve_scene_source(scene, settings, name) if tools.get("course") else str(source_path)
+    scene_source = None if tools.get("course") else str(source_path)
     log_path = _takes_dir() / f"{name}.log"
 
     take = settings.takes.add()
@@ -446,18 +458,13 @@ def launch_take(scene, seed, live=False):
         AUTONOMY_SIM_REALTIME=str(int(live)),
         AUTONOMY_SIM_BLENDER_PORT=str(settings.port),
     )
-    if tools.get("course"):
-        env["AUTONOMY_SIM_SCENE"] = scene_source
-    else:
+    if not tools.get("course"):
         env["AUTONOMY_SIM_SCENARIO"] = str(source_path)
     if settings.randomize:
         env["AUTONOMY_SIM_SEED"] = str(int(seed))
-    command = [
-        str(tools["executable"]),
-        str(tools["plugin"]),
-        "prequalify_robosub",
-        str(tools["config"]),
-    ]
+    # Application settings are compiled Zig. UI launch values must agree with
+    # config/application.zig; environment variables do not override that source.
+    command = [str(tools["executable"]), "run"]
     try:
         proc = subprocess.Popen(
             command, cwd=str(tools["repo"]), env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -498,9 +505,9 @@ def _poll_job():
 
 def _result_line(text):
     for line in reversed(text.splitlines()):
-        line = line.strip()
-        if line.startswith("{") and '"hash"' in line:
-            return json.loads(line)
+        if line.startswith('simulation '):
+            fields = dict(token.split('=',1) for token in line.split()[1:])
+            return {k:float(v) if 'depth' in k else int(v) for k,v in fields.items()}
     return None
 
 
@@ -583,7 +590,7 @@ class AutonomyPreferences(AddonPreferences):
         default="build/portable/sim/libauv_sim.so",
     )
     backend: StringProperty(name="Backend library template", default="build/portable/sim/libsim_backend_{backend}.so")
-    config: StringProperty(name="Config", description="Relative to the repository", default="sim/scenarios/controller.json")
+    config: StringProperty(name="Config", description="Relative to the repository", default="config/application.zig")
 
     def draw(self, _context):
         layout = self.layout
@@ -889,6 +896,22 @@ class AUTONOMY_OT_embed_profiles(Operator):
         return {'FINISHED'}
 
 
+class AUTONOMY_OT_export_binary(Operator):
+    bl_idname = 'autonomy_sim.export_binary'
+    bl_label = 'Export binary scene'
+    bl_description = 'Export scene geometry; set .scene in config/application.zig to the resulting file'
+
+    def execute(self, context):
+        try:
+            scene = preview.source_scene(context.scene)
+            path = _takes_dir() / 'authored-scene.bin'
+            binary.write(path, exporter.export_snapshot(scene, scene.autonomy_sim.source_frame), 'scene')
+            self.report({'INFO'}, 'Exported '+str(path)+'. Set .scene in config/application.zig and use zig build.')
+        except (OSError, ValueError) as error:
+            self.report({'ERROR'}, str(error)); return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 class AUTONOMY_PT_link(Panel):
     bl_label = "Autonomy"
     bl_idname = "AUTONOMY_PT_link"
@@ -899,16 +922,12 @@ class AUTONOMY_PT_link(Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.autonomy_sim
-        layout.prop(settings, "scene_source")
-        if settings.scene_source == "defined":
-            layout.prop(settings, "defined_scene")
-        elif settings.scene_source == "snapshot":
-            layout.prop(settings, "snapshot_path")
+        layout.label(text='Runtime: config/application.zig')
+        layout.operator('autonomy_sim.export_binary')
         layout.label(text='Source: '+str(context.scene.get('sim_source_scene',context.scene.name)))
         layout.prop(settings,'source_frame')
         if context.scene.get('sim_source_hash'):
             layout.label(text='Saved source: '+context.scene['sim_source_hash'][:12])
-        layout.prop(settings, "backend")
         layout.prop(settings, "port")
         layout.operator("autonomy_sim.build_scene", icon="MESH_CUBE")
         layout.operator("autonomy_sim.run_live", icon="PLAY")
@@ -933,10 +952,7 @@ class AUTONOMY_PT_takes(Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.autonomy_sim
-        layout.prop(settings, "randomize")
-        if settings.randomize:
-            layout.prop(settings, "seed")
-        layout.prop(settings, "max_ticks")
+        layout.label(text="Mission, budget, and fuzz settings: Zig config")
         row = layout.row(align=True)
         row.operator("autonomy_sim.record_take", icon="PLAY")
         layout.template_list("AUTONOMY_UL_takes", "", settings, "takes", settings, "take_index", rows=4)
@@ -963,6 +979,7 @@ CLASSES = (
     AUTONOMY_OT_edit_source,
     AUTONOMY_OT_add_obstacle,
     AUTONOMY_OT_embed_profiles,
+    AUTONOMY_OT_export_binary,
     AUTONOMY_OT_record_take,
     AUTONOMY_OT_run_live,
     AUTONOMY_OT_cancel_take,

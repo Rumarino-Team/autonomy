@@ -1,78 +1,31 @@
 # Seeded MuJoCo mission fuzzing
 
-Build and run from `/home/cesar/tmp2/autonomy`:
+Configure `.fuzz` in `config/application.zig` and build normally:
 
 ```sh
 zig build -Dsimulator=true
-./zig-out/bin/src_3 \
-  "$PWD/zig-out/lib/libauv_simulator.so" prequalify_robosub \
-  "$PWD/zig-out/share/autonomy/simulator/config/hydrus.json" \
-  --fuzz --seed 1 --cases 100 --workers 8 --results build/fuzz-seed-1
+./zig-out/bin/src_3 fuzz
+./zig-out/bin/src_3 replay 10451216379200822465
+./zig-out/bin/src_3 replay build/my-campaign/case-000000.bin
+./zig-out/bin/src_3 inspect build/my-campaign/totals.bin
 ```
 
-The current build, fuzz runner, package, and validation target MuJoCo only.
-Stonefish is disabled by default and is not exercised by fuzzing. Its existing
-sources remain available behind `SIMULATOR_ENABLE_STONEFISH`; the borrowed-scene
-extension rejects other engines. The normal hardware/stationary plugin commands
-remain supported. The legacy Zig `-Dstonefish` option explicitly enables its
-existing CMake targets; it is not part of this delivery's validation.
+Defaults: master seed 1, 100 cases, eight dedicated OS threads, Hydrus, Robosub,
+21,600 physics ticks, six ticks per frame. Set a fresh `.fuzz.results` directory for
+every campaign/replay. Operational settings come from compiled Zig. Teleop is
+rejected. Fuzzing disables pacing, hot reload, telemetry, and verbose frame logging.
 
-Results directories must be fresh: an existing `campaign.json` is not overwritten.
-The runner defaults to master seed 1, 100 cases, eight OS workers, Hydrus and the
-Robosub course. Existing `AUTONOMY_SIM_ROBOT`, `AUTONOMY_SIM_SCENE`,
-`AUTONOMY_SIM_BACKEND`, `AUTONOMY_SIM_MAX_TICKS`, and `AUTONOMY_SIM_FRAME_TICKS`
-settings are captured before launching workers. The budget defaults to 21,600
-physics ticks and frames to six ticks (360 Hz physics / 60 Hz controller).
-Fuzz runs always disable pacing, watchers, telemetry, and verbose frame logs.
-Teleop is rejected. Other robot presets require a matching controller config;
-only Hydrus has supplied Robosub mission tuning.
-
-Replay the **case seed**, rather than the campaign's master seed:
-
-```sh
-./zig-out/bin/src_3 \
-  "$PWD/zig-out/lib/libauv_simulator.so" prequalify_robosub \
-  "$PWD/zig-out/share/autonomy/simulator/config/hydrus.json" \
-  --fuzz --replay-seed 10451216379200822465 --results build/fuzz-replay
-```
-
-Replay forces one case on one worker. `--profile nominal` selects the compiled
-profile with no variations/faults, useful for checking the unmodified mission.
-The default profile is selected by `--profile default`.
-
-## Ownership and lifecycle
-
-Each dedicated `std.Thread` constructs a `SceneContext` in place, including its
-own frozen C baseline. Each case clones a mutable scene, constructs a private
-Xoshiro256++ RNG and arena, applies variations, finalizes, and initializes that
-thread's AUV adapter. A private `MissionContext` parses the coordinator's captured
-controller configuration and owns its PID history, queues, and detection caches.
-The mission loop is shared with the normal single-world launch.
-
-Scene roots contain address-sensitive pointers: never assign or move them after
-initialization. Model buffers are owned exclusively by their thread; they do not
-all need physical TLS declarations. The adapter's active model/runtime/commands
-are `thread_local`. No world or mutable RNG/controller storage is shared.
-The coordinator shares immutable API/settings/configuration and uses an atomic
-case counter and cancellation flag. Each result slot has only one writer.
-
-`auv_simulator.h` defines extension v1, without changing AuvFrame or scene/backend
-ABI v5. `auv_simulator_init_scene` borrows a frozen model until `auv_deinit`, and
-copies/consumes its options during initialization. Options select the MuJoCo path,
-frame/budget, pacing, and summary printing. `auv_simulator_read_result` copies
-statistics and available final body state before destruction. All extension calls
-operate on the calling OS thread. Failed initialization retains no borrowed model.
-
-Destroy the batch mission context, adapter world/runtime/backend, cloned scene,
-and case arena in that order. Baselines die when their worker exits. Libraries
-are pinned until every worker joins. Ctrl+C stops assigning work and cancels
-active missions cooperatively between frames; it does not forcibly kill a thread
-inside an engine call. Partial thread startup also cancels and joins all workers.
+Each worker creates its own stable-address C baseline, mutable case clone, Zig
+arena, RNG, simulator world, and MissionContext. Native adapter state remains
+thread-local; no mutable controller or scene data crosses worlds. The coordinator
+pins native libraries and the application generation until all workers join.
+Cancellation is checked between frames; partial worker startup joins every started
+thread. Normal and batch runs use the same frame-driven mission/controller code.
 
 ## Generator contract and ranges
 
 `SceneContext.zig` exposes `randomize(std.Random, FuzzProfile)` for mutable scenes.
-Profiles are typed Zig values/functions; external JSON profiles are deferred.
+Profiles are typed Zig values configured through config/application.zig.
 Profile/generator version is 1. Case seeds use:
 
 ```
@@ -86,7 +39,7 @@ actuator fault, and sensor fault. Do not change it without versioning the profil
 
 Default variations relative to the baseline:
 
-- Dynamic position X/Y ±0.2 m, Z ±0.1 m; local roll/pitch ±0.05 rad, yaw ±0.15 rad.
+- Dynamic position X/Y ±0.2 m, Z ±0.1 m; local roll/pitch ±1.05 rad, yaw ±1.15 rad.
 - World initial velocity ±0.2 m/s per component; angular velocity ±0.2 rad/s.
 - Effective mass/dry mass/inertia share a body factor 0.97–1.03. Body and hull
   volumes share a separate factor 0.97–1.03. Hull drag/skin share 0.7–1.4 per body.
@@ -106,40 +59,25 @@ capacity exhaustion, or invalid generated scenes fail that case without retries.
 A fault-heavy profile is intended to discover failures; it does not guarantee
 that every mission succeeds.
 
-## Reports and reproducibility
+## Binary results and replay
 
-Each `case-NNNNNN.json` includes seed/index, profile/version, resolved numeric
-scene values, faults, mission stage, outcome/error/detail, tick, hash, depth
-bounds, and available final robot state. Provenance includes robot asset SHA-256
-and hashes of the adapter, core, backend, running Zig binary, and captured config.
-JSON does not contain model pointers, intrusive links, or SIMD padding.
+All results use AUVDATA1 binary data: `campaign.bin`, `case-NNNNNN.bin`, ordered
+`summary.bin`, and `totals.bin`. Per-case records contain resolved scene values,
+profile/configuration, seed, outcome/error/stage, tick/hash, depth bounds, and final
+state. Provenance includes application, host, core, plugin, backend, and asset hashes.
+The format serializes fields and IDs, excluding pointers and alignment padding.
 
-`summary.jsonl` is ordered by case index, independent of completion order;
-`totals.json` counts passed/failed/cancelled cases. Individual failures do not stop
-the batch. Failures, startup errors, output errors, or interruption yield a nonzero
-exit. Unassigned cases on cancellation receive explicit cancelled records.
+Workers write distinct files and finalize them by rename. Existing campaign/output
+names are not overwritten. Failures do not stop other cases; failures, cancellation,
+startup, and output errors produce a nonzero exit. Cancellation records unassigned
+cases too. Inspect results with `src_3 inspect` or `python tools/data_binary.py`.
 
-Seed replay requires the same compiled profile, baseline, controller config, and
-simulator build. Compare provenance before interpreting a hash difference. It is
-not a portable cross-version/cross-platform replay format. Resolved values are
-recorded for diagnosis; importing modified JSON case files is not implemented.
+Seed replay uses current configuration. File replay restores recorded configuration
+and profile, keeping the current output directory. Matching trajectories/hashes
+requires the same mission/controller code, native simulator build, and baseline
+assets; reports retain provenance to diagnose differences. Changed broad profiles
+can legitimately fail within the tick budget.
 
-## Validation commands
-
-```sh
-cmake -S . -B build/simulator -DAUTONOMY_BUILD_SIMULATOR=ON \
-  -DSIMULATOR_ENABLE_STONEFISH=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build/simulator --target simulator_all -j8
-ctest --test-dir build/simulator --output-on-failure
-zig build test
-```
-
-The suite compares full cases with one and eight workers, seed replay, nominal
-completion, budget/init failures, cancellation, and injected partial worker
-startup. A native eight-thread harness repeatedly creates/destroys worlds and
-checks exact per-case hashes, borrowed-model lifetime, freeze checks, and stable
-allocation counts after warm-up. The header compiles independently in C11/C++23
-and its extension layouts are checked from C/Zig.
-
-ASan/UBSan/leak and ThreadSanitizer builds are separate. See `VALIDATION.md` for
-commands, measured results, and the native-engine instrumentation qualification.
+See [application reload and binary data](../../docs/APPLICATION_RELOAD.md) for the
+binary schema, ownership, commands, compatibility changes, and validation. All
+validation for this delivery is MuJoCo-only; Stonefish is not built or executed.

@@ -1,5 +1,4 @@
 """Disposable presentation objects; authoring objects never receive state updates."""
-import json
 import math
 import bpy
 from mathutils import Matrix, Quaternion, Vector

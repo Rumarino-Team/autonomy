@@ -83,9 +83,26 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
+    const app = b.addLibrary(.{
+        .name = "autonomy_application",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{ .root_source_file = b.path("application.zig"), .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    b.installArtifact(app);
+    const metadata_tool = b.addExecutable(.{ .name = "autonomy_metadata", .root_module = b.createModule(.{ .root_source_file = b.path("metadata.zig"), .target = b.graph.host, .optimize = optimize, .link_libc = true }) });
+    const generate_metadata = b.addRunArtifact(metadata_tool);
+    const manifest = generate_metadata.addOutputFileArg("manifest.bin");
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(manifest, .prefix, "share/autonomy/simulator/data/robots/manifest.bin").step);
+    b.installFile("include/application.h", "include/autonomy/application.h");
+    inline for (.{ "auv.h", "math.h", "object_classes.h" }) |header|
+        b.installFile("include/" ++ header, "include/autonomy/" ++ header);
+    b.installDirectory(.{ .source_dir = b.path("config"), .install_dir = .prefix, .install_subdir = "share/autonomy/config" });
+    b.installFile("tools/data_binary.py", "share/autonomy/tools/data_binary.py");
+    b.installFile("docs/APPLICATION_RELOAD.md", "share/autonomy/APPLICATION_RELOAD.md");
     const runtime_options = b.addOptions();
     runtime_options.addOption(bool, "external_asan", b.option(bool, "external-asan", "Let externally preloaded ASan own signal handlers/stacks (does not instrument Zig)") orelse false);
     exe.root_module.addOptions("runtime_options", runtime_options);
+    app.root_module.addOptions("runtime_options", runtime_options);
     const auv_c = b.addTranslateC(.{
         .root_source_file = b.path("include/auv.h"),
         .target = target,
@@ -99,17 +116,41 @@ pub fn build(b: *std.Build) !void {
     });
     sim_c.addIncludePath(b.path("auvs/simulator"));
     sim_c.addIncludePath(b.path("include"));
+    const application_c = b.addTranslateC(.{
+        .root_source_file = b.path("include/application.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    application_c.addIncludePath(b.path("include"));
     const auv_c_mod = auv_c.createModule();
     const sim_c_mod = sim_c.createModule();
+    const application_c_mod = application_c.createModule();
     exe.root_module.addImport("auv_c", auv_c_mod);
     exe.root_module.addImport("sim_c", sim_c_mod);
+    exe.root_module.addImport("application_c", application_c_mod);
     exe.root_module.link_libc = true;
     exe.root_module.addIncludePath(b.path("include"));
     exe.root_module.addIncludePath(b.path("auvs/simulator"));
-    exe.root_module.addCSourceFile(.{
-        .file = b.path("auvs/trap_sim/auv.c"),
-    });
 
+    app.root_module.addImport("auv_c", auv_c_mod);
+    app.root_module.addImport("sim_c", sim_c_mod);
+    app.root_module.addImport("application_c", application_c_mod);
+    app.root_module.addIncludePath(b.path("include"));
+    app.root_module.addIncludePath(b.path("auvs/simulator"));
+    const host_options = b.addOptions();
+    // Zig 0.17 resolves these paths in the make process rather than build.zig.
+    if (@hasDecl(std.Build, "pathFromRoot")) {
+        host_options.addOption([]const u8, "source_root", b.pathFromRoot("."));
+    } else {
+        host_options.addOptionPathUntracked("source_root", b.path("."));
+    }
+    host_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        host_options.addOption([]const u8, "install_prefix", b.getInstallPath(.prefix, ""));
+    } else {
+        host_options.addOptionPathUntracked("install_prefix", .{ .relative = .{ .base = .install_prefix } });
+    }
+    exe.root_module.addOptions("host_options", host_options);
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
@@ -180,7 +221,7 @@ pub fn build(b: *std.Build) !void {
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+        .root_module = app.root_module,
     });
 
     // A run step that will run the second test executable.
@@ -195,12 +236,13 @@ pub fn build(b: *std.Build) !void {
 
     const fuzz_startup = b.addExecutable(.{
         .name = "fuzz_startup_test",
-        .root_module = b.createModule(.{ .root_source_file = b.path("src/FuzzStartupTest.zig"), .target = target, .optimize = optimize, .link_libc = true }),
+        .root_module = b.createModule(.{ .root_source_file = b.path("fuzz_startup.zig"), .target = target, .optimize = optimize, .link_libc = true }),
     });
     fuzz_startup.root_module.addIncludePath(b.path("include"));
     fuzz_startup.root_module.addIncludePath(b.path("auvs/simulator"));
     fuzz_startup.root_module.addImport("auv_c", auv_c_mod);
     fuzz_startup.root_module.addImport("sim_c", sim_c_mod);
+    fuzz_startup.root_module.addImport("application_c", application_c_mod);
     fuzz_startup.root_module.addOptions("runtime_options", runtime_options);
     const startup_step = b.step("fuzz-startup-test", "Build the injectable fuzz worker startup fixture");
     const install_startup = b.addInstallArtifact(fuzz_startup, .{});
@@ -256,7 +298,7 @@ pub fn build(b: *std.Build) !void {
     const lib_auv_stationary_sim = b.addLibrary(.{
         .name = "auv_stationary_sim",
         .root_module = b.createModule(.{
-            .target = b.graph.host,
+            .target = target,
             .optimize = optimize,
         }),
         .linkage = .dynamic,

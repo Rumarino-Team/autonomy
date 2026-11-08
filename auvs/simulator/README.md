@@ -1,5 +1,13 @@
 # Data-oriented simulator core
 
+For the Zig application, configuration is now compiled from `config/application.zig`.
+Use `zig build -Dsimulator=true` and `./zig-out/bin/src_3 run`; JSON configuration
+and the old positional launch arguments are removed. See
+[application reload and binary data](../../docs/APPLICATION_RELOAD.md) for current
+commands, reload ownership, binary reports, and validation. Native C interfaces
+described below remain available.
+
+
 This is the programmatic-scene simulator in the isolated `tmp2/autonomy`
 checkout, branch `codex/data-oriented-simulator-core`. `BASE_COMMIT.txt` records
 its `main` base and MuJoCo revision. The implementation started from the four

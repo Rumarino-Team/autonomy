@@ -1,5 +1,5 @@
 const std = @import("std");
-const math = @import("math.zig");
+const math = @import("MathTypes.zig");
 
 pub const c = @import("auv_c");
 

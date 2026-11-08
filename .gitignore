@@ -16,3 +16,15 @@ tools
 
 .cache
 >>>>>>> Stashed changes
+
+# Owned binary interchange tools added with the application reload system.
+!tools/
+tools/*
+!tools/data_binary.py
+!tools/blender/
+tools/blender/*
+!tools/blender/export_snapshot.py
+
+__pycache__/
+*.pyc
+core

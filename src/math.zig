@@ -1,18 +1,14 @@
 const std = @import("std");
 
-pub const Vector2f = @Vector(2, f32);
-pub const Vector3f = @Vector(3, f32);
-pub const Vector6f = @Vector(6, f32);
-pub const Quaternionf = @Vector(4, f32);
-
-/// Zig 0.17 forbids `@Vector` fields in `extern` structs. These match `MathVector3f` and `MathQuaternionf`.
-pub const Vector3Storage = extern struct {
-    buf: [3]f32 align(16),
-};
-
-pub const QuaternionStorage = extern struct {
-    buf: [4]f32 align(16),
-};
+const Types = @import("MathTypes.zig");
+pub const Vector2f = Types.Vector2f;
+pub const Vector3f = Types.Vector3f;
+pub const Vector6f = Types.Vector6f;
+pub const Quaternionf = Types.Quaternionf;
+pub const Vector3Storage = Types.Vector3Storage;
+pub const QuaternionStorage = Types.QuaternionStorage;
+pub const Pose = Types.Pose;
+pub const BoundingBox = Types.BoundingBox;
 
 pub inline fn vec3(value: anytype) Vector3f {
     const buf = if (@hasField(@TypeOf(value), "buf")) value.buf else value;
@@ -23,16 +19,6 @@ pub inline fn vec4(value: anytype) Quaternionf {
     const buf = if (@hasField(@TypeOf(value), "buf")) value.buf else value;
     return .{ buf[0], buf[1], buf[2], buf[3] };
 }
-
-pub const Pose = extern struct {
-    pos: Vector3Storage,
-    quat: QuaternionStorage,
-};
-
-pub const BoundingBox = extern struct {
-    pose: Pose,
-    size: Vector3Storage,
-};
 
 pub inline fn xy(v: Vector3f) Vector2f {
     return .{ v[0], v[1] };

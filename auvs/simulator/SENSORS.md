@@ -1,5 +1,13 @@
 # Sensors and the Zig autonomy bridge
 
+For the Zig application, configuration is now compiled from `config/application.zig`.
+Use `zig build -Dsimulator=true` and `./zig-out/bin/src_3 run`; JSON configuration
+and the old positional launch arguments are removed. See
+[application reload and binary data](../../docs/APPLICATION_RELOAD.md) for current
+commands, reload ownership, binary reports, and validation. Native C interfaces
+described below remain available.
+
+
 The simulator owns ideal sensor descriptions in the frozen C scene. Physics,
 measurements, and the AUV adapter are separate stages:
 

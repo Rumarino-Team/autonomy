@@ -10,5 +10,6 @@ with ZipFile(output, 'w', compression=ZIP_DEFLATED) as archive:
     for path in sorted((Path(__file__).parent/'autonomy_sim').glob('*.py')):
         if not path.name.startswith('test_'):
             archive.write(path, 'autonomy_sim/'+path.name)
+    archive.write(repo/'tools/data_binary.py', 'autonomy_sim/data_binary.py')
     archive.writestr('autonomy_sim/repo_path.txt', str(repo.resolve()) + '\n')
 print(output)

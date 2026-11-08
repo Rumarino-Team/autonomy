@@ -29,6 +29,14 @@ SIM_API SimResult
 auv_simulator_init_scene(const Simulation *, const AuvSimulatorOptions *, char *, uint32_t);
 /* Copy before auv_deinit, including after a step/command error. */
 SIM_API SimResult auv_simulator_read_result(AuvSimulatorResult *, uint32_t size, char *, uint32_t);
+/* Load a saved .blend through the packaged binary exporter, or an AUVDATA1
+ * snapshot. The stable zero-initialized root owns all copied scene buffers. */
+SIM_API SimResult
+auv_simulator_load_scene(Simulation *, const char *, const Robot *, char *, uint32_t);
+/* Call at a frame boundary after an external pause. Does not advance physics. */
+SIM_API void auv_simulator_rebase_pacing(void);
+/* Configure the optional existing binary Blender pose link, before stepping. */
+SIM_API void auv_simulator_configure_blender(uint32_t enabled, uint16_t port);
 #ifdef __cplusplus
 }
 #endif

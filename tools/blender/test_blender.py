@@ -3,7 +3,9 @@
 blender --background --factory-startup pool_scene.blend --python-exit-code 1 \
   --python tools/blender/test_blender.py -- mujoco
 """
-import json
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+import data_binary as binary
 from pathlib import Path
 import socket
 import sys
@@ -39,9 +41,17 @@ def forbidden_export(*args, **kwargs):
     raise AssertionError('runtime used the Python exporter snapshot')
 link.exporter.export_scene=forbidden_export
 temporary=tempfile.TemporaryDirectory(prefix='native-blender-addon-')
+# Configure/build an isolated application; the test never edits user config.
+sys.path.insert(0,str(repo/'auvs/simulator/tests'))
+from app_fixture import Application
+application=Application(Path(temporary.name)/'app',repo/'build/simulator/auvs/simulator/libauv_simulator.so',repo/'build/simulator/auvs/simulator/libsimulator_backend_mujoco.so')
+def isolated_course_tools(_repo):
+    return dict(executable=application.exe,plugin=repo/'build/simulator/auvs/simulator/libauv_simulator.so',
+                config=application.root/'config/application.zig',simctl=None,backend=None,repo=application.root,profiles=None,course=True)
+link._course_tools=isolated_course_tools
 saved=Path(temporary.name)/'source.blend'
 bpy.ops.wm.save_as_mainfile(filepath=str(saved))
-scene_files_before=set(link._takes_dir().glob('scene_*.json'))
+scene_files_before=set(link._takes_dir().glob('scene_*.bin'))
 
 # Test the same Record run operator used by the sidebar, including its subprocess.
 assert bpy.ops.autonomy_sim.record_take() == {'FINISHED'}
@@ -49,10 +59,10 @@ scene=bpy.context.scene
 settings=scene.autonomy_sim
 link._job['proc'].wait(timeout=120)
 take = link.finish_job()
-assert set(link._takes_dir().glob('scene_*.json'))==scene_files_before, 'record run wrote an intermediate JSON scene'
+assert set(link._takes_dir().glob('scene_*.bin'))==scene_files_before, 'record run wrote an intermediate scene file'
 assert take.status == 'ok' and take.reason == 'complete', link._job['message']
 log = Path(take.log).read_text(encoding='utf-8', errors='replace')
-result = json.loads(next(line for line in reversed(log.splitlines()) if line.startswith('{') and '"hash"' in line))
+result = link._result_line(log)
 root = link._object_for('hydrus')
 assert 720 < result['steps'] < settings.max_ticks and result['status'] == 0, result
 assert 'completed mission' in log, log[-2000:]
@@ -75,6 +85,8 @@ listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 listener.bind(('127.0.0.1', 0))
 listener.setblocking(False)
 settings.port = listener.getsockname()[1]
+application.configure(max_ticks=720,realtime=True,blender='.{ .enabled=true, .port='+str(settings.port)+' }')
+application.build()
 link._link.update(socket=listener, running=True, packets=0, time=0.0)
 bpy.ops.wm.save_as_mainfile(filepath=str(saved))
 live_take = link.launch_take(scene, 0, live=True)
@@ -115,8 +127,8 @@ bpy.ops.wm.save_as_mainfile(filepath=str(artifact))
 report = {'backend': engine, 'ticks': result['steps'], 'hash': result['hash'],
           'live_updates': updates, 'rotors': 8,
           'log': take.log, 'artifact': str(artifact), 'status': 'passed'}
-report_path = repo/f'build/portable/blender-port/{engine}-test.json'
+report_path = repo/f'build/portable/blender-port/{engine}-test.bin'
 report_path.parent.mkdir(parents=True, exist_ok=True)
-report_path.write_text(json.dumps(report, indent=2)+'\n')
+binary.write(report_path, report, 'run')
 link.unregister()
-print('BLENDER_INTEGRATION_PASSED', json.dumps(report))
+print('BLENDER_INTEGRATION_PASSED', report)

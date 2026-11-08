@@ -50,35 +50,37 @@ int main() {
     auto forward = rotate(r.sensors[3].pose.quat, v(0, 0, 1));
     forward = forward / norm(forward);
     std::printf(
-        "{\n  \"teleop_port\":8080,\n  \"camera_forward\":[%.17g,%.17g,%.17g],\n  "
-        "\"rotation_limit\":[0.3,0,3.141592653589793],\n  \"tam\":[\n",
+        "// Generated SI-wrench controller calibration.\nconst Config = "
+        "@import(\"../src/Configuration.zig\").Controller;\npub const controller: Config = .{\n  "
+        ".teleop_port=8080,\n  .camera_forward=.{%.17g,%.17g,%.17g},\n  "
+        ".rotation_limit=.{0.3,0,3.141592653589793},\n  .tam=&.{\n",
         double(forward.buf[0]),
         double(forward.buf[1]),
         double(forward.buf[2])
     );
     for (uint32_t i = 0; i < r.thruster_count; ++i) {
-        std::printf("    [");
+        std::printf("    .{");
         for (unsigned j = 0; j < 6; ++j) {
             double value = 0;
             for (unsigned k = 0; k < 6; ++k)
                 value += columns[i][k] * augmented[k][j + 6];
             std::printf("%s%.17g", j ? "," : "", value);
         }
-        std::printf("]%s\n", i + 1 < r.thruster_count ? "," : "");
+        std::printf("},\n");
     }
     const double weight = r.object.body.dry_mass - settings.water_density * r.object.body.volume;
-    std::printf("  ],\n  \"thruster_output_scale\":1,\n  \"thruster_curve\":\"quadratic_rpm\",\n");
     std::printf(
-        "  \"odometry\":{\n    \"rotation_gate\":0.5,\n    \"kp\":[100,100,100,25,30,60],\n    "
-        "\"ki\":[0,0,1,0,0,0],\n    \"kd\":[110,110,140,12,16,50],\n    "
-        "\"derivative_on_measurement\":true,\n    \"translation_frame\":\"world\",\n    "
-        "\"integral_limit\":[0,0,15,0,0,0],\n    \"output_limit\":[180,400,150,20,20,70],\n    "
-        "\"feedforward_world_force\":[%.17g,%.17g,%.17g]\n  },\n",
+        "  },\n  .thruster_output_scale=1,\n  .thruster_curve=.quadratic_rpm,\n  .odometry=.{\n    "
+        ".rotation_gate=0.5,\n    .kp=.{100,100,100,25,30,60},\n    .ki=.{0,0,1,0,0,0},\n    "
+        ".kd=.{110,110,140,12,16,50},\n    .derivative_on_measurement=true,\n    "
+        ".translation_frame=.world,\n    .integral_limit=.{0,0,15,0,0,0},\n    "
+        ".output_limit=.{180,400,150,20,20,70},\n    "
+        ".feedforward_world_force=.{%.17g,%.17g,%.17g},\n  },\n",
         -weight * settings.gravity.buf[0],
         -weight * settings.gravity.buf[1],
         -weight * settings.gravity.buf[2]
     );
     std::printf("  "
-                "\"ibvs\":{\"center_deadband\":0.05,\"target_height\":0.9,\"interaction\":[[0,0,0],"
-                "[0,0,1],[0,0,0],[0,0,0],[0,0,0],[-1,0,0]]}\n}\n");
+                ".ibvs=.{.center_deadband=0.05,.target_height=0.9,.interaction=&.{&.{0,0,0},&.{0,0,"
+                "1},&.{0,0,0},&.{0,0,0},&.{0,0,0},&.{-1,0,0}}},\n};\n");
 }

@@ -599,7 +599,7 @@ install(FILES scene_presets.h auv_simulator.h "${PROJECT_SOURCE_DIR}/include/auv
 add_executable(simulator_controller_config controller_config.cpp)
 target_link_libraries(simulator_controller_config PRIVATE simulator_core)
 add_dependencies(simulator_all simulator_controller_config)
-install(DIRECTORY config/ DESTINATION share/autonomy/simulator/config COMPONENT simulator)
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/config/" DESTINATION share/autonomy/config COMPONENT simulator)
 
 add_executable(simulator_sensor_tests tests/sensors.cpp)
 target_link_libraries(simulator_sensor_tests PRIVATE simulator_core)
@@ -649,24 +649,27 @@ foreach(engine IN LISTS simulator_engines)
     add_test(NAME simulator_${engine}_mission
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/mission.py"
                 "${CMAKE_CURRENT_BINARY_DIR}/zig/bin/src_3" $<TARGET_FILE:auv_simulator>
-                $<TARGET_FILE:simulator_backend_${engine}> "${CMAKE_CURRENT_SOURCE_DIR}/config/hydrus.json"
+                $<TARGET_FILE:simulator_backend_${engine}> "${PROJECT_SOURCE_DIR}/config/hydrus.zig"
                 ${simulator_mission_preload})
     add_test(NAME simulator_${engine}_lifecycle
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle.py"
                 "${CMAKE_CURRENT_BINARY_DIR}/zig/bin/src_3" $<TARGET_FILE:auv_simulator>
-                $<TARGET_FILE:simulator_backend_${engine}> "${CMAKE_CURRENT_SOURCE_DIR}/config/hydrus.json"
+                $<TARGET_FILE:simulator_backend_${engine}> "${PROJECT_SOURCE_DIR}/config/hydrus.zig"
                 "${CMAKE_CURRENT_BINARY_DIR}/zig/lib/libauv_stationary_sim.so"
-                "${PROJECT_SOURCE_DIR}/auvs/stationary_sim/auv.json" ${simulator_mission_preload})
+                "${PROJECT_SOURCE_DIR}/config/stationary.zig" ${simulator_mission_preload})
     set_tests_properties(simulator_${engine}_auv_bridge simulator_${engine}_mission simulator_${engine}_lifecycle
         PROPERTIES TIMEOUT 180 ENVIRONMENT "TMPDIR=${CMAKE_CURRENT_BINARY_DIR}/tmp")
 endforeach()
 add_test(NAME simulator_controller_calibration
     COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_config.py"
-            $<TARGET_FILE:simulator_controller_config> "${CMAKE_CURRENT_SOURCE_DIR}/config/hydrus.json" ${simulator_mission_preload})
+            $<TARGET_FILE:simulator_controller_config> "${PROJECT_SOURCE_DIR}/config/hydrus.zig" ${simulator_mission_preload})
 add_test(NAME simulator_zig_tests
     COMMAND ${SIMULATOR_ZIG_EXECUTABLE} build test)
 set_tests_properties(simulator_zig_tests PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 120)
 
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/tools/blender/" DESTINATION share/autonomy/tools/blender COMPONENT simulator FILES_MATCHING PATTERN "*.py")
+install(FILES "${PROJECT_SOURCE_DIR}/tools/data_binary.py" DESTINATION share/autonomy/tools COMPONENT simulator)
+install(FILES "${PROJECT_SOURCE_DIR}/tools/data_binary.py" DESTINATION share/autonomy/tools/blender/autonomy_sim COMPONENT simulator)
 install(FILES SENSORS.md FUZZING.md DESTINATION share/autonomy/simulator COMPONENT simulator)
 
 if(SIMULATOR_SANITIZE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -695,7 +698,7 @@ add_test(NAME simulator_mujoco_concurrency COMMAND simulator_concurrency_tests $
 add_test(NAME simulator_mujoco_fuzz
     COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz.py"
             "${CMAKE_CURRENT_BINARY_DIR}/zig/bin/src_3" $<TARGET_FILE:auv_simulator>
-            $<TARGET_FILE:simulator_backend_mujoco> "${CMAKE_CURRENT_SOURCE_DIR}/config/hydrus.json"
+            $<TARGET_FILE:simulator_backend_mujoco> "${PROJECT_SOURCE_DIR}/config/hydrus.zig"
             ${simulator_mission_preload})
 set_tests_properties(simulator_mujoco_concurrency simulator_mujoco_fuzz PROPERTIES TIMEOUT 240)
 if(SIMULATOR_SANITIZE)
@@ -709,6 +712,34 @@ endif()
 add_test(NAME simulator_mujoco_partial_startup
     COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz_startup.py"
             "${CMAKE_CURRENT_BINARY_DIR}/zig/bin/fuzz_startup_test" $<TARGET_FILE:auv_simulator>
-            $<TARGET_FILE:simulator_backend_mujoco> "${CMAKE_CURRENT_SOURCE_DIR}/config/hydrus.json"
+            $<TARGET_FILE:simulator_backend_mujoco> "${PROJECT_SOURCE_DIR}/config/hydrus.zig"
             ${simulator_mission_preload})
 set_tests_properties(simulator_mujoco_partial_startup PROPERTIES TIMEOUT 60)
+
+# The new host/application contract is checked independently in C and C++.
+add_executable(simulator_application_reload_tests tests/application.cpp)
+target_include_directories(simulator_application_reload_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(simulator_application_reload_tests PRIVATE auv_simulator simulator_core)
+add_dependencies(simulator_application_reload_tests simulator_zig_controller)
+add_dependencies(simulator_all simulator_application_reload_tests simulator_snapshot_tests)
+if(WIN32)
+    set(simulator_application_library "${CMAKE_CURRENT_BINARY_DIR}/zig/bin/autonomy_application.dll")
+else()
+    set(simulator_application_library "${CMAKE_CURRENT_BINARY_DIR}/zig/lib/libautonomy_application.so")
+endif()
+add_test(NAME simulator_application_reload
+    COMMAND simulator_application_reload_tests "${simulator_application_library}" $<TARGET_FILE:simulator_backend_mujoco>)
+add_test(NAME simulator_binary_snapshot COMMAND simulator_snapshot_tests)
+set_tests_properties(simulator_application_reload PROPERTIES TIMEOUT 120)
+if(SIMULATOR_SANITIZE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set_property(TEST simulator_application_reload simulator_binary_snapshot APPEND PROPERTY ENVIRONMENT "LD_PRELOAD=${simulator_asan_runtime}:${simulator_native_preload}")
+endif()
+add_executable(simulator_application_c_abi_tests tests/application_abi.c tests/application_abi_other.c)
+target_include_directories(simulator_application_c_abi_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+target_compile_options(simulator_application_c_abi_tests PRIVATE -std=c11 -pedantic-errors)
+add_dependencies(simulator_all simulator_application_c_abi_tests)
+add_test(NAME simulator_application_c_abi COMMAND simulator_application_c_abi_tests)
+add_test(NAME simulator_binary_codec COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/binary_codec.py")
+add_test(NAME simulator_python_snapshot COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/binary_snapshot.py" $<TARGET_FILE:simulator_snapshot_tests>)
+
+install(FILES "${PROJECT_SOURCE_DIR}/docs/APPLICATION_RELOAD.md" DESTINATION share/autonomy COMPONENT simulator)
