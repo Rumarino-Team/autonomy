@@ -14,6 +14,8 @@ const default_stream_source = "127.0.0.1:5610";
 const default_teleop_port = 8080;
 const teleop_step: f32 = 0.05;
 const teleop_period: f64 = 0.05;
+const mission_target_step: f32 = 0.25;
+const mission_look_step: f32 = 0.1;
 const tune_step: f32 = 0.1;
 const tune_period: f64 = 0.1;
 
@@ -45,6 +47,7 @@ const Config = struct {
     video_source: [:0]const u8 = default_stream_source,
     teleop_port: u16 = default_teleop_port,
     profile: MissionConfig.MissionProfileId = .stonefish_sim,
+    mission_control: bool = false,
 };
 
 fn parseArgs(args: []const [:0]const u8) !Config {
@@ -72,9 +75,11 @@ fn parseArgs(args: []const [:0]const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingProfile;
             config.profile = MissionConfig.MissionProfileId.fromName(args[i]) orelse return error.InvalidProfile;
+        } else if (std.mem.eql(u8, arg, "--mission-control")) {
+            config.mission_control = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             std.debug.print(
-                "usage: viewer [--shm name | --udp port] [--video source|none] [--teleop-port port] [--profile name]\n",
+                "usage: viewer [--shm name | --udp port] [--video source|none] [--teleop-port port] [--profile name] [--mission-control]\n",
                 .{},
             );
             return error.HelpRequested;
@@ -151,6 +156,17 @@ fn sendTuning(
     var writer: Io.Writer = .fixed(&buffer);
     try MissionIO.SerialBinary.write(&writer, packet);
     try socket.send(io, destination, writer.buffered());
+}
+
+fn sendMissionCommand(
+    io: Io,
+    socket: *Io.net.Socket,
+    destination: *const Io.net.IpAddress,
+    command: MissionIO.MissionCommand,
+) !void {
+    var buffer: [64]u8 = undefined;
+    const packet = try MissionIO.encodeMissionCommand(&buffer, command);
+    try socket.send(io, destination, packet);
 }
 
 fn emptyTelemetry() MissionIO.TelemetryFrame {
@@ -303,7 +319,9 @@ pub fn main(init: std.process.Init) !void {
     var teleop_socket: ?Io.net.Socket = teleop_bind.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch null;
     defer if (teleop_socket) |*socket| socket.close(init.io);
     if (teleop_socket == null)
-        std.debug.print("can't send teleop to 127.0.0.1:{d}\n", .{config.teleop_port})
+        std.debug.print("can't send control commands to 127.0.0.1:{d}\n", .{config.teleop_port})
+    else if (config.mission_control)
+        std.debug.print("mission commands -> 127.0.0.1:{d}\n", .{config.teleop_port})
     else
         std.debug.print("teleop command -> 127.0.0.1:{d}\n", .{config.teleop_port});
 
@@ -350,9 +368,20 @@ pub fn main(init: std.process.Init) !void {
     var last_video_try: f64 = -10;
     var last_source_try: f64 = -10;
     var last_teleop: f64 = -1;
+    var mission_target_initialized = false;
+    var mission_kind: MissionIO.MissionCommandKind = .point;
+    var mission_maneuver: MissionIO.MissionManeuver = .move;
+    var mission_position: math.Vector3f = .{ 0, 0, 0 };
+    var mission_look_direction: math.Vector3f = .{ 0, 1, 0 };
+    var mission_look_yaw: f32 = 0;
+    var mission_look_pitch: f32 = 0;
+    var mission_object_class: u8 = 0;
+    var mission_control = config.mission_control;
+    var show_command_legend = false;
     var tune_selection: usize = 0;
     var last_tune_adjust: f64 = -1;
     var tune_error_logged = false;
+    var mission_error_logged = false;
     var teleop_error_logged = false;
     var pid_drag: ?usize = null;
 
@@ -430,7 +459,72 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        if (teleop_socket != null and now - last_teleop >= teleop_period) {
+        if (rl.isKeyPressed(.t)) {
+            mission_control = !mission_control;
+            if (mission_control) mission_target_initialized = false;
+            std.debug.print(
+                "control mode: {s}\n",
+                .{if (mission_control) "mission-control" else "teleop"},
+            );
+        }
+        if (rl.isKeyPressed(.h)) show_command_legend = !show_command_legend;
+
+        if (mission_control and !mission_target_initialized and last_timestamp != null) {
+            mission_position = telemetry.camera_pose.pos + @as(math.Vector3f, .{ 0, 2, 0 });
+            mission_target_initialized = true;
+        }
+
+        if (mission_control) {
+            if (rl.isKeyPressed(.p)) mission_kind = .point;
+            if (rl.isKeyPressed(.o)) mission_kind = .object;
+            if (rl.isKeyPressed(.m)) mission_maneuver = .move;
+            if (rl.isKeyPressed(.b)) mission_maneuver = .pass;
+            if (rl.isKeyPressed(.c)) mission_maneuver = .circle;
+
+            if (mission_kind == .point) {
+                if (rl.isKeyDown(.d)) mission_position[0] += mission_target_step;
+                if (rl.isKeyDown(.a)) mission_position[0] -= mission_target_step;
+                if (rl.isKeyDown(.w)) mission_position[1] += mission_target_step;
+                if (rl.isKeyDown(.s)) mission_position[1] -= mission_target_step;
+                if (rl.isKeyDown(.r)) mission_position[2] += mission_target_step;
+                if (rl.isKeyDown(.f)) mission_position[2] -= mission_target_step;
+            } else {
+                if (rl.isKeyPressed(.q)) mission_object_class -%= 1;
+                if (rl.isKeyPressed(.e)) mission_object_class +%= 1;
+            }
+
+            if (rl.isKeyDown(.right)) mission_look_yaw -= mission_look_step;
+            if (rl.isKeyDown(.left)) mission_look_yaw += mission_look_step;
+            if (rl.isKeyDown(.up)) mission_look_pitch = @min(1.4, mission_look_pitch + mission_look_step);
+            if (rl.isKeyDown(.down)) mission_look_pitch = @max(-1.4, mission_look_pitch - mission_look_step);
+            mission_look_direction = .{
+                @sin(mission_look_yaw) * @cos(mission_look_pitch),
+                @cos(mission_look_yaw) * @cos(mission_look_pitch),
+                @sin(mission_look_pitch),
+            };
+
+            if (rl.isKeyPressed(.enter) and teleop_socket != null) {
+                const command: MissionIO.MissionCommand = switch (mission_kind) {
+                    .point => .{
+                        .kind = .point,
+                        .maneuver = .move,
+                        .position = mission_position,
+                        .look_direction = mission_look_direction,
+                    },
+                    .object => .{
+                        .kind = .object,
+                        .maneuver = mission_maneuver,
+                        .object_class = mission_object_class,
+                    },
+                };
+                sendMissionCommand(init.io, &teleop_socket.?, &teleop_dest, command) catch {
+                    if (!mission_error_logged) {
+                        std.debug.print("mission command send failed\n", .{});
+                        mission_error_logged = true;
+                    }
+                };
+            }
+        } else if (teleop_socket != null and now - last_teleop >= teleop_period) {
             last_teleop = now;
             translation = .{ 0, 0, 0 };
             if (rl.isKeyDown(.d)) translation[0] += 1;
@@ -463,11 +557,13 @@ pub fn main(init: std.process.Init) !void {
             };
         }
 
-        if (rl.isKeyPressed(.q)) {
-            tune_selection = (tune_selection + tune_names.len - 1) % tune_names.len;
-        }
-        if (rl.isKeyPressed(.e)) {
-            tune_selection = (tune_selection + 1) % tune_names.len;
+        if (!mission_control) {
+            if (rl.isKeyPressed(.q)) {
+                tune_selection = (tune_selection + tune_names.len - 1) % tune_names.len;
+            }
+            if (rl.isKeyPressed(.e)) {
+                tune_selection = (tune_selection + 1) % tune_names.len;
+            }
         }
 
         var tune_changed = false;
@@ -548,6 +644,10 @@ pub fn main(init: std.process.Init) !void {
         const command_move = math.quaternionRotate(orientation, translation);
         if (math.dot3f(command_move, command_move) > 1e-6)
             drawArrow(telemetry.camera_pose.pos, scaled3(command_move, 1.2), 0.045, rl.Color.magenta);
+        if (mission_control and mission_target_initialized) {
+            rl.drawSphere(toRay(mission_position), 0.18, rl.Color.yellow);
+            drawArrow(mission_position, mission_look_direction, 0.035, rl.Color.yellow);
+        }
         const force_error = math.quaternionRotate(telemetry.camera_pose.quat, telemetry.force_error);
         if (math.dot3f(force_error, force_error) > 1e-6)
             drawArrow(telemetry.camera_pose.pos, force_error, 0.03, rl.Color.yellow);
@@ -662,24 +762,56 @@ pub fn main(init: std.process.Init) !void {
             20,
             rl.Color.ray_white,
         );
-        rl.drawText(rl.textFormat("move  %.2f %.2f %.2f", .{
-            @as(f64, translation[0]),
-            @as(f64, translation[1]),
-            @as(f64, translation[2]),
-        }), x, 270, 20, if (teleop_socket != null) rl.Color.ray_white else rl.Color.red);
-        rl.drawText(rl.textFormat("cmd   %.2f %.2f %.2f %.2f", .{
-            @as(f64, orientation[0]),
-            @as(f64, orientation[1]),
-            @as(f64, orientation[2]),
-            @as(f64, orientation[3]),
-        }), x, 300, 20, rl.Color.ray_white);
-        rl.drawText(rl.textFormat("err   %.2f %.2f %.2f", .{
-            @as(f64, telemetry.force_error[0]),
-            @as(f64, telemetry.force_error[1]),
-            @as(f64, telemetry.force_error[2]),
-        }), x, 330, 20, rl.Color.yellow);
-        rl.drawText(rl.textFormat("teleop %d  W/S surge  A/D sway  R/F heave  I/K roll", .{config.teleop_port}), x, 360, 16, rl.Color.gray);
-        rl.drawText("arrows yaw and pitch", x, 378, 16, rl.Color.gray);
+        if (mission_control) {
+            const kind_name = switch (mission_kind) {
+                .point => "point",
+                .object => "object",
+            };
+            const maneuver_name = switch (mission_maneuver) {
+                .move => "move",
+                .pass => "pass",
+                .circle => "circle",
+            };
+            rl.drawText(
+                rl.textFormat("mission %s/%s  port %d", .{ kind_name.ptr, maneuver_name.ptr, config.teleop_port }),
+                x,
+                270,
+                18,
+                if (teleop_socket != null) rl.Color.green else rl.Color.red,
+            );
+            rl.drawText(rl.textFormat("target %.2f %.2f %.2f", .{
+                @as(f64, mission_position[0]),
+                @as(f64, mission_position[1]),
+                @as(f64, mission_position[2]),
+            }), x, 296, 16, rl.Color.ray_white);
+            rl.drawText(rl.textFormat("look   %.2f %.2f %.2f", .{
+                @as(f64, mission_look_direction[0]),
+                @as(f64, mission_look_direction[1]),
+                @as(f64, mission_look_direction[2]),
+            }), x, 318, 16, rl.Color.ray_white);
+            rl.drawText(rl.textFormat("class  %d", .{@as(c_int, mission_object_class)}), x, 340, 16, rl.Color.ray_white);
+            rl.drawText("P/O mode  M/B/C move/pass/circle  Enter send", x, 360, 14, rl.Color.gray);
+            rl.drawText("WASD/RF target  arrows look  Q/E class", x, 378, 14, rl.Color.gray);
+        } else {
+            rl.drawText(rl.textFormat("move  %.2f %.2f %.2f", .{
+                @as(f64, translation[0]),
+                @as(f64, translation[1]),
+                @as(f64, translation[2]),
+            }), x, 270, 20, if (teleop_socket != null) rl.Color.ray_white else rl.Color.red);
+            rl.drawText(rl.textFormat("cmd   %.2f %.2f %.2f %.2f", .{
+                @as(f64, orientation[0]),
+                @as(f64, orientation[1]),
+                @as(f64, orientation[2]),
+                @as(f64, orientation[3]),
+            }), x, 300, 20, rl.Color.ray_white);
+            rl.drawText(rl.textFormat("err   %.2f %.2f %.2f", .{
+                @as(f64, telemetry.force_error[0]),
+                @as(f64, telemetry.force_error[1]),
+                @as(f64, telemetry.force_error[2]),
+            }), x, 330, 20, rl.Color.yellow);
+            rl.drawText("teleop W/S surge  A/D sway  R/F heave  I/K roll", x, 360, 16, rl.Color.gray);
+            rl.drawText("arrows yaw and pitch", x, 378, 16, rl.Color.gray);
+        }
         rl.drawText(
             rl.textFormat("tune %s %.3f", .{
                 tune_names[tune_selection].ptr,
@@ -691,6 +823,7 @@ pub fn main(init: std.process.Init) !void {
             if (teleop_socket != null and !tune_error_logged) rl.Color.green else rl.Color.red,
         );
         rl.drawText("tune on teleop port  Q/E select  Z/X adjust", x, 418, 16, rl.Color.gray);
+        rl.drawText("H show mission command legend", x, 448, 14, rl.Color.gray);
         rl.drawText("PID gains  drag sliders", x, @intFromFloat(pid_layout.row_y - 50), 18, rl.Color.ray_white);
         for (0..3) |group| {
             const group_y: i32 = @intFromFloat(
@@ -731,6 +864,17 @@ pub fn main(init: std.process.Init) !void {
             rl.drawText(rl.textFormat("t%d %+.2f", .{ @as(c_int, @intCast(index)), @as(f64, thruster) }), x, y, 20, rl.Color.ray_white);
             rl.drawRectangle(if (width < 0) x + 240 + width else x + 240, y, @intCast(@abs(width)), 20, rl.Color.sky_blue);
             rl.drawLine(x + 240, y - 2, x + 240, y + 22, rl.Color.gray);
+        }
+        if (show_command_legend) {
+            const legend_y: i32 = 438;
+            rl.drawRectangle(x - 8, legend_y - 8, 365, 150, rl.fade(rl.Color.black, 0.95));
+            rl.drawText("mission command legend", x, legend_y, 16, rl.Color.light_gray);
+            rl.drawText("T  teleop / mission-control", x, legend_y + 20, 14, rl.Color.gray);
+            rl.drawText("P/O  point or object target", x, legend_y + 38, 14, rl.Color.gray);
+            rl.drawText("M/B/C  move, pass, or circle", x, legend_y + 56, 14, rl.Color.gray);
+            rl.drawText("WASD/RF  edit point target", x, legend_y + 74, 14, rl.Color.gray);
+            rl.drawText("arrows  edit look direction", x, legend_y + 92, 14, rl.Color.gray);
+            rl.drawText("Q/E class   Enter send", x, legend_y + 110, 14, rl.Color.gray);
         }
         rl.endDrawing();
         if (shared_view) |view| {

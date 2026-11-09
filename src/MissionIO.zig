@@ -871,6 +871,14 @@ pub fn encodeWritePacket(buf: []u8, output: WritePacket) ![]const u8 {
     return writer.buffered();
 }
 
+pub fn encodeMissionCommand(buf: []u8, command: MissionCommand) ![]const u8 {
+    var writer: Io.Writer = .fixed(buf);
+    var packet = command;
+    try packet.validate();
+    try SerialBinary.write(&writer, packet);
+    return writer.buffered();
+}
+
 fn encodeTelemetryFrame(buf: []u8, frame: *const TelemetryFrame) ![]const u8 {
     var objects: [Auv.Frame.max_objects]Auv.Object = undefined;
     for (frame.objects[0..frame.objects_len], objects[0..frame.objects_len]) |source, *dest| {
@@ -1073,12 +1081,84 @@ pub const TeleopCommand = struct {
     orientation: [4]f32,
 };
 
+pub const MissionCommandKind = enum(u8) {
+    point,
+    object,
+};
+
+pub const MissionManeuver = enum(u8) {
+    move,
+    pass,
+    circle,
+};
+
+pub const MissionCommand = struct {
+    magic: [4]u8 = mission_command_magic,
+    wire_version: u16 = mission_command_wire_version,
+    kind: MissionCommandKind,
+    maneuver: MissionManeuver,
+    position: math.Vector3f = @splat(0),
+    look_direction: math.Vector3f = .{ 0, 0, 1 },
+    object_class: u8 = 0,
+
+    pub const DecodeError = error{
+        BufferTooShort,
+        InvalidLength,
+        BadMagic,
+        UnsupportedWireVersion,
+        InvalidEnum,
+        NonFinite,
+        InvalidLookDirection,
+        InvalidPointManeuver,
+    };
+
+    pub fn decode(buf: []const u8) DecodeError!MissionCommand {
+        if (buf.len < 6) return error.BufferTooShort;
+        if (!std.mem.eql(u8, buf[0..4], &mission_command_magic)) return error.BadMagic;
+        if (std.mem.readInt(u16, buf[4..6], .little) != mission_command_wire_version)
+            return error.UnsupportedWireVersion;
+
+        const parsed = SerialBinary.readFromBuffer(MissionCommand, buf) catch |err| switch (err) {
+            error.InvalidEnum => return error.InvalidEnum,
+            else => return error.BufferTooShort,
+        };
+        if (parsed.consumed != buf.len) return error.InvalidLength;
+
+        var command = parsed.value;
+        try command.validate();
+        return command;
+    }
+
+    pub fn validate(self: *MissionCommand) DecodeError!void {
+        if (!std.mem.eql(u8, &self.magic, &mission_command_magic)) return error.BadMagic;
+        if (self.wire_version != mission_command_wire_version) return error.UnsupportedWireVersion;
+        if (self.kind == .point and self.maneuver != .move)
+            return error.InvalidPointManeuver;
+
+        inline for (0..3) |i| {
+            if (!std.math.isFinite(self.position[i])) return error.NonFinite;
+            if (!std.math.isFinite(self.look_direction[i])) return error.NonFinite;
+        }
+
+        if (self.kind == .point) {
+            const length = math.length3f(self.look_direction);
+            if (!std.math.isFinite(length) or length <= 1e-6)
+                return error.InvalidLookDirection;
+            self.look_direction /= @as(math.Vector3f, @splat(length));
+        }
+    }
+};
+
+const mission_command_magic: [4]u8 = "AUM1".*;
+const mission_command_wire_version: u16 = 1;
+
 pub const Telemetry = struct {
     allocator: std.mem.Allocator,
     worker: *TelemetryWorker,
     worker_thread: std.Thread,
     control_socket: Io.net.Socket = undefined,
     teleop_command: ?TeleopCommand = null,
+    mission_command: ?MissionCommand = null,
     read_packet: ReadPacket = undefined,
     initial_read_packet: ReadPacket = undefined,
 
@@ -1173,6 +1253,12 @@ pub const Telemetry = struct {
         return command;
     }
 
+    pub fn takeMissionCommand(self: *Telemetry) ?MissionCommand {
+        const command = self.mission_command;
+        self.mission_command = null;
+        return command;
+    }
+
     pub fn pollLiveConfig(
         self: *Telemetry,
         io: Io,
@@ -1195,6 +1281,15 @@ pub const Telemetry = struct {
                     break;
                 },
             };
+            if (msg.data.len >= mission_command_magic.len and
+                std.mem.eql(u8, msg.data[0..mission_command_magic.len], &mission_command_magic))
+            {
+                self.mission_command = MissionCommand.decode(msg.data) catch |err| {
+                    if (print_stuff) std.log.debug("mission command rejected: {s}", .{@errorName(err)});
+                    continue;
+                };
+                continue;
+            }
             if (msg.data.len == 7 * @sizeOf(f32)) {
                 var values: [7]f32 = undefined;
                 for (0..values.len) |i| {
@@ -1237,3 +1332,53 @@ pub const Telemetry = struct {
         self.worker.queue.enqueue(io, .{ .frame = frame, .control_debug = control_debug });
     }
 };
+
+test "mission command round trips and normalizes point direction" {
+    var buf: [64]u8 = undefined;
+    const encoded = try encodeMissionCommand(&buf, .{
+        .kind = .point,
+        .maneuver = .move,
+        .position = .{ 1, 2, 3 },
+        .look_direction = .{ 0, 0, 5 },
+    });
+    const decoded = try MissionCommand.decode(encoded);
+
+    try std.testing.expectEqual(MissionCommandKind.point, decoded.kind);
+    try std.testing.expectEqual(MissionManeuver.move, decoded.maneuver);
+    try std.testing.expectEqual(@as(f32, 1), decoded.position[0]);
+    try std.testing.expectEqual(@as(f32, 2), decoded.position[1]);
+    try std.testing.expectEqual(@as(f32, 3), decoded.position[2]);
+    try std.testing.expectEqual(@as(f32, 1), decoded.look_direction[2]);
+}
+
+test "mission command rejects invalid point maneuvers and directions" {
+    var buf: [64]u8 = undefined;
+    const encoded = try encodeMissionCommand(&buf, .{
+        .kind = .point,
+        .maneuver = .move,
+        .position = .{ 1, 2, 3 },
+        .look_direction = .{ 0, 0, 1 },
+    });
+
+    buf[7] = @backingInt(MissionManeuver.pass);
+    try std.testing.expectError(error.InvalidPointManeuver, MissionCommand.decode(encoded));
+
+    buf[7] = @backingInt(MissionManeuver.move);
+    for (20..32) |i| buf[i] = 0;
+    try std.testing.expectError(error.InvalidLookDirection, MissionCommand.decode(encoded));
+}
+
+test "mission command accepts every object maneuver" {
+    var buf: [64]u8 = undefined;
+    for (std.enums.values(MissionManeuver)) |maneuver| {
+        const encoded = try encodeMissionCommand(&buf, .{
+            .kind = .object,
+            .maneuver = maneuver,
+            .object_class = 2,
+        });
+        const decoded = try MissionCommand.decode(encoded);
+        try std.testing.expectEqual(MissionCommandKind.object, decoded.kind);
+        try std.testing.expectEqual(maneuver, decoded.maneuver);
+        try std.testing.expectEqual(@as(u8, 2), decoded.object_class);
+    }
+}

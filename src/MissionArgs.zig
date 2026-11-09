@@ -8,6 +8,7 @@ pub const MissionId = enum {
     prequalify_coco,
     prequalify_robosub,
     teleop,
+    mission_control,
 };
 
 auv_dynlib_path: []const u8,

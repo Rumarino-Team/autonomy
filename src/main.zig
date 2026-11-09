@@ -13,7 +13,8 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("args = {f}", .{args});
 
-    var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
+    var ctx: MissionContext = undefined;
+    try ctx.init(init.arena.allocator(), init.io, args);
     defer ctx.auv.deinit();
     defer ctx.telemetry.deinit(ctx.io);
 
@@ -23,9 +24,10 @@ pub fn main(init: std.process.Init) !void {
         ctx.target_position = ctx.frame.camera_pose.pos;
 
         const mission_result = switch (args.mission_id) {
-            .prequalify_coco => @import("missions/missions.zig").cocoMission(&ctx),
-            .prequalify_robosub => @import("missions/missions.zig").robosubMission(&ctx),
-            .teleop => @import("missions/missions.zig").teleopMission(&ctx),
+            .prequalify_coco => @import("missions.zig").cocoMission(&ctx),
+            .prequalify_robosub => @import("missions.zig").robosubMission(&ctx),
+            .teleop => @import("missions.zig").teleopMission(&ctx),
+            .mission_control => @import("missions.zig").missionControl(&ctx),
         };
 
         mission_result catch |err| switch (err) {

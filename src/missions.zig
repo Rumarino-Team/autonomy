@@ -1,8 +1,7 @@
 const std = @import("std");
-const math = @import("../math.zig");
-const MissionContext = @import("../MissionContext.zig");
-const MissionArgs = @import("../MissionArgs.zig");
-const Auv = @import("../Auv.zig");
+const math = @import("math.zig");
+const MissionContext = @import("MissionContext.zig");
+const Auv = @import("Auv.zig");
 const c = Auv.c;
 
 pub fn teleopMission(ctx: *MissionContext) !void {
@@ -32,6 +31,39 @@ pub fn teleopMission(ctx: *MissionContext) !void {
             ctx.translation = translation;
         }
         try ctx.yieldUntilNextFrameAndUpdate();
+    }
+}
+
+pub fn missionControl(ctx: *MissionContext) !void {
+    while (true) {
+        ctx.step = "waiting_for_mission_command";
+        try ctx.yieldUntilNextFrameAndUpdate();
+        const command = ctx.telemetry.takeMissionCommand() orelse continue;
+
+        switch (command.kind) {
+            .point => {
+                ctx.step = "move_to_point";
+                try ctx.yieldPoint(command.position, command.look_direction);
+            },
+            .object => {
+                ctx.step = "find_object";
+                const object = try ctx.yieldFind(command.object_class);
+                switch (command.maneuver) {
+                    .move => {
+                        ctx.step = "move_to_object";
+                        try ctx.yieldMoveTo(object);
+                    },
+                    .pass => {
+                        ctx.step = "pass_object";
+                        try ctx.yieldPass(object);
+                    },
+                    .circle => {
+                        ctx.step = "circle_object";
+                        try ctx.yieldCircle(object);
+                    },
+                }
+            },
+        }
     }
 }
 

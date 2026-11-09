@@ -65,7 +65,7 @@ mission_diyn_loader: MissionIO.MissionDiynLoader,
 
 config: MissionConfig.MissionConfig,
 
-pub fn init(allocator: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
+pub fn init(self: *MissionContext, allocator: std.mem.Allocator, io: Io, args: MissionArgs) !void {
     const stop: std.posix.Sigaction = .{ .handler = .{ .handler = requestStop }, .mask = std.posix.sigemptyset(), .flags = 0 };
 
     const config = MissionArgs.configForProfile(args.mission_profile);
@@ -93,7 +93,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, args: MissionArgs) !MissionCon
 
     const telemetry = try MissionIO.Telemetry.init(allocator, io, config);
 
-    var ctx: MissionContext = .{
+    self.* = .{
         .frame = undefined,
 
         .seen_objects = undefined,
@@ -122,8 +122,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, args: MissionArgs) !MissionCon
 
         .io = io,
     };
-    ctx.queue = .initBuffer(&ctx.goal_queue_buf);
-    return ctx;
+    self.queue = .initBuffer(&self.goal_queue_buf);
 }
 
 fn applyLiveConfigScalars(ctx: *MissionContext, config: MissionConfig.MissionConfig) void {
@@ -541,6 +540,10 @@ pub fn yieldFind(ctx: *MissionContext, cls: u8) !*const Auv.Object {
 const object_clearance: f32 = 2;
 const look_done: f32 = 0.1;
 
+fn shouldLogMissionState(ctx: *const MissionContext) bool {
+    return ctx.print_stuff and ctx.log_freq_div != 0 and ctx.log_counter % ctx.log_freq_div == 0;
+}
+
 fn reached(ctx: *const MissionContext, target: math.Vector3f) bool {
     const ok = ctx.frame.position_ok;
     if (!ok.x or !ok.y or !ok.z) return false;
@@ -608,6 +611,16 @@ pub fn yieldMoveTo(ctx: *MissionContext, object: *const Auv.Object) !void {
     try ctx.yieldQueue();
 }
 
+/// Drive to `position` while looking along `look_direction`.
+pub fn yieldPoint(ctx: *MissionContext, position: math.Vector3f, look_direction: math.Vector3f) !void {
+    ctx.clearQueue();
+    try ctx.queue.pushBackBounded(.{
+        .position = position,
+        .look_at = position + look_direction,
+    });
+    try ctx.yieldQueue();
+}
+
 /// Stop short of `object`, then continue the same distance past it.
 pub fn yieldPass(ctx: *MissionContext, object: *const Auv.Object) !void {
     ctx.clearQueue();
@@ -633,8 +646,22 @@ pub fn yieldQueue(ctx: *MissionContext) !void {
         const goal = ctx.queue.front().?;
         ctx.target_position = goal.position;
         try ctx.setLookAtTarget(goal.look_at);
+        const distance = math.length3f(goal.position - ctx.frame.camera_pose.pos);
+        if (shouldLogMissionState(ctx)) {
+            std.log.debug(
+                "mission goal step={s} target={any} look_at={any} current={any} distance={d:.3} threshold={d:.3}",
+                .{ ctx.step, goal.position, goal.look_at, ctx.frame.camera_pose.pos, distance, ctx.goal_dist_threshold },
+            );
+        }
         try ctx.yieldUntilNextFrameAndUpdate();
-        if (reached(ctx, goal.position)) _ = ctx.queue.popFront();
+        if (reached(ctx, goal.position)) {
+            if (shouldLogMissionState(ctx)) {
+                std.log.debug("mission goal reached distance={d:.3}", .{
+                    math.length3f(goal.position - ctx.frame.camera_pose.pos),
+                });
+            }
+            _ = ctx.queue.popFront();
+        }
     }
 }
 
