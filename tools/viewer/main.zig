@@ -1,8 +1,8 @@
 const std = @import("std");
 const rl = @import("raylib");
-const MissionIo = @import("MissionIo");
-const MissionConfig = MissionIo.Config;
-const math = MissionIo.Math;
+const MissionIO = @import("MissionIO");
+const MissionConfig = MissionIO.Config;
+const math = MissionIO.Math;
 const Io = std.Io;
 
 extern fn video_open(source: [*:0]const u8, width: *c_int, height: *c_int) callconv(.c) bool;
@@ -100,7 +100,7 @@ fn profileConfig(profile: MissionConfig.MissionProfileId) *const MissionConfig.M
     };
 }
 
-fn tuningValue(packet: *MissionIo.ReadPacket, index: usize) *f32 {
+fn tuningValue(packet: *MissionIO.ReadPacket, index: usize) *f32 {
     const group = index / 6;
     const axis = index % 6;
     return switch (group) {
@@ -145,18 +145,18 @@ fn sendTuning(
     io: Io,
     socket: *Io.net.Socket,
     destination: *const Io.net.IpAddress,
-    packet: MissionIo.ReadPacket,
+    packet: MissionIO.ReadPacket,
 ) !void {
     var buffer: [4096]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    try MissionIo.SerialBinary.write(&writer, packet);
+    try MissionIO.SerialBinary.write(&writer, packet);
     try socket.send(io, destination, writer.buffered());
 }
 
-fn emptyTelemetry() MissionIo.TelemetryFrame {
-    var frame = std.mem.zeroes(MissionIo.TelemetryFrame);
+fn emptyTelemetry() MissionIO.TelemetryFrame {
+    var frame = std.mem.zeroes(MissionIO.TelemetryFrame);
     frame.magic = "AUV1".*;
-    frame.abi_version = MissionIo.telemetry_frame_abi_version;
+    frame.abi_version = MissionIO.telemetry_frame_abi_version;
     frame.camera_pose.quat[3] = 1;
     return frame;
 }
@@ -263,7 +263,7 @@ fn drawFollowingGrid(sub: rl.Vector3) void {
     }
 }
 
-fn stepText(frame: *const MissionIo.TelemetryFrame, buffer: *[MissionIo.telemetry_step_max + 1]u8) [:0]const u8 {
+fn stepText(frame: *const MissionIO.TelemetryFrame, buffer: *[MissionIO.telemetry_step_max + 1]u8) [:0]const u8 {
     const length = @min(@as(usize, frame.step_len), frame.step.len);
     @memcpy(buffer[0..length], frame.step[0..length]);
     buffer[length] = 0;
@@ -278,7 +278,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    var subscriber: ?MissionIo.TelemetrySubscriber = null;
+    var subscriber: ?MissionIO.TelemetrySubscriber = null;
     defer if (subscriber) |*value| value.deinit();
     var udp_socket: ?Io.net.Socket = null;
     defer if (udp_socket) |*socket| socket.close(init.io);
@@ -298,7 +298,7 @@ pub fn main(init: std.process.Init) !void {
         const text = try std.fmt.bufPrint(&address_buf, "127.0.0.1:{d}", .{config.teleop_port});
         break :blk try Io.net.IpAddress.parseLiteral(text);
     };
-    var config_packet = MissionIo.ReadPacket.fromConfig(profileConfig(config.profile));
+    var config_packet = MissionIO.ReadPacket.fromConfig(profileConfig(config.profile));
     const teleop_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
     var teleop_socket: ?Io.net.Socket = teleop_bind.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch null;
     defer if (teleop_socket) |*socket| socket.close(init.io);
@@ -341,7 +341,7 @@ pub fn main(init: std.process.Init) !void {
 
     var packet: [64 * 1024]u8 = undefined;
     var udp_telemetry = emptyTelemetry();
-    var telemetry: *const MissionIo.TelemetryFrame = &udp_telemetry;
+    var telemetry: *const MissionIO.TelemetryFrame = &udp_telemetry;
     var translation = [3]f32{ 0, 0, 0 };
     var orientation = [4]f32{ 0, 0, 0, 1 };
     var last_timestamp: ?u64 = null;
@@ -358,7 +358,7 @@ pub fn main(init: std.process.Init) !void {
 
     while (!rl.windowShouldClose()) {
         telemetry = &udp_telemetry;
-        var shared_view: ?MissionIo.LatestFrame = null;
+        var shared_view: ?MissionIO.LatestFrame = null;
         const now = rl.getTime();
         const pid_layout = pidSliderLayout();
         if (read_video and video_w == 0 and now - last_video_try > 2) {
@@ -384,7 +384,7 @@ pub fn main(init: std.process.Init) !void {
             .shared_memory => |name| {
                 if (subscriber == null and now - last_source_try > 2) {
                     last_source_try = now;
-                    subscriber = MissionIo.TelemetrySubscriber.open(name) catch |err| blk: {
+                    subscriber = MissionIO.TelemetrySubscriber.open(name) catch |err| blk: {
                         std.debug.print("waiting for shared telemetry '{s}': {s}\n", .{ name, @errorName(err) });
                         break :blk null;
                     };
@@ -414,7 +414,7 @@ pub fn main(init: std.process.Init) !void {
                         error.Timeout => break,
                         else => break,
                     };
-                    MissionIo.decodeWritePacket(message.data, &udp_telemetry) catch continue;
+                    MissionIO.decodeWritePacket(message.data, &udp_telemetry) catch continue;
                     {
                         last_timestamp = udp_telemetry.timestamp;
                         last_packet = now;
@@ -625,7 +625,7 @@ pub fn main(init: std.process.Init) !void {
             18,
             zed_color,
         );
-        var step_buffer: [MissionIo.telemetry_step_max + 1]u8 = undefined;
+        var step_buffer: [MissionIO.telemetry_step_max + 1]u8 = undefined;
         rl.drawText(rl.textFormat("step  %s", .{stepText(telemetry, &step_buffer).ptr}), x, 60, 20, rl.Color.ray_white);
         rl.drawText(rl.textFormat("pos   %.2f %.2f %.2f", .{
             @as(f64, telemetry.camera_pose.pos[0]),

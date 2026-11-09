@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("args = {f}", .{args});
 
-    var ctx: MissionContext = try .init(init.io, args);
+    var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
     defer ctx.auv.deinit();
     defer ctx.telemetry.deinit(ctx.io);
 

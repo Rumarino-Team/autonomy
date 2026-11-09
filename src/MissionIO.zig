@@ -382,6 +382,132 @@ pub const WritePacket = struct {
     goals: []const Goal,
 };
 
+/// Values needed to emit the controller's detailed diagnostics away from the
+/// control thread. This deliberately owns every value; it contains no slices.
+pub const ControlDebugSnapshot = struct {
+    clear_screen: bool,
+    cycle_us: u64,
+    has_dt: bool,
+    dt: f32,
+    timestamp_ns: u64,
+    kp: math.Vector6f,
+    ki: math.Vector6f,
+    kd: math.Vector6f,
+    tam: [MissionConfig.thruster_count]math.Vector6f,
+    tam_len: u8,
+    pose: math.Vector6f,
+    position_ok: Auv.AxisOk,
+    attitude_ok: Auv.AxisOk,
+    translation_error: math.Vector3f,
+    target_orientation: math.Quaternionf,
+    target_quaternion: math.Quaternionf,
+    attitude_error: math.Vector3f,
+    rotation_limit: math.Vector3f,
+    input: math.Vector6f,
+    thrusters: [MissionConfig.thruster_count]f32,
+    thrusters_len: u8,
+};
+
+const telemetry_io_queue_capacity = 16;
+
+const IoEvent = struct {
+    frame: TelemetryFrame,
+    control_debug: ?ControlDebugSnapshot,
+};
+
+const IoSlotState = enum(u8) { empty, ready, reading, writing };
+
+const IoSlot = struct {
+    state: std.atomic.Value(IoSlotState) = .init(.empty),
+    sequence: std.atomic.Value(u64) = .init(0),
+    event: IoEvent = undefined,
+};
+
+/// Single control-thread producer and single I/O-thread consumer. Slot state
+/// grants exclusive access to the non-atomic event payload. On overload the
+/// producer reclaims the oldest ready slot without touching a slot being read.
+const IoQueue = struct {
+    slots: [telemetry_io_queue_capacity]IoSlot,
+    next_sequence: u64,
+    dropped: std.atomic.Value(u64),
+    wake: Io.Event,
+
+    fn init() IoQueue {
+        var queue: IoQueue = undefined;
+        for (&queue.slots) |*slot| slot.* = .{};
+        queue.next_sequence = 1;
+        queue.dropped = .init(0);
+        queue.wake = .unset;
+        return queue;
+    }
+
+    fn readyOldest(self: *IoQueue) ?usize {
+        var candidate: ?usize = null;
+        var oldest: u64 = std.math.maxInt(u64);
+        for (&self.slots, 0..) |*slot, i| {
+            if (slot.state.load(.acquire) != .ready) continue;
+            const sequence = slot.sequence.load(.monotonic);
+            if (candidate == null or sequence < oldest) {
+                candidate = i;
+                oldest = sequence;
+            }
+        }
+        return candidate;
+    }
+
+    fn isEmpty(self: *IoQueue) bool {
+        for (&self.slots) |*slot| {
+            if (slot.state.load(.acquire) == .ready) return false;
+        }
+        return true;
+    }
+
+    fn enqueue(self: *IoQueue, io: Io, event: IoEvent) void {
+        // A bounded retry keeps the producer independent of a stalled consumer.
+        for (0..telemetry_io_queue_capacity * 2) |_| {
+            var empty: ?usize = null;
+            for (&self.slots, 0..) |*slot, i| {
+                if (slot.state.load(.acquire) == .empty) {
+                    empty = i;
+                    break;
+                }
+            }
+
+            const index = empty orelse self.readyOldest() orelse {
+                _ = self.dropped.fetchAdd(1, .monotonic);
+                return;
+            };
+            const slot = &self.slots[index];
+            const expected: IoSlotState = if (empty != null) .empty else .ready;
+            if (slot.state.cmpxchgStrong(expected, .writing, .acquire, .monotonic) != null) continue;
+
+            if (expected == .ready) _ = self.dropped.fetchAdd(1, .monotonic);
+            slot.event = event;
+            slot.sequence.store(self.next_sequence, .monotonic);
+            self.next_sequence +%= 1;
+            slot.state.store(.ready, .release);
+            self.wake.set(io);
+            return;
+        }
+
+        // Contention with the reader is bounded too. This is only reachable
+        // when all observed slots changed state during the bounded scans.
+        _ = self.dropped.fetchAdd(1, .monotonic);
+    }
+
+    fn dequeue(self: *IoQueue) ?IoEvent {
+        for (0..telemetry_io_queue_capacity * 2) |_| {
+            const index = self.readyOldest() orelse return null;
+            const slot = &self.slots[index];
+            if (slot.state.cmpxchgStrong(.ready, .reading, .acquire, .monotonic) != null) continue;
+            const event = slot.event;
+            slot.state.store(.empty, .release);
+            return event;
+        }
+        return null;
+    }
+};
+
 pub const telemetry_step_max = 64;
 pub const telemetry_ring_slot_count = 32;
 pub const telemetry_frame_abi_version: u32 = 1;
@@ -555,6 +681,16 @@ const RingMemory = extern struct {
     slots: [telemetry_ring_slot_count]RingSlot,
 };
 
+fn publishTelemetryFrame(ring: *RingMemory, frame: TelemetryFrame) void {
+    const previous = @atomicLoad(u64, &ring.header.published_seq, .monotonic);
+    const seq = previous +% 1;
+    const slot = &ring.slots[seq % telemetry_ring_slot_count];
+    @atomicStore(u64, &slot.seq, seq *% 2 -% 1, .release);
+    slot.frame = frame;
+    @atomicStore(u64, &slot.seq, seq *% 2, .release);
+    @atomicStore(u64, &ring.header.published_seq, seq, .release);
+}
+
 fn ownerPid() u64 {
     if (builtin.os.tag == .windows) return 0;
     return @intCast(std.c.getpid());
@@ -645,9 +781,7 @@ pub const UdpPublisher = struct {
         };
     }
 
-    fn publish(self: *UdpPublisher, io: Io, output: WritePacket) void {
-        var buf: [outbound_buf_len]u8 = undefined;
-        const encoded = encodeWritePacket(&buf, output) catch return;
+    fn publishEncoded(self: *UdpPublisher, io: Io, encoded: []const u8) void {
         self.socket.send(io, &self.dest, encoded) catch {};
     }
 
@@ -687,14 +821,8 @@ pub const SharedMemoryPublisher = struct {
         return .{ .shared = shared, .ring = ring };
     }
 
-    fn publish(self: *SharedMemoryPublisher, output: WritePacket) void {
-        const previous = @atomicLoad(u64, &self.ring.header.published_seq, .monotonic);
-        const seq = previous +% 1;
-        const slot = &self.ring.slots[seq % telemetry_ring_slot_count];
-        @atomicStore(u64, &slot.seq, seq *% 2 -% 1, .release);
-        slot.frame.writeFromPacket(output);
-        @atomicStore(u64, &slot.seq, seq *% 2, .release);
-        @atomicStore(u64, &self.ring.header.published_seq, seq, .release);
+    fn publishFrame(self: *SharedMemoryPublisher, frame: TelemetryFrame) void {
+        publishTelemetryFrame(self.ring, frame);
     }
 
     fn deinit(self: *SharedMemoryPublisher) void {
@@ -715,10 +843,10 @@ pub const TelemetryPublisher = union(TelemetryTransport) {
         };
     }
 
-    fn publish(self: *TelemetryPublisher, io: Io, output: WritePacket) void {
+    fn publishEncoded(self: *TelemetryPublisher, io: Io, frame: TelemetryFrame, encoded: ?[]const u8) void {
         switch (self.*) {
-            .udp => |*publisher| publisher.publish(io, output),
-            .shared_memory => |*publisher| publisher.publish(output),
+            .udp => |*publisher| if (encoded) |bytes| publisher.publishEncoded(io, bytes),
+            .shared_memory => |*publisher| publisher.publishFrame(frame),
         }
     }
 
@@ -742,6 +870,123 @@ pub fn encodeWritePacket(buf: []u8, output: WritePacket) ![]const u8 {
     try SerialBinary.write(&writer, packet);
     return writer.buffered();
 }
+
+fn encodeTelemetryFrame(buf: []u8, frame: *const TelemetryFrame) ![]const u8 {
+    var objects: [Auv.Frame.max_objects]Auv.Object = undefined;
+    for (frame.objects[0..frame.objects_len], objects[0..frame.objects_len]) |source, *dest| {
+        dest.* = .{
+            .bbox = .{
+                .pose = .{ .pos = source.pose.pos, .quat = source.pose.quat },
+                .size = source.size,
+            },
+            .id = source.id,
+            .cls = source.cls,
+        };
+    }
+
+    var boxes: [Auv.Frame.max_objects]Auv.Object2d = undefined;
+    for (frame.boxes[0..frame.boxes_len], boxes[0..frame.boxes_len]) |source, *dest| {
+        dest.* = .{
+            .top_left = .{ .x = source.top_left.x, .y = source.top_left.y },
+            .bottom_right = .{ .x = source.bottom_right.x, .y = source.bottom_right.y },
+            .id = source.id,
+            .cls = source.cls,
+        };
+    }
+
+    var goals: [MissionConfig.queue_capacity_max]Goal = undefined;
+    for (frame.goals[0..frame.goals_len], goals[0..frame.goals_len]) |source, *dest| {
+        dest.* = .{ .position = source.position, .look_at = source.look_at };
+    }
+
+    return encodeWritePacket(buf, .{
+        .magic = frame.magic,
+        .timestamp = frame.timestamp,
+        .camera_pose = .{ .pos = frame.camera_pose.pos, .quat = frame.camera_pose.quat },
+        .position_ok = .{ .x = frame.position_ok.x, .y = frame.position_ok.y, .z = frame.position_ok.z },
+        .attitude_ok = .{ .x = frame.attitude_ok.x, .y = frame.attitude_ok.y, .z = frame.attitude_ok.z },
+        .depth_ok = frame.depth_ok,
+        .depth = frame.depth,
+        .objects = objects[0..frame.objects_len],
+        .boxes = boxes[0..frame.boxes_len],
+        .thrusters = frame.thrusters[0..frame.thrusters_len],
+        .step = frame.step[0..frame.step_len],
+        .force_error = frame.force_error,
+        .goals = goals[0..frame.goals_len],
+    });
+}
+
+fn printControlDebug(snapshot: ControlDebugSnapshot) void {
+    if (snapshot.clear_screen) std.debug.print("\x1b[2J\x1b[H", .{});
+    std.log.debug("done in {} us", .{snapshot.cycle_us});
+    std.log.debug("control:", .{});
+    math.debug6f("\tkp", snapshot.kp);
+    math.debug6f("\tki", snapshot.ki);
+    math.debug6f("\tkd", snapshot.kd);
+    for (snapshot.tam[0..snapshot.tam_len]) |row| math.debug6f("\ttam", row);
+    if (snapshot.has_dt) {
+        std.log.debug("dt = {d:6.2} ms", .{snapshot.dt * 1000});
+    } else {
+        std.log.debug("dt = unavailable", .{});
+    }
+    std.log.debug("timestamp_ns = {d}", .{snapshot.timestamp_ns});
+    math.debug6f("pose", snapshot.pose);
+    std.log.debug("position ok: {any} attitude ok: {any}", .{ snapshot.position_ok, snapshot.attitude_ok });
+    math.debug3f("translation error", snapshot.translation_error);
+    std.log.debug("target orientation: {any}", .{snapshot.target_orientation});
+    math.debug3f("attitude error body", snapshot.attitude_error);
+    math.debug3f("rotation limit", snapshot.rotation_limit);
+    std.log.debug("target quaternion: {any}", .{snapshot.target_quaternion});
+    math.debug6f("\tinput", snapshot.input);
+    std.log.debug("\tthruster_values = {any}", .{snapshot.thrusters[0..snapshot.thrusters_len]});
+}
+
+const TelemetryWorker = struct {
+    io: Io,
+    publisher: TelemetryPublisher,
+    log_file: ?Io.File,
+    queue: IoQueue = IoQueue.init(),
+    stopping: std.atomic.Value(bool) = .init(false),
+
+    fn process(self: *TelemetryWorker, event: IoEvent, encoded_buf: *[outbound_buf_len]u8) void {
+        if (event.control_debug) |debug| printControlDebug(debug);
+
+        const encoded: ?[]const u8 = if (self.publisher == .udp or self.log_file != null)
+            encodeTelemetryFrame(encoded_buf, &event.frame) catch |err| blk: {
+                std.log.err("telemetry encode failed: {s}", .{@errorName(err)});
+                break :blk null;
+            }
+        else
+            null;
+
+        self.publisher.publishEncoded(self.io, event.frame, encoded);
+        if (self.log_file) |file| {
+            if (encoded) |bytes| file.writeStreamingAll(self.io, bytes) catch |err| {
+                std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
+    fn run(self: *TelemetryWorker) void {
+        var encoded_buf: [outbound_buf_len]u8 = undefined;
+        while (true) {
+            if (self.queue.dequeue()) |event| {
+                self.process(event, &encoded_buf);
+                continue;
+            }
+            if (self.stopping.load(.acquire) and self.queue.isEmpty()) break;
+
+            self.queue.wake.reset();
+            if (!self.queue.isEmpty() or self.stopping.load(.acquire)) continue;
+            self.queue.wake.waitUncancelable(self.io);
+        }
+
+        const dropped = self.queue.dropped.load(.monotonic);
+        if (dropped != 0) std.log.warn("telemetry I/O dropped {d} queued records", .{dropped});
+        if (self.log_file) |file| file.close(self.io);
+        self.publisher.deinit(self.io);
+    }
+};
 
 /// Decode the legacy `AUV1` UDP/log representation into the same fixed frame
 /// used by shared memory. This keeps viewer code independent of slice lifetimes.
@@ -829,8 +1074,9 @@ pub const TeleopCommand = struct {
 };
 
 pub const Telemetry = struct {
-    log_file: ?Io.File = null,
-    publisher: TelemetryPublisher,
+    allocator: std.mem.Allocator,
+    worker: *TelemetryWorker,
+    worker_thread: std.Thread,
     control_socket: Io.net.Socket = undefined,
     teleop_command: ?TeleopCommand = null,
     read_packet: ReadPacket = undefined,
@@ -840,7 +1086,7 @@ pub const Telemetry = struct {
         self.read_packet = ReadPacket.fromConfig(&config);
     }
 
-    pub fn init(io: Io, config: MissionConfig.MissionConfig) !Telemetry {
+    pub fn init(allocator: std.mem.Allocator, io: Io, config: MissionConfig.MissionConfig) !Telemetry {
         var publisher = try TelemetryPublisher.init(io, config);
         errdefer publisher.deinit(io);
 
@@ -862,9 +1108,19 @@ pub const Telemetry = struct {
             null;
         errdefer if (log_file) |file| file.close(io);
 
-        var telemetry: Telemetry = .{
-            .log_file = log_file,
+        const worker = try allocator.create(TelemetryWorker);
+        errdefer allocator.destroy(worker);
+        worker.* = .{
+            .io = io,
             .publisher = publisher,
+            .log_file = log_file,
+        };
+        const worker_thread = try std.Thread.spawn(.{}, TelemetryWorker.run, .{worker});
+
+        var telemetry: Telemetry = .{
+            .allocator = allocator,
+            .worker = worker,
+            .worker_thread = worker_thread,
             .control_socket = control_socket,
             .initial_read_packet = ReadPacket.fromConfig(&config),
         };
@@ -873,9 +1129,11 @@ pub const Telemetry = struct {
     }
 
     pub fn deinit(self: *Telemetry, io: Io) void {
-        if (self.log_file) |file| file.close(io);
+        self.worker.stopping.store(true, .release);
+        self.worker.queue.wake.set(io);
+        self.worker_thread.join();
+        self.allocator.destroy(self.worker);
         self.control_socket.close(io);
-        self.publisher.deinit(io);
         self.* = undefined;
     }
 
@@ -968,14 +1226,14 @@ pub const Telemetry = struct {
         return applied;
     }
 
-    pub fn publish(self: *Telemetry, io: Io, output: WritePacket) void {
-        self.publisher.publish(io, output);
-        if (self.log_file) |file| {
-            var buf: [outbound_buf_len]u8 = undefined;
-            const encoded = encodeWritePacket(&buf, output) catch return;
-            file.writeStreamingAll(io, encoded) catch |err| {
-                std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
-            };
-        }
+    pub fn pushToIoQueue(
+        self: *Telemetry,
+        io: Io,
+        output: WritePacket,
+        control_debug: ?ControlDebugSnapshot,
+    ) void {
+        var frame: TelemetryFrame = undefined;
+        frame.writeFromPacket(output);
+        self.worker.queue.enqueue(io, .{ .frame = frame, .control_debug = control_debug });
     }
 };

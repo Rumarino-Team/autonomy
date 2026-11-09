@@ -6,11 +6,16 @@ const bc = @import("BodyControl.zig");
 
 const Auv = @import("Auv.zig");
 const MissionConfig = @import("MissionConfig.zig");
-const MissionIo = @import("MissionIo.zig");
+const MissionIO = @import("MissionIO.zig");
 
 const MissionContext = @This();
 
-const Goal = MissionIo.Goal;
+const Goal = MissionIO.Goal;
+
+const ControlStepOutput = struct {
+    thrusters: []f32,
+    debug: ?MissionIO.ControlDebugSnapshot,
+};
 
 var stop_requested = std.atomic.Value(bool).init(false);
 
@@ -50,17 +55,17 @@ force_error: math.Vector3f = .{ 0, 0, 0 },
 pid_prev_timestamp_ns: ?u64,
 
 step: []const u8,
-telemetry: MissionIo.Telemetry = undefined,
+telemetry: MissionIO.Telemetry = undefined,
 
 seen_objects2d: [Auv.Frame.max_objects]Auv.Object2d = undefined,
 seen_objects2d_len: u8 = 0,
 
 auv: Auv,
-mission_diyn_loader: MissionIo.MissionDiynLoader,
+mission_diyn_loader: MissionIO.MissionDiynLoader,
 
 config: MissionConfig.MissionConfig,
 
-pub fn init(io: Io, args: MissionArgs) !MissionContext {
+pub fn init(allocator: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
     const stop: std.posix.Sigaction = .{ .handler = .{ .handler = requestStop }, .mask = std.posix.sigemptyset(), .flags = 0 };
 
     const config = MissionArgs.configForProfile(args.mission_profile);
@@ -71,9 +76,9 @@ pub fn init(io: Io, args: MissionArgs) !MissionContext {
         std.log.debug("{any}", .{config});
     }
 
-    var mission_diyn_loader = MissionIo.MissionDiynLoader.init(args.auv_dynlib_path);
+    var mission_diyn_loader = MissionIO.MissionDiynLoader.init(args.auv_dynlib_path);
     const auv = mission_diyn_loader.load() catch |err| {
-        const dl_err = MissionIo.loadError();
+        const dl_err = MissionIO.loadError();
         std.log.err("dlerror: `{s}`", .{dl_err});
         std.log.err("failed to load auv: {s}", .{mission_diyn_loader.auv_path});
         return err;
@@ -86,7 +91,7 @@ pub fn init(io: Io, args: MissionArgs) !MissionContext {
         std.log.debug("{any}", .{auv});
     }
 
-    const telemetry = try MissionIo.Telemetry.init(io, config);
+    const telemetry = try MissionIO.Telemetry.init(allocator, io, config);
 
     var ctx: MissionContext = .{
         .frame = undefined,
@@ -187,7 +192,8 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     }
 
     var thruster_buffer: [MissionConfig.thruster_count]f32 = @splat(0);
-    const thruster_values = ctx.controlStep(&thruster_buffer);
+    var control_output = ctx.controlStep(&thruster_buffer);
+    const thruster_values = control_output.thrusters;
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
 
     const nobj = @min(@as(usize, ctx.seen_objects_len), ctx.seen_objects.len);
@@ -200,7 +206,9 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         goals[goals_len] = goal;
         goals_len += 1;
     }
-    ctx.telemetry.publish(ctx.io, .{
+    const elapsed = start.untilNow(ctx.io);
+    if (control_output.debug) |*debug| debug.cycle_us = @intCast(@max(0, elapsed.raw.toMicroseconds()));
+    ctx.telemetry.pushToIoQueue(ctx.io, .{
         .timestamp = ctx.frame.timestamp,
         .camera_pose = ctx.frame.camera_pose,
         .position_ok = ctx.frame.position_ok,
@@ -213,12 +221,8 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         .step = ctx.step,
         .force_error = ctx.force_error,
         .goals = goals[0..goals_len],
-    });
+    }, control_output.debug);
 
-    const elapsed = start.untilNow(ctx.io);
-    if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
-    }
     ctx.log_counter +%= 1;
 }
 
@@ -384,7 +388,7 @@ fn quaternionFromRotationVector(rot: math.Vector3f) math.Quaternionf {
 }
 
 /// Track the context pose and return the thruster values. Invalid pose axes contribute no error.
-fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_count]f32) []f32 {
+fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_count]f32) ControlStepOutput {
     const body_error = ctx.bodyError();
     const timestamp_ns = ctx.frame.timestamp;
     const dt: ?f32 = if (ctx.pid_prev_timestamp_ns) |previous| blk: {
@@ -397,7 +401,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_c
     };
 
     const tam_len = @min(ctx.config.tam_len, MissionConfig.thruster_count);
-    var tam_storage: [MissionConfig.thruster_count]math.Vector6f = undefined;
+    var tam_storage: [MissionConfig.thruster_count]math.Vector6f = @splat(@splat(0));
     for (ctx.config.tam[0..tam_len], tam_storage[0..tam_len]) |source, *dest| {
         dest.* = source;
     }
@@ -485,28 +489,6 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_c
         translation_body[0], translation_body[1], translation_body[2],
         rotation[0],         rotation[1],         rotation[2],
     };
-    if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        if (ctx.clear_print_stuff) {
-            std.debug.print("\x1b[2J\x1b[H", .{});
-        }
-        std.log.debug("control:", .{});
-        math.debug6f("\tkp", @as(math.Vector6f, odom.kp));
-        math.debug6f("\tki", @as(math.Vector6f, odom.ki));
-        math.debug6f("\tkd", @as(math.Vector6f, odom.kd));
-        for (tam_rows) |row| {
-            math.debug6f("\ttam", row);
-        }
-        std.log.debug("dt = {d:6.2} ms", .{(dt orelse 0) * 1000});
-        std.log.debug("timestamp_ns = {d}", .{timestamp_ns});
-        math.debug6f("pose", math.poseTo6f(ctx.frame.camera_pose));
-        std.log.debug("position ok: {any} attitude ok: {any}", .{ ctx.frame.position_ok, ctx.frame.attitude_ok });
-        math.debug3f("translation error", error_body);
-        std.log.debug("target orientation: {any}", .{ctx.target_orientation});
-        std.log.debug("attitude error body: {any}", .{attitude_error});
-        math.debug3f("rotation limit", rotation_limit);
-        std.log.debug("target quaternion: {any}", .{target_q});
-        math.debug6f("\tinput", input);
-    }
     const thruster_values = math.tamToThrusters(
         tam_rows,
         input,
@@ -514,10 +496,30 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_c
         5.0,
         thruster_buffer,
     );
-    if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        std.log.debug("\tthruster_values = {any}", .{thruster_values});
-    }
-    return thruster_values;
+    const debug: ?MissionIO.ControlDebugSnapshot = if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) .{
+        .clear_screen = ctx.clear_print_stuff,
+        .cycle_us = 0,
+        .has_dt = dt != null,
+        .dt = dt orelse 0,
+        .timestamp_ns = timestamp_ns,
+        .kp = @bitCast(odom.kp),
+        .ki = @bitCast(odom.ki),
+        .kd = @bitCast(odom.kd),
+        .tam = tam_storage,
+        .tam_len = @intCast(tam_len),
+        .pose = math.poseTo6f(ctx.frame.camera_pose),
+        .position_ok = ctx.frame.position_ok,
+        .attitude_ok = ctx.frame.attitude_ok,
+        .translation_error = error_body,
+        .target_orientation = ctx.target_orientation,
+        .target_quaternion = target_q,
+        .attitude_error = attitude_error,
+        .rotation_limit = rotation_limit,
+        .input = input,
+        .thrusters = thruster_buffer.*,
+        .thrusters_len = @intCast(thruster_values.len),
+    } else null;
+    return .{ .thrusters = thruster_values, .debug = debug };
 }
 
 /// Search while holding still. Returns the first object of `cls`.
