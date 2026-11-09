@@ -16,6 +16,14 @@ pub fn build(b: *std.Build) !void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const cxx = b.option([]const u8, "cxx", "System C++ compiler") orelse "g++";
+    const zed_prefix = b.option([]const u8, "zed-prefix", "ZED SDK install prefix") orelse "/usr/local/zed";
+    const cuda_prefix = b.option([]const u8, "cuda-prefix", "CUDA install prefix") orelse "/usr/local/cuda";
+    const stdcxx_path = b.option(
+        []const u8,
+        "stdcxx-path",
+        "System libstdc++.so used by ZED C++ objects",
+    ) orelse "/usr/lib/x86_64-linux-gnu/libstdc++.so.6";
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -116,6 +124,96 @@ pub fn build(b: *std.Build) !void {
     const teleop_sender_step = b.step("teleop-sender", "Build the optional SDL2 keyboard teleop sender");
     teleop_sender_step.dependOn(&install_teleop_sender.step);
 
+    const udp_send_mission_io = b.createModule(.{
+        .root_source_file = b.path("src/MissionIo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    udp_send_mission_io.addIncludePath(b.path("include"));
+    const mission_config_udp_send_mod = b.createModule(.{
+        .root_source_file = b.path("tools/mission_config_udp_send/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "MissionIo", .module = udp_send_mission_io },
+        },
+    });
+    const mission_config_udp_send = b.addExecutable(.{
+        .name = "mission_config_udp_send",
+        .root_module = mission_config_udp_send_mod,
+    });
+    mission_config_udp_send.root_module.addIncludePath(b.path("include"));
+    mission_config_udp_send.root_module.addCSourceFile(.{
+        .file = b.path("auvs/trap_sim/auv.c"),
+    });
+    const install_mission_config_udp_send = b.addInstallArtifact(mission_config_udp_send, .{});
+    const mission_config_udp_send_step = b.step(
+        "mission-config-udp-send",
+        "Build the MCF1 live mission config UDP sender",
+    );
+    mission_config_udp_send_step.dependOn(&install_mission_config_udp_send.step);
+
+    const raylib_dep = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const viewer_mod = b.createModule(.{
+        .root_source_file = b.path("tools/viewer/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "raylib", .module = raylib_dep.module("raylib") },
+            .{ .name = "MissionIo", .module = udp_send_mission_io },
+        },
+    });
+    viewer_mod.linkLibrary(raylib_dep.artifact("raylib"));
+    const viewer = b.addExecutable(.{
+        .name = "viewer",
+        .root_module = viewer_mod,
+    });
+
+    const viewer_zed = b.option(bool, "viewer-zed", "Enable ZED stream/SVO video in the Zig viewer") orelse false;
+    if (viewer_zed) {
+        const compile_video = b.addSystemCommand(&.{
+            cxx,
+            "-c",
+            "-fPIC",
+            "-std=c++17",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        });
+        compile_video.addArgs(&.{
+            "-isystem",
+            b.fmt("{s}/include", .{zed_prefix}),
+            "-isystem",
+            b.fmt("{s}/include", .{cuda_prefix}),
+            "-o",
+        });
+        const video_object = compile_video.addOutputFileArg("viewer_video.o");
+        compile_video.addFileArg(b.path("tools/viewer/video.cpp"));
+        viewer.root_module.addObjectFile(video_object);
+        viewer.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{zed_prefix}) });
+        viewer.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib64", .{cuda_prefix}) });
+        viewer.root_module.linkSystemLibrary("sl_zed", .{});
+        viewer.root_module.linkSystemLibrary("cuda", .{});
+        viewer.root_module.linkSystemLibrary("cudart", .{});
+        viewer.root_module.linkSystemLibrary("gcc_s", .{ .use_pkg_config = .no });
+        viewer.root_module.addObjectFile(.{ .cwd_relative = stdcxx_path });
+    } else {
+        viewer.root_module.addCSourceFile(.{
+            .file = b.path("tools/viewer/video_stub.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" },
+        });
+        viewer.root_module.linkSystemLibrary("stdc++", .{});
+    }
+
+    const install_viewer = b.addInstallArtifact(viewer, .{});
+    const viewer_step = b.step("viewer", "Build the Zig telemetry viewer");
+    viewer_step.dependOn(&install_viewer.step);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -136,16 +234,8 @@ pub fn build(b: *std.Build) !void {
     // installation directory rather than directly from within the cache directory.
     run_cmd.step.dependOn(b.getInstallStep());
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-
-
-
-
+    // Zig 0.17 forwards arguments after `--` at run time.
+    run_cmd.addPassthruArgs();
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -178,7 +268,10 @@ pub fn build(b: *std.Build) !void {
     const arduino_fqbn = b.option([]const u8, "arduino-fqbn", "Arduino board FQBN") orelse "arduino:avr:uno";
     const arduino_compile = b.addSystemCommand(&.{ arduino_cli, "compile", "--fqbn", arduino_fqbn });
     arduino_compile.addDirectoryArg(b.path("arduino/sketches/Proteus"));
-    _ = try arduino_compile.step.addDirectoryWatchInput(b.path("arduino/sketches/Proteus"));
+    // Incremental watch for Arduino sketch edits (API varies by Zig version).
+    if (@hasDecl(std.Build.Step, "addDirectoryWatchInput")) {
+        _ = try arduino_compile.step.addDirectoryWatchInput(b.path("arduino/sketches/Proteus"));
+    }
 
     const arduino_step = b.step("arduino", "Compile the Proteus Arduino sketch");
     arduino_step.dependOn(&arduino_compile.step);
@@ -218,8 +311,6 @@ pub fn build(b: *std.Build) !void {
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
 
-
-
     const lib_auv_stationary_sim = b.addLibrary(.{
         .name = "auv_stationary_sim",
         .root_module = b.createModule(.{
@@ -235,20 +326,15 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(lib_auv_stationary_sim);
 
-
-
     // the zed sdk exposes c++ types, so this one has to be built with the
     // system g++ to match its libstdc++ abi. off by default so that machines
     // without the sdk and cuda can still build everything else.
     const zed = b.option(bool, "zed", "Build the ZED camera plugin (requires ZED SDK and CUDA)") orelse false;
-    const cxx = b.option([]const u8, "cxx", "System C++ compiler") orelse "g++";
-    const zed_prefix = b.option([]const u8, "zed-prefix", "ZED SDK install prefix") orelse "/usr/local/zed";
-    const cuda_prefix = b.option([]const u8, "cuda-prefix", "CUDA install prefix") orelse "/usr/local/cuda";
     if (zed) {
         const lib_auv_proteus_hwd = b.addSystemCommand(&.{cxx});
-        lib_auv_proteus_hwd.addArgs(&.{"-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror"});
-        lib_auv_proteus_hwd.addArg(if (optimize == .Debug) "-O0" else "-O2");
-        if (optimize == .Debug)
+        lib_auv_proteus_hwd.addArgs(&.{ "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror" });
+        lib_auv_proteus_hwd.addArg(if (optimize == .debug) "-O0" else "-O2");
+        if (optimize == .debug)
             lib_auv_proteus_hwd.addArg("-g");
 
         lib_auv_proteus_hwd.addArg("-o");
@@ -285,7 +371,9 @@ pub fn build(b: *std.Build) !void {
         "build",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     });
-    try cmake_configure.step.addWatchInput(b.path("CMakeLists.txt"));
+    if (@hasDecl(std.Build.Step, "addWatchInput")) {
+        try cmake_configure.step.addWatchInput(b.path("CMakeLists.txt"));
+    }
 
     const cpu_count = std.Thread.getCpuCount() catch 1;
     const cmake_build = b.addSystemCommand(&.{
@@ -303,9 +391,11 @@ pub fn build(b: *std.Build) !void {
         const cmake_target = "auv_stonefish_sim";
         cmake_build.addArg(cmake_target);
 
-        _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/stonefish_sim"));
+        if (@hasDecl(std.Build.Step, "addDirectoryWatchInput")) {
+            _ = try cmake_build.step.addDirectoryWatchInput(b.path("auvs/stonefish_sim"));
+        }
 
-        const cmake_dynlib_file = b.fmt("lib{s}{s}", .{cmake_target, target.result.dynamicLibSuffix()});
+        const cmake_dynlib_file = b.fmt("lib{s}{s}", .{ cmake_target, target.result.dynamicLibSuffix() });
         const cmake_dynlib_path = b.path(b.fmt("build/{s}", .{cmake_dynlib_file}));
 
         const install_stonefish_sim = b.addInstallFileWithDir(cmake_dynlib_path, .lib, cmake_dynlib_file);

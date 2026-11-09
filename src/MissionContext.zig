@@ -5,22 +5,12 @@ const math = @import("math.zig");
 const bc = @import("BodyControl.zig");
 
 const Auv = @import("Auv.zig");
-const AuvLoader = @import("AuvLoader.zig");
-const ConfigLoader = @import("ConfigLoader.zig");
-const FileWatcher = @import("FileWatcher.zig");
-const SerialBinaryWriter = @import("SerialBinaryWriter.zig");
+const MissionConfig = @import("MissionConfig.zig");
+const MissionIo = @import("MissionIo.zig");
 
 const MissionContext = @This();
-const print_stuff = true;
-const clear_print_stuff = true;
-const telemetry_log_path: ?[]const u8 = null;
-const telemetry_addr: []const u8 = "127.0.0.1:5600";
-const queue_capacity = 32;
 
-const Goal = struct {
-    position: math.Vector3f,
-    look_at: math.Vector3f,
-};
+const Goal = MissionIo.Goal;
 
 var stop_requested = std.atomic.Value(bool).init(false);
 
@@ -40,9 +30,12 @@ thrustor_saturate: f32,
 
 log_counter: u32,
 log_freq_div: u16,
+print_stuff: bool,
+clear_print_stuff: bool,
 
 target_position: math.Vector3f,
-queue: std.Deque(Goal) = .empty,
+goal_queue_buf: [MissionConfig.queue_capacity_max]Goal = @splat(std.mem.zeroes(Goal)),
+queue: std.Deque(Goal) = undefined,
 target_orientation: math.Quaternionf = bc.identity,
 use_position: bool = false,
 use_orientation: bool = false,
@@ -57,91 +50,86 @@ force_error: math.Vector3f = .{ 0, 0, 0 },
 pid_prev_timestamp_ns: ?u64,
 
 step: []const u8,
-telemetry_file: ?Io.File = null,
-telemetry_socket: Io.net.Socket = undefined,
-telemetry_dest: Io.net.IpAddress = undefined,
+telemetry: MissionIo.Telemetry = undefined,
 
 seen_objects2d: [Auv.Frame.max_objects]Auv.Object2d = undefined,
 seen_objects2d_len: u8 = 0,
 
 auv: Auv,
-auv_loader: AuvLoader,
-auv_watcher: FileWatcher,
+mission_diyn_loader: MissionIo.MissionDiynLoader,
 
-config: ConfigLoader.Config,
-config_loader: ConfigLoader,
-config_watcher: FileWatcher,
+config: MissionConfig.MissionConfig,
 
-pub fn init(arena: std.mem.Allocator, io: Io, args: MissionArgs) !MissionContext {
+pub fn init(io: Io, args: MissionArgs) !MissionContext {
     const stop: std.posix.Sigaction = .{ .handler = .{ .handler = requestStop }, .mask = std.posix.sigemptyset(), .flags = 0 };
-    std.posix.sigaction(.INT, &stop, null);
-    std.posix.sigaction(.TERM, &stop, null);
 
-    var config_loader: ConfigLoader = try .init(arena, args.live_config_path);
-    const config = config_loader.load(io) catch |err| {
-        std.log.err("failed to load config: {s}", .{config_loader.config_path});
-        return err;
-    };
-    if (print_stuff) {
-        std.log.debug("succesfully loaded config: {s}", .{config_loader.config_path});
+    const config = MissionArgs.configForProfile(args.mission_profile);
+    try config.validate();
+    if (config.print_stuff) {
+        const profile_name = std.enums.tagName(MissionConfig.MissionProfileId, args.mission_profile) orelse "?";
+        std.log.debug("mission profile: {s}", .{profile_name});
         std.log.debug("{any}", .{config});
     }
 
-    var auv_loader: AuvLoader = try .init(arena, args.auv_dynlib_path);
-    const auv = auv_loader.load(io) catch |err| {
-        const dl_err = std.mem.span(std.c.dlerror()) orelse "NO_DL_ERROR";
+    var mission_diyn_loader = MissionIo.MissionDiynLoader.init(args.auv_dynlib_path);
+    const auv = mission_diyn_loader.load() catch |err| {
+        const dl_err = MissionIo.loadError();
         std.log.err("dlerror: `{s}`", .{dl_err});
-        std.log.err("failed to load auv: {s}", .{auv_loader.auv_path});
+        std.log.err("failed to load auv: {s}", .{mission_diyn_loader.auv_path});
         return err;
     };
     auv.init();
-    if (print_stuff) {
-        std.log.debug("succesfully loaded auv: {s}", .{auv_loader.auv_path});
+    std.posix.sigaction(.INT, &stop, null);
+    std.posix.sigaction(.TERM, &stop, null);
+    if (config.print_stuff) {
+        std.log.debug("succesfully loaded auv: {s}", .{mission_diyn_loader.auv_path});
         std.log.debug("{any}", .{auv});
     }
 
-    const telemetry_dest = try Io.net.IpAddress.parseLiteral(telemetry_addr);
-    const telemetry_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
-    const telemetry_socket = try telemetry_bind.bind(io, .{ .mode = .dgram });
-    const telemetry_file: ?Io.File = if (telemetry_log_path) |path|
-        try Io.Dir.cwd().createFile(io, path, .{})
-    else
-        null;
+    const telemetry = try MissionIo.Telemetry.init(io, config);
 
-    const goals = try arena.alloc(Goal, queue_capacity);
-
-    return .{
+    var ctx: MissionContext = .{
         .frame = undefined,
 
         .seen_objects = undefined,
         .seen_objects_len = 0,
 
-        .goal_dist_threshold = args.goal_dist_threshold,
-        .thrustor_saturate = 5,
+        .goal_dist_threshold = config.goal_dist_threshold,
+        .thrustor_saturate = config.thrustor_saturate,
 
         .log_counter = 0,
-        .log_freq_div = 120,
+        .log_freq_div = config.log_freq_div,
+        .print_stuff = config.print_stuff,
+        .clear_print_stuff = config.clear_print_stuff,
 
         .target_position = @splat(0),
-        .queue = .initBuffer(goals),
+        .queue = undefined,
 
         .pid_prev_timestamp_ns = null,
 
         .step = "",
-        .telemetry_file = telemetry_file,
-        .telemetry_socket = telemetry_socket,
-        .telemetry_dest = telemetry_dest,
+        .telemetry = telemetry,
 
         .auv = auv,
-        .auv_loader = auv_loader,
-        .auv_watcher = try .init(arena, args.auv_dynlib_path),
+        .mission_diyn_loader = mission_diyn_loader,
 
         .config = config,
-        .config_loader = config_loader,
-        .config_watcher = try .init(arena, args.live_config_path),
 
         .io = io,
     };
+    ctx.queue = .initBuffer(&ctx.goal_queue_buf);
+    return ctx;
+}
+
+fn applyLiveConfigScalars(ctx: *MissionContext, config: MissionConfig.MissionConfig) void {
+    ctx.config = config;
+    ctx.goal_dist_threshold = config.goal_dist_threshold;
+    ctx.thrustor_saturate = config.thrustor_saturate;
+    ctx.log_freq_div = config.log_freq_div;
+    ctx.print_stuff = config.print_stuff;
+    ctx.clear_print_stuff = config.clear_print_stuff;
+    ctx.telemetry.warnInitOnlyFields(config);
+    ctx.resetOdometryPid();
 }
 
 pub fn reset(ctx: *MissionContext) void {
@@ -193,79 +181,18 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         }
     }
 
-    if (ctx.config_watcher.changed() catch |err| blk: {
-        std.log.err("{s}", .{@errorName(err)});
-        break :blk false;
-    }) {
-        if (ctx.config_loader.load(ctx.io)) |config| {
-            if (print_stuff) {
-                std.log.debug("succesfully reloaded config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
-                std.log.debug("{any}", .{config});
-            }
-            ctx.config = config;
-        } else |err| {
-            std.log.err("failed to reload config: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
-            std.log.err("{s}", .{@errorName(err)});
-            std.log.info("kept previous config", .{});
-        }
+    var live_config: MissionConfig.MissionConfig = ctx.config;
+    if (ctx.telemetry.pollLiveConfig(ctx.io, ctx.config, ctx.print_stuff, &live_config)) {
+        applyLiveConfigScalars(ctx, live_config);
     }
 
-    if (ctx.auv_watcher.changed() catch |err| blk: {
-        std.log.err("{s}", .{@errorName(err)});
-        break :blk false;
-    }) {
-        ctx.auv.deinit();
-        if (ctx.auv_loader.load(ctx.io)) |auv| {
-            if (print_stuff) {
-                std.log.debug("succesfully reloaded auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
-                std.log.debug("{any}", .{auv});
-            }
-            ctx.auv = auv;
-            if (print_stuff) {
-                std.log.debug("restarted auv loop", .{});
-            }
-            return error.RestartMission;
-        } else |err| {
-            std.log.err("failed to reload auv: {s}/{s}", .{ ctx.auv_watcher.dir, ctx.auv_watcher.name });
-            std.log.err("{s}", .{@errorName(err)});
-            std.log.info("kept previous auv", .{});
-        }
-        ctx.auv.init();
-    }
-
-    var thruster_buffer: [math.max_thrusters]f32 = @splat(0);
+    var thruster_buffer: [MissionConfig.thruster_count]f32 = @splat(0);
     const thruster_values = ctx.controlStep(&thruster_buffer);
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
-    ctx.publishToUdp(thruster_values);
 
-    const elapsed = start.untilNow(ctx.io);
-    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
-    }
-    ctx.log_counter +%= 1;
-}
-
-// Field order is the little-endian packet.
-const TelemetryPacket = struct {
-    magic: [4]u8 = "AUV1".*,
-    timestamp: u64,
-    camera_pose: math.Pose,
-    position_ok: Auv.AxisOk,
-    attitude_ok: Auv.AxisOk,
-    depth_ok: bool,
-    depth: f32,
-    objects: []const Auv.Object,
-    boxes: []const Auv.Object2d,
-    thrusters: []const f32,
-    step: []const u8,
-    force_error: math.Vector3f,
-    goals: []const Goal,
-};
-
-fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
     const nobj = @min(@as(usize, ctx.seen_objects_len), ctx.seen_objects.len);
     const nbox = @min(@as(usize, ctx.seen_objects2d_len), ctx.seen_objects2d.len);
-    var goals: [queue_capacity]Goal = undefined;
+    var goals: [MissionConfig.queue_capacity_max]Goal = undefined;
     var goals_len: usize = 0;
     var goal_it = ctx.queue.iterator();
     while (goal_it.next()) |goal| {
@@ -273,10 +200,7 @@ fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
         goals[goals_len] = goal;
         goals_len += 1;
     }
-
-    var buf: [64 * 1024]u8 = undefined;
-    var w: Io.Writer = .fixed(&buf);
-    SerialBinaryWriter.write(&w, TelemetryPacket{
+    ctx.telemetry.publish(ctx.io, .{
         .timestamp = ctx.frame.timestamp,
         .camera_pose = ctx.frame.camera_pose,
         .position_ok = ctx.frame.position_ok,
@@ -285,18 +209,17 @@ fn publishToUdp(ctx: *MissionContext, thrusters: []const f32) void {
         .depth = ctx.frame.pressure_depth,
         .objects = ctx.seen_objects[0..nobj],
         .boxes = ctx.seen_objects2d[0..nbox],
-        .thrusters = thrusters[0..@min(thrusters.len, 255)],
-        .step = ctx.step[0..@min(ctx.step.len, 255)],
+        .thrusters = thruster_values,
+        .step = ctx.step,
         .force_error = ctx.force_error,
         .goals = goals[0..goals_len],
-    }) catch return;
-    const packet = w.buffered();
+    });
 
-    if (ctx.telemetry_file) |file| file.writeStreamingAll(ctx.io, packet) catch |err| {
-        std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
-    };
-    // udp never blocks, even with the laptop unplugged
-    ctx.telemetry_socket.send(ctx.io, &ctx.telemetry_dest, packet) catch {};
+    const elapsed = start.untilNow(ctx.io);
+    if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+        std.log.debug("done in {} us\n", .{elapsed.raw.toMicroseconds()});
+    }
+    ctx.log_counter +%= 1;
 }
 
 pub fn resetOdometryPid(ctx: *MissionContext) void {
@@ -316,7 +239,17 @@ fn setLookAtTarget(ctx: *MissionContext, target: math.Vector3f) !void {
     const offset = target - ctx.frame.camera_pose.pos;
     if (math.length3f(offset) <= 1e-6) return;
     const toward = math.normalize3f(offset);
-    ctx.target_orientation = try bc.lookWithinLimits(ctx.config.camera_forward, toward, bc.identity, ctx.config.rotation_limit);
+    const camera_forward: math.Vector3f = .{
+        ctx.config.camera_forward[0],
+        ctx.config.camera_forward[1],
+        ctx.config.camera_forward[2],
+    };
+    const rotation_limit: math.Vector3f = .{
+        ctx.config.rotation_limit[0],
+        ctx.config.rotation_limit[1],
+        ctx.config.rotation_limit[2],
+    };
+    ctx.target_orientation = try bc.lookWithinLimits(camera_forward, toward, bc.identity, rotation_limit);
 }
 
 fn slew3(current: math.Vector3f, desired: math.Vector3f, max_step: f32) math.Vector3f {
@@ -387,24 +320,32 @@ fn visualBodyError(ctx: *MissionContext) ?[6]f32 {
         math.withinDeadband(ctx.desired[1] - metrics.cy, ibvs.center_deadband),
         (ctx.desired_height orelse ibvs.target_height) - metrics.height,
     };
-    const mapped = math.mapInteraction(ibvs.interaction, &image_error) catch |err| {
+    var interaction_rows: [math.interaction_output_len][]const f32 = undefined;
+    const ibvs_cols = @min(ibvs.interaction_cols, MissionConfig.max_ibvs_error_cols);
+    for (&interaction_rows, ctx.config.ibvs.interaction) |*row, interaction_row| {
+        row.* = interaction_row[0..ibvs_cols];
+    }
+    const mapped = math.mapInteraction(interaction_rows[0..], &image_error) catch |err| {
         std.log.err(
-            "interaction map failed ({s}): expected {d} rows, each with {d} columns; config has {d} rows",
-            .{ @errorName(err), math.interaction_output_len, image_error.len, ibvs.interaction.len },
+            "interaction map failed ({s}): expected {d} rows, each with {d} columns",
+            .{ @errorName(err), math.interaction_output_len, image_error.len },
         );
-        if (ibvs.interaction.len > 0) {
-            std.log.err("interaction row 0 has {d} columns", .{ibvs.interaction[0].len});
-        }
+        std.log.err("config interaction_cols = {}", .{ibvs.interaction_cols});
         return null;
     };
     const current = bc.normalizedQuat(ctx.frame.camera_pose.quat) catch unreachable;
     const yaw = math.quaternionToEuler(current)[2] + mapped[5];
-    const look_q = bc.lookWithinLimits(
-        ctx.config.camera_forward,
-        lookAtHeading(yaw),
-        bc.identity,
-        ctx.config.rotation_limit,
-    ) catch unreachable;
+    const camera_forward: math.Vector3f = .{
+        ctx.config.camera_forward[0],
+        ctx.config.camera_forward[1],
+        ctx.config.camera_forward[2],
+    };
+    const rotation_limit: math.Vector3f = .{
+        ctx.config.rotation_limit[0],
+        ctx.config.rotation_limit[1],
+        ctx.config.rotation_limit[2],
+    };
+    const look_q = bc.lookWithinLimits(camera_forward, lookAtHeading(yaw), bc.identity, rotation_limit) catch unreachable;
     var angular = bc.attitudeError(current, look_q) catch unreachable;
     angular[0] += mapped[3];
     angular[1] += mapped[4];
@@ -443,7 +384,7 @@ fn quaternionFromRotationVector(rot: math.Vector3f) math.Quaternionf {
 }
 
 /// Track the context pose and return the thruster values. Invalid pose axes contribute no error.
-fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) []f32 {
+fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_count]f32) []f32 {
     const body_error = ctx.bodyError();
     const timestamp_ns = ctx.frame.timestamp;
     const dt: ?f32 = if (ctx.pid_prev_timestamp_ns) |previous| blk: {
@@ -455,7 +396,23 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
         break :blk null;
     };
 
-    const thrust_direction = bc.ThrustDirections.fromTamLinearForces(ctx.config.tam) catch unreachable;
+    const tam_len = @min(ctx.config.tam_len, MissionConfig.thruster_count);
+    var tam_storage: [MissionConfig.thruster_count]math.Vector6f = undefined;
+    for (ctx.config.tam[0..tam_len], tam_storage[0..tam_len]) |source, *dest| {
+        dest.* = source;
+    }
+    const tam_rows = tam_storage[0..tam_len];
+    const camera_forward: math.Vector3f = .{
+        ctx.config.camera_forward[0],
+        ctx.config.camera_forward[1],
+        ctx.config.camera_forward[2],
+    };
+    const rotation_limit: math.Vector3f = .{
+        ctx.config.rotation_limit[0],
+        ctx.config.rotation_limit[1],
+        ctx.config.rotation_limit[2],
+    };
+    const thrust_direction = bc.ThrustDirections.fromTamLinearForces(tam_rows) catch unreachable;
     const current = ctx.frame.camera_pose.quat;
     const error_body: math.Vector3f = .{ body_error[0], body_error[1], body_error[2] };
     const rot: math.Vector3f = .{ body_error[3], body_error[4], body_error[5] };
@@ -465,7 +422,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
     const odom = ctx.config.odometry;
     var desired_tilt: math.Vector3f = .{ 0, 0, 0 };
     var force_error: math.Vector3f = .{ 0, 0, 0 };
-    const moments = bc.ThrustDirections.fromTamMoments(ctx.config.tam) catch unreachable;
+    const moments = bc.ThrustDirections.fromTamMoments(tam_rows) catch unreachable;
     // Coverage swings a thruster onto a force component the map cannot produce.
     const translation_command: math.Vector3f = blk: {
         force_error = error_body;
@@ -480,7 +437,7 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
             force_body[i] = odom.kp[i] * error_body[i] + odom.ki[i] * ctx.pid_sum_err[i] + odom.kd[i] * rate;
             ctx.pid_prev_err[i] = error_body[i];
         }
-        const coverage = bc.coverForce(thrust_direction, moments, force_body, ctx.config.rotation_limit, ctx.config.camera_forward);
+        const coverage = bc.coverForce(thrust_direction, moments, force_body, rotation_limit, camera_forward);
         if (coverage.tilt) |tilt| desired_tilt = tilt.axis * @as(math.Vector3f, @splat(tilt.angle));
         break :blk coverage.force;
     };
@@ -528,15 +485,15 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
         translation_body[0], translation_body[1], translation_body[2],
         rotation[0],         rotation[1],         rotation[2],
     };
-    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
-        if (clear_print_stuff) {
+    if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+        if (ctx.clear_print_stuff) {
             std.debug.print("\x1b[2J\x1b[H", .{});
         }
         std.log.debug("control:", .{});
-        math.debug6f("\tkp", odom.kp);
-        math.debug6f("\tki", odom.ki);
-        math.debug6f("\tkd", odom.kd);
-        for (ctx.config.tam) |row| {
+        math.debug6f("\tkp", @as(math.Vector6f, odom.kp));
+        math.debug6f("\tki", @as(math.Vector6f, odom.ki));
+        math.debug6f("\tkd", @as(math.Vector6f, odom.kd));
+        for (tam_rows) |row| {
             math.debug6f("\ttam", row);
         }
         std.log.debug("dt = {d:6.2} ms", .{(dt orelse 0) * 1000});
@@ -546,18 +503,18 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[math.max_thrusters]f32) 
         math.debug3f("translation error", error_body);
         std.log.debug("target orientation: {any}", .{ctx.target_orientation});
         std.log.debug("attitude error body: {any}", .{attitude_error});
-        math.debug3f("rotation limit", ctx.config.rotation_limit);
+        math.debug3f("rotation limit", rotation_limit);
         std.log.debug("target quaternion: {any}", .{target_q});
         math.debug6f("\tinput", input);
     }
     const thruster_values = math.tamToThrusters(
-        ctx.config.tam,
+        tam_rows,
         input,
         ctx.thrustor_saturate,
         5.0,
         thruster_buffer,
     );
-    if (print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
+    if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) {
         std.log.debug("\tthruster_values = {any}", .{thruster_values});
     }
     return thruster_values;

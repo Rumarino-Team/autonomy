@@ -13,7 +13,7 @@ static std::vector<unsigned char> latest;
 static bool fresh = false;
 static bool opened = false;
 
-void video_close();
+extern "C" void video_close();
 
 static void grab_loop() {
   sl::Mat image;
@@ -46,7 +46,7 @@ static void grab_loop() {
   }
 }
 
-bool video_open(const char *source, int *width, int *height) {
+extern "C" bool video_open(const char *source, int *width, int *height) {
   video_close();
 
   sl::InitParameters init;
@@ -80,7 +80,7 @@ bool video_open(const char *source, int *width, int *height) {
   return true;
 }
 
-bool video_frame(unsigned char *out) {
+extern "C" bool video_frame(unsigned char *out) {
   std::lock_guard<std::mutex> guard(lock);
   if (!fresh) return false;
 
@@ -89,7 +89,7 @@ bool video_frame(unsigned char *out) {
   return true;
 }
 
-void video_close() {
+extern "C" void video_close() {
   if (!opened) return;
 
   running = false;

@@ -5,7 +5,6 @@ const MissionArgs = @import("MissionArgs.zig");
 test {
     std.testing.refAllDecls(@import("BodyControl.zig"));
     std.testing.refAllDecls(@import("MissionContext.zig"));
-    std.testing.refAllDecls(@import("ConfigLoader.zig"));
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -14,7 +13,9 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("args = {f}", .{args});
 
-    var ctx: MissionContext = try .init(init.arena.allocator(), init.io, args);
+    var ctx: MissionContext = try .init(init.io, args);
+    defer ctx.auv.deinit();
+    defer ctx.telemetry.deinit(ctx.io);
 
     while (true) {
         try ctx.yieldUntilNextFrameAndUpdate();
@@ -22,18 +23,12 @@ pub fn main(init: std.process.Init) !void {
         ctx.target_position = ctx.frame.camera_pose.pos;
 
         const mission_result = switch (args.mission_id) {
-            .prequalify_coco => @import("missions/prequalify.zig").cocoMission(&ctx),
-            .prequalify_robosub => @import("missions/prequalify.zig").robosubMission(&ctx),
-            .teleop => @import("missions/prequalify.zig").teleopMission(&ctx),
+            .prequalify_coco => @import("missions/missions.zig").cocoMission(&ctx),
+            .prequalify_robosub => @import("missions/missions.zig").robosubMission(&ctx),
+            .teleop => @import("missions/missions.zig").teleopMission(&ctx),
         };
 
         mission_result catch |err| switch (err) {
-            error.RestartMission => {
-                std.log.info("restaring mission context", .{});
-                ctx.reset();
-                std.log.info("restaring mission", .{});
-                continue;
-            },
             error.Stopped => {
                 std.log.info("stopped", .{});
                 break;
@@ -44,6 +39,4 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("succesfully completed mission", .{});
         break;
     }
-
-    ctx.auv.deinit();
 }

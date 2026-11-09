@@ -1,11 +1,21 @@
 const std = @import("std");
 const math = @import("math.zig");
 
-pub const c = @cImport({
-    @cInclude("auv.h");
-});
+/// Constants shared with `include/auv.h`/`include/object_classes.h`.
+/// Zig 0.17 removed `@cImport`; the ABI structs below remain `extern` and the
+/// C header is compiled into every AUV backend.
+pub const c = struct {
+    pub const AUV_FRAME_MAX_OBJECTS = 128;
+    pub const AUV_COCO_PERSON = 0;
+    pub const AUV_COCO_BOTTLE = 39;
+    pub const AUV_COCO_TOOTHBRUSH = 79;
+    pub const AUV_COCO_COUNT = 80;
+    pub const AUV_ROBOSUB_GATE = 0;
+    pub const AUV_ROBOSUB_MARKER = 1;
+    pub const AUV_ROBOSUB_GATE_OPENING = 2;
+};
 
-pub const Object = extern struct {
+pub const Object = struct {
     bbox: math.BoundingBox,
     id: u32,
     cls: u8,
@@ -30,7 +40,7 @@ pub const AxisOk = extern struct {
     z: bool,
 };
 
-pub const Frame = extern struct {
+pub const Frame = struct {
     pub const max_objects = c.AUV_FRAME_MAX_OBJECTS;
 
     objects: [max_objects]Object,
@@ -53,90 +63,100 @@ pub const Frame = extern struct {
 };
 
 pub const InitFunc = fn () callconv(.c) void;
-pub const YieldUntilNextFrameFunc = fn (frame: *Frame) callconv(.c) void;
+const AbiVector3f = extern struct {
+    buf: [3]f32 align(16),
+};
+
+const AbiQuaternionf = extern struct {
+    buf: [4]f32 align(16),
+};
+
+const AbiPose = extern struct {
+    pos: AbiVector3f,
+    quat: AbiQuaternionf,
+};
+
+const AbiBoundingBox = extern struct {
+    pose: AbiPose,
+    size: AbiVector3f,
+};
+
+const AbiObject = extern struct {
+    bbox: AbiBoundingBox,
+    id: u32,
+    cls: u8,
+};
+
+const AbiFrame = extern struct {
+    objects: [Frame.max_objects]AbiObject,
+    objects_len: u8,
+    camera_pose: AbiPose,
+    timestamp: u64,
+    position_ok: AxisOk,
+    attitude_ok: AxisOk,
+    accel: AbiVector3f,
+    gyro: AbiVector3f,
+    imu_quat: AbiQuaternionf,
+    objects2d: [Frame.max_objects]Object2d,
+    objects2d_len: u8,
+    image_width: u32,
+    image_height: u32,
+    pressure_depth: f32,
+    pressure_depth_ok: bool,
+};
+
+pub const YieldUntilNextFrameFunc = fn (frame: *AbiFrame) callconv(.c) void;
 pub const SetThrustorValuesFunc = fn (thrustor_values: [*c]const f32, thrustor_values_len: u8) callconv(.c) void;
 pub const DeinitFunc = fn () callconv(.c) void;
 
 const Auv = @This();
 
-init: *const InitFunc,
-yieldUntilNextFrame: *const YieldUntilNextFrameFunc,
-setThrustorValues: *const SetThrustorValuesFunc,
-deinit: *const DeinitFunc,
+init_impl: *const InitFunc,
+yield_until_next_frame_impl: *const YieldUntilNextFrameFunc,
+set_thrustor_values_impl: *const SetThrustorValuesFunc,
+deinit_impl: *const DeinitFunc,
 
-// below I'm double checking the ABI matches
-fn assertSameLayout(comptime Zig: type, comptime C: type) void {
-    if (@sizeOf(Zig) != @sizeOf(C))
-        @compileError("size mismatch");
-
-    if (@alignOf(Zig) != @alignOf(C))
-        @compileError("alignment mismatch");
-
-    const zig_info = @typeInfo(Zig);
-    const c_info = @typeInfo(C);
-
-    if (zig_info == .vector) {
-        if (c_info != .@"struct")
-            @compileError("expected C struct for Zig vector");
-
-        const c_fields = c_info.@"struct".fields;
-
-        if (c_fields.len != 1)
-            @compileError("expected C struct with one field");
-
-        const CField = c_fields[0].type;
-        const c_field_info = @typeInfo(CField);
-
-        if (c_field_info != .array)
-            @compileError("expected C vector field to be an array");
-
-        if (c_field_info.array.child != zig_info.vector.child)
-            @compileError("vector element type mismatch");
-
-        return;
-    }
-
-    if (zig_info != .@"struct" or c_info != .@"struct")
-        return;
-
-    const zig_fields = zig_info.@"struct".fields;
-
-    if (zig_fields.len != c_info.@"struct".fields.len)
-        @compileError("field count mismatch");
-
-    inline for (zig_fields) |field| {
-        const name = field.name;
-        const ZigField = field.type;
-        const CField = @FieldType(C, name);
-
-        if (@offsetOf(Zig, name) != @offsetOf(C, name))
-            @compileError("field offset mismatch");
-
-        if (@sizeOf(ZigField) != @sizeOf(CField))
-            @compileError("field size mismatch");
-
-        assertSameLayout(ZigField, CField);
-    }
+pub fn init(self: Auv) void {
+    self.init_impl();
 }
 
-fn assertSameFunctionLayout(comptime Zig: type, comptime C: type) void {
-    const zig_info = @typeInfo(Zig).@"fn";
-    const c_info = @typeInfo(C).@"fn";
-
-    if (zig_info.params.len != c_info.params.len)
-        @compileError("parameter count mismatch");
-
-    inline for (zig_info.params, c_info.params) |zp, cp| {
-        assertSameLayout(
-            zp.type orelse @compileError("missing Zig parameter type"),
-            cp.type orelse @compileError("missing C parameter type"),
-        );
+pub fn yieldUntilNextFrame(self: Auv, frame: *Frame) void {
+    var raw: AbiFrame = undefined;
+    self.yield_until_next_frame_impl(&raw);
+    const objects_len = @min(@as(usize, raw.objects_len), frame.objects.len);
+    for (raw.objects[0..objects_len], frame.objects[0..objects_len]) |source, *dest| {
+        dest.* = .{
+            .bbox = .{
+                .pose = .{ .pos = source.bbox.pose.pos.buf, .quat = source.bbox.pose.quat.buf },
+                .size = source.bbox.size.buf,
+            },
+            .id = source.id,
+            .cls = source.cls,
+        };
     }
+    frame.objects_len = @intCast(objects_len);
+    frame.camera_pose = .{ .pos = raw.camera_pose.pos.buf, .quat = raw.camera_pose.quat.buf };
+    frame.timestamp = raw.timestamp;
+    frame.position_ok = raw.position_ok;
+    frame.attitude_ok = raw.attitude_ok;
+    frame.accel = raw.accel.buf;
+    frame.gyro = raw.gyro.buf;
+    frame.imu_quat = raw.imu_quat.buf;
+    const objects2d_len = @min(@as(usize, raw.objects2d_len), frame.objects2d.len);
+    @memcpy(frame.objects2d[0..objects2d_len], raw.objects2d[0..objects2d_len]);
+    frame.objects2d_len = @intCast(objects2d_len);
+    frame.image_width = raw.image_width;
+    frame.image_height = raw.image_height;
+    frame.pressure_depth = raw.pressure_depth;
+    frame.pressure_depth_ok = raw.pressure_depth_ok;
+}
 
-    assertSameLayout(
-        zig_info.return_type orelse @compileError("missing Zig return type"),
-        c_info.return_type orelse @compileError("missing C return type"),
-    );
+pub fn setThrustorValues(self: Auv, values: [*c]const f32, len: u8) void {
+    self.set_thrustor_values_impl(values, len);
+}
+
+pub fn deinit(self: Auv) void {
+    self.deinit_impl();
 }
 
 comptime {
@@ -147,19 +167,17 @@ comptime {
     if (c.AUV_ROBOSUB_GATE != 0)
         @compileError("robosub gate must be 0");
 
-    assertSameLayout(math.Vector3f, c.MathVector3f);
-    assertSameLayout(math.Quaternionf, c.MathQuaternionf);
-    assertSameLayout(math.Vector6f, c.MathVector6f);
-    assertSameLayout(math.Pose, c.MathPose);
-    assertSameLayout(math.BoundingBox, c.MathBoundingBox);
-    assertSameLayout(Object, c.AuvObject);
-    assertSameLayout(Point2u, c.AuvPoint2u);
-    assertSameLayout(Object2d, c.AuvObject2d);
-    assertSameLayout(AxisOk, c.AuvAxisOk);
-    assertSameLayout(Frame, c.AuvFrame);
-
-    assertSameFunctionLayout(InitFunc, c.AuvInitFunc);
-    assertSameFunctionLayout(YieldUntilNextFrameFunc, c.AuvYieldUntilNextFrameFunc);
-    assertSameFunctionLayout(SetThrustorValuesFunc, c.AuvSetThrustorsInputFunc);
-    assertSameFunctionLayout(DeinitFunc, c.AuvDeinitFunc);
+    if (@sizeOf(AxisOk) != 3) @compileError("AuvAxisOk ABI drift");
+    if (@sizeOf(Point2u) != 8) @compileError("AuvPoint2u ABI drift");
+    if (@sizeOf(AbiVector3f) != 16 or @alignOf(AbiVector3f) != 16)
+        @compileError("MathVector3f ABI drift");
+    if (@sizeOf(AbiQuaternionf) != 16 or @alignOf(AbiQuaternionf) != 16)
+        @compileError("MathQuaternionf ABI drift");
+    if (@sizeOf(AbiPose) != 32) @compileError("MathPose ABI drift");
+    if (@sizeOf(AbiBoundingBox) != 48) @compileError("MathBoundingBox ABI drift");
+    if (@sizeOf(AbiObject) != 64) @compileError("AuvObject ABI drift");
+    if (@sizeOf(Object2d) != 24) @compileError("AuvObject2d ABI drift");
+    if (@offsetOf(AbiFrame, "camera_pose") != 8208) @compileError("AuvFrame camera_pose ABI drift");
+    if (@offsetOf(AbiFrame, "objects2d") != 8304) @compileError("AuvFrame objects2d ABI drift");
+    if (@sizeOf(AbiFrame) != 11408) @compileError("AuvFrame ABI drift");
 }
