@@ -54,10 +54,7 @@ pub fn init(args_slice: []const [:0]const u8) !MissionArgs {
 }
 
 pub fn configForProfile(profile: MissionConfig.MissionProfileId) MissionConfig.MissionConfig {
-    return switch (profile) {
-        .stonefish_sim => MissionConfig.mission_profiles.stonefish_sim,
-        .proteus_hwd => MissionConfig.mission_profiles.proteus_hwd,
-    };
+    return MissionConfig.compiledProfile(profile).*;
 }
 
 pub fn format(args: MissionArgs, writer: *std.Io.Writer) !void {

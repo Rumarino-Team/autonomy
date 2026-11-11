@@ -1,7 +1,3 @@
-//! Mission configuration for the autonomy host (compiled-in `mission_profiles`).
-//!
-//! Normal Zig structs keep configuration ownership and validation in Zig.
-//!
 //! Vehicle tuning presets (`mission_profiles`) live at the bottom of this file (replaces `auvs/*/auv.json`).
 const std = @import("std");
 const bc = @import("BodyControl.zig");
@@ -75,7 +71,16 @@ pub const MissionProfiles = struct {
 };
 
 pub const MissionConfig = struct {
+    // Startup/control connection. These values must match between the runtime
+    // and viewer built from this module.
     teleop_port: u16,
+    telemetry_transport: TelemetryTransport,
+    telemetry_addr: FixedText(telemetry_addr_max),
+    telemetry_shm_name: FixedText(telemetry_shm_name_max),
+    telemetry_log_path: FixedText(telemetry_log_path_max),
+
+    // Control tuning copied into mutable runtime state and optionally updated
+    // by a validated live-control packet.
     camera_forward: [3]f32,
     rotation_limit: [3]f32,
     tam: [thruster_count][tam_cols]f32,
@@ -89,10 +94,6 @@ pub const MissionConfig = struct {
     queue_capacity: u16,
     print_stuff: bool,
     clear_print_stuff: bool,
-    telemetry_transport: TelemetryTransport,
-    telemetry_addr: FixedText(telemetry_addr_max),
-    telemetry_shm_name: FixedText(telemetry_shm_name_max),
-    telemetry_log_path: FixedText(telemetry_log_path_max),
 
     pub fn telemetryAddr(self: *const MissionConfig) error{InvalidTextLength}![]const u8 {
         const text = try self.telemetry_addr.slice();
@@ -248,6 +249,17 @@ pub const mission_profiles: MissionProfiles = .{
     .stonefish_sim = presetStonefishSim(),
     .proteus_hwd = presetProteusHwd(),
 };
+
+/// Return the compiled profile used to initialize runtime configuration.
+pub fn compiledProfile(profile: MissionProfileId) *const MissionConfig {
+    return switch (profile) {
+        .stonefish_sim => &mission_profiles.stonefish_sim,
+        .proteus_hwd => &mission_profiles.proteus_hwd,
+    };
+}
+
+/// The current viewer/runtime integration is compiled for this profile.
+pub const viewer_profile = MissionProfileId.stonefish_sim;
 
 fn rowIsZero(row: [tam_cols]f32) bool {
     for (row) |gain| if (gain != 0) return false;

@@ -12,17 +12,6 @@ const MissionContext = @This();
 
 const Goal = MissionIO.Goal;
 
-const ControlStepOutput = struct {
-    thrusters: []f32,
-    debug: ?MissionIO.ControlDebugSnapshot,
-};
-
-var stop_requested = std.atomic.Value(bool).init(false);
-
-fn requestStop(_: std.posix.SIG) callconv(.c) void {
-    stop_requested.store(true, .monotonic);
-}
-
 io: Io,
 
 frame: Auv.Frame,
@@ -63,10 +52,13 @@ seen_objects2d_len: u8 = 0,
 auv: Auv,
 mission_diyn_loader: MissionIO.MissionDiynLoader,
 
+/// Mutable runtime copy of one compiled MissionConfig profile.
+/// Live control packets may update tuning fields; startup transport fields
+/// remain bound to the values used by Telemetry.init.
 config: MissionConfig.MissionConfig,
 
 pub fn init(self: *MissionContext, allocator: std.mem.Allocator, io: Io, args: MissionArgs) !void {
-    const stop: std.posix.Sigaction = .{ .handler = .{ .handler = requestStop }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    MissionIO.installStopHandlers();
 
     const config = MissionArgs.configForProfile(args.mission_profile);
     try config.validate();
@@ -84,8 +76,6 @@ pub fn init(self: *MissionContext, allocator: std.mem.Allocator, io: Io, args: M
         return err;
     };
     auv.init();
-    std.posix.sigaction(.INT, &stop, null);
-    std.posix.sigaction(.TERM, &stop, null);
     if (config.print_stuff) {
         std.log.debug("succesfully loaded auv: {s}", .{mission_diyn_loader.auv_path});
         std.log.debug("{any}", .{auv});
@@ -141,7 +131,7 @@ pub fn reset(ctx: *MissionContext) void {
 pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     const start = Io.Clock.Timestamp.now(ctx.io, .awake);
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
-    if (stop_requested.load(.monotonic)) return error.Stopped;
+    if (MissionIO.stopRequested()) return error.Stopped;
 
     // std.log.debug("updating seen_objects...", .{});
     for (ctx.frame.objects[0..ctx.frame.objects_len]) |frame_object| {
@@ -182,13 +172,38 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         ctx.log_freq_div = live_config.log_freq_div;
         ctx.print_stuff = live_config.print_stuff;
         ctx.clear_print_stuff = live_config.clear_print_stuff;
-        ctx.telemetry.warnInitOnlyFields(live_config);
+        ctx.telemetry.warnImmutableFields(live_config);
         ctx.resetOdometryPid();
     }
 
+    var telemetry_frame = std.mem.zeroes(MissionIO.TelemetryFrame);
+    telemetry_frame.magic = "AUV1".*;
+    telemetry_frame.abi_version = MissionIO.telemetry_frame_abi_version;
+    telemetry_frame.timestamp = ctx.frame.timestamp;
+    telemetry_frame.camera_pose = .{
+        .pos = ctx.frame.camera_pose.pos,
+        .quat = ctx.frame.camera_pose.quat,
+    };
+    telemetry_frame.position_ok = .{
+        .x = ctx.frame.position_ok.x,
+        .y = ctx.frame.position_ok.y,
+        .z = ctx.frame.position_ok.z,
+        ._pad = 0,
+    };
+    telemetry_frame.attitude_ok = .{
+        .x = ctx.frame.attitude_ok.x,
+        .y = ctx.frame.attitude_ok.y,
+        .z = ctx.frame.attitude_ok.z,
+        ._pad = 0,
+    };
+    telemetry_frame.depth_ok = ctx.frame.pressure_depth_ok;
+    telemetry_frame.depth = ctx.frame.pressure_depth;
+    const step_len = @min(ctx.step.len, telemetry_frame.step.len);
+    telemetry_frame.step_len = @intCast(step_len);
+    @memcpy(telemetry_frame.step[0..step_len], ctx.step[0..step_len]);
+
     var thruster_buffer: [MissionConfig.thruster_count]f32 = @splat(0);
-    var control_output = ctx.controlStep(&thruster_buffer);
-    const thruster_values = control_output.thrusters;
+    const thruster_values = ctx.controlStep(&thruster_buffer, &telemetry_frame);
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
 
     const nobj = @min(@as(usize, ctx.seen_objects_len), ctx.seen_objects.len);
@@ -202,21 +217,35 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         goals_len += 1;
     }
     const elapsed = start.untilNow(ctx.io);
-    if (control_output.debug) |*debug| debug.cycle_us = @intCast(@max(0, elapsed.raw.toMicroseconds()));
-    ctx.telemetry.pushToIoQueue(ctx.io, .{
-        .timestamp = ctx.frame.timestamp,
-        .camera_pose = ctx.frame.camera_pose,
-        .position_ok = ctx.frame.position_ok,
-        .attitude_ok = ctx.frame.attitude_ok,
-        .depth_ok = ctx.frame.pressure_depth_ok,
-        .depth = ctx.frame.pressure_depth,
-        .objects = ctx.seen_objects[0..nobj],
-        .boxes = ctx.seen_objects2d[0..nbox],
-        .thrusters = thruster_values,
-        .step = ctx.step,
-        .force_error = ctx.force_error,
-        .goals = goals[0..goals_len],
-    }, control_output.debug);
+    telemetry_frame.cycle_us = @intCast(@max(0, elapsed.raw.toMicroseconds()));
+    telemetry_frame.force_error = ctx.force_error;
+    telemetry_frame.objects_len = @intCast(nobj);
+    for (ctx.seen_objects[0..nobj], telemetry_frame.objects[0..nobj]) |source, *dest| {
+        dest.* = .{
+            .pose = .{ .pos = source.bbox.pose.pos, .quat = source.bbox.pose.quat },
+            .size = source.bbox.size,
+            .id = source.id,
+            .cls = source.cls,
+            ._pad = .{ 0, 0, 0 },
+        };
+    }
+    telemetry_frame.boxes_len = @intCast(nbox);
+    for (ctx.seen_objects2d[0..nbox], telemetry_frame.boxes[0..nbox]) |source, *dest| {
+        dest.* = .{
+            .top_left = .{ .x = source.top_left.x, .y = source.top_left.y },
+            .bottom_right = .{ .x = source.bottom_right.x, .y = source.bottom_right.y },
+            .id = source.id,
+            .cls = source.cls,
+            ._pad = .{ 0, 0, 0 },
+        };
+    }
+    telemetry_frame.thrusters_len = @intCast(thruster_values.len);
+    @memcpy(telemetry_frame.thrusters[0..thruster_values.len], thruster_values);
+    telemetry_frame.goals_len = @intCast(goals_len);
+    for (goals[0..goals_len], telemetry_frame.goals[0..goals_len]) |source, *dest| {
+        dest.* = .{ .position = source.position, .look_at = source.look_at };
+    }
+    ctx.telemetry.publishTelemetry(ctx.io, telemetry_frame);
 
     ctx.log_counter +%= 1;
 }
@@ -383,7 +412,11 @@ fn quaternionFromRotationVector(rot: math.Vector3f) math.Quaternionf {
 }
 
 /// Track the context pose and return the thruster values. Invalid pose axes contribute no error.
-fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_count]f32) ControlStepOutput {
+fn controlStep(
+    ctx: *MissionContext,
+    thruster_buffer: *[MissionConfig.thruster_count]f32,
+    telemetry_frame: *MissionIO.TelemetryFrame,
+) []f32 {
     const body_error = ctx.bodyError();
     const timestamp_ns = ctx.frame.timestamp;
     const dt: ?f32 = if (ctx.pid_prev_timestamp_ns) |previous| blk: {
@@ -491,30 +524,22 @@ fn controlStep(ctx: *MissionContext, thruster_buffer: *[MissionConfig.thruster_c
         5.0,
         thruster_buffer,
     );
-    const debug: ?MissionIO.ControlDebugSnapshot = if (ctx.print_stuff and ctx.log_counter % ctx.log_freq_div == 0) .{
-        .clear_screen = ctx.clear_print_stuff,
-        .cycle_us = 0,
-        .has_dt = dt != null,
-        .dt = dt orelse 0,
-        .timestamp_ns = timestamp_ns,
-        .kp = @bitCast(odom.kp),
-        .ki = @bitCast(odom.ki),
-        .kd = @bitCast(odom.kd),
-        .tam = tam_storage,
-        .tam_len = @intCast(tam_len),
-        .pose = math.poseTo6f(ctx.frame.camera_pose),
-        .position_ok = ctx.frame.position_ok,
-        .attitude_ok = ctx.frame.attitude_ok,
-        .translation_error = error_body,
-        .target_orientation = ctx.target_orientation,
-        .target_quaternion = target_q,
-        .attitude_error = attitude_error,
-        .rotation_limit = rotation_limit,
-        .input = input,
-        .thrusters = thruster_buffer.*,
-        .thrusters_len = @intCast(thruster_values.len),
-    } else null;
-    return .{ .thrusters = thruster_values, .debug = debug };
+    telemetry_frame.clear_screen = ctx.clear_print_stuff;
+    telemetry_frame.has_dt = dt != null;
+    telemetry_frame.dt = dt orelse 0;
+    telemetry_frame.kp = @bitCast(odom.kp);
+    telemetry_frame.ki = @bitCast(odom.ki);
+    telemetry_frame.kd = @bitCast(odom.kd);
+    telemetry_frame.tam = @bitCast(tam_storage);
+    telemetry_frame.tam_len = @intCast(tam_len);
+    telemetry_frame.control_pose = @bitCast(math.poseTo6f(ctx.frame.camera_pose));
+    telemetry_frame.translation_error = @bitCast(error_body);
+    telemetry_frame.target_orientation = @bitCast(ctx.target_orientation);
+    telemetry_frame.target_quaternion = @bitCast(target_q);
+    telemetry_frame.attitude_error = @bitCast(attitude_error);
+    telemetry_frame.rotation_limit = @bitCast(rotation_limit);
+    telemetry_frame.input = @bitCast(input);
+    return thruster_values;
 }
 
 /// Search while holding still. Returns the first object of `cls`.

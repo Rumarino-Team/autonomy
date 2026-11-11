@@ -1,7 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
 const MissionIO = @import("MissionIO");
-const MissionConfig = MissionIO.Config;
+const MissionConfig = MissionIO.CompiledConfig;
 const math = MissionIO.Math;
 const Io = std.Io;
 
@@ -72,7 +72,7 @@ fn videoDisabled(source: []const u8) bool {
         std.mem.eql(u8, source, "-");
 }
 
-fn tuningValue(packet: *MissionIO.ReadPacket, index: usize) *f32 {
+fn tuningValue(packet: *MissionIO.LiveConfigPacket, index: usize) *f32 {
     const group = index / 6;
     const axis = index % 6;
     return switch (group) {
@@ -117,7 +117,7 @@ fn sendTuning(
     io: Io,
     socket: *Io.net.Socket,
     destination: *const Io.net.IpAddress,
-    packet: MissionIO.ReadPacket,
+    packet: MissionIO.LiveConfigPacket,
 ) !void {
     var buffer: [4096]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
@@ -260,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("viewer argument error: {s}\n", .{@errorName(err)});
         return err;
     };
-    const compiled_config = &MissionConfig.mission_profiles.stonefish_sim;
+    const compiled_config = MissionConfig.compiledProfile(MissionConfig.viewer_profile);
     const telemetry_shm_name = compiled_config.telemetryShmName() catch unreachable;
     const telemetry_addr = compiled_config.telemetryAddr() catch unreachable;
 
@@ -284,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
         const text = try std.fmt.bufPrint(&address_buf, "127.0.0.1:{d}", .{compiled_config.teleop_port});
         break :blk try Io.net.IpAddress.parseLiteral(text);
     };
-    var config_packet = MissionIO.ReadPacket.fromConfig(compiled_config);
+    var config_packet = MissionIO.LiveConfigPacket.fromRuntimeConfig(compiled_config);
     const teleop_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
     var teleop_socket: ?Io.net.Socket = teleop_bind.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch null;
     defer if (teleop_socket) |*socket| socket.close(init.io);
@@ -413,7 +413,7 @@ pub fn main(init: std.process.Init) !void {
                         error.Timeout => break,
                         else => break,
                     };
-                    MissionIO.decodeWritePacket(message.data, &udp_telemetry) catch continue;
+                    MissionIO.decodeTelemetryFrame(message.data, &udp_telemetry) catch continue;
                     {
                         last_timestamp = udp_telemetry.timestamp;
                         last_packet = now;

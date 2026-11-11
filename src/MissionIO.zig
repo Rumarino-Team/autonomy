@@ -1,15 +1,261 @@
-//! Host I/O: cross-platform AUV loading, binary packets, live config, and UDP/shared-memory telemetry.
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const math = @import("math.zig");
 const Auv = @import("Auv.zig");
 const MissionConfig = @import("MissionConfig.zig");
-const SharedMemory = @import("SharedMemory.zig");
 
-pub const Config = MissionConfig;
+var stop_requested = std.atomic.Value(bool).init(false);
+
+fn requestStop() void {
+    stop_requested.store(true, .monotonic);
+}
+
+pub fn stopRequested() bool {
+    return stop_requested.load(.monotonic);
+}
+
+const windows_ctrl_c_event: u32 = 0;
+const windows_ctrl_break_event: u32 = 1;
+const windows_ctrl_close_event: u32 = 2;
+const windows_ctrl_logoff_event: u32 = 5;
+const windows_ctrl_shutdown_event: u32 = 6;
+
+fn windowsConsoleHandler(ctrl_type: u32) callconv(.winapi) std.os.windows.BOOL {
+    switch (ctrl_type) {
+        windows_ctrl_c_event,
+        windows_ctrl_break_event,
+        windows_ctrl_close_event,
+        windows_ctrl_logoff_event,
+        windows_ctrl_shutdown_event,
+        => requestStop(),
+        else => return .FALSE,
+    }
+    return .TRUE;
+}
+
+extern "kernel32" fn SetConsoleCtrlHandler(
+    handler: ?*const fn (u32) callconv(.winapi) std.os.windows.BOOL,
+    add: std.os.windows.BOOL,
+) callconv(.winapi) std.os.windows.BOOL;
+
+pub fn installStopHandlers() void {
+    if (builtin.os.tag == .windows) {
+        _ = SetConsoleCtrlHandler(&windowsConsoleHandler, .TRUE);
+    } else {
+        const stop: std.posix.Sigaction = .{
+            .handler = .{ .handler = struct {
+                fn handle(_: std.posix.SIG) callconv(.c) void {
+                    requestStop();
+                }
+            }.handle },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(.INT, &stop, null);
+        std.posix.sigaction(.TERM, &stop, null);
+    }
+}
+
+const SharedMemory = struct {
+    const is_windows = builtin.os.tag == .windows;
+    const page_alignment = std.heap.page_size_min;
+    const NativeHandle = if (is_windows) std.os.windows.HANDLE else std.posix.fd_t;
+
+    handle: NativeHandle,
+    memory: []align(page_alignment) u8,
+    owner: bool,
+    name: [128:0]u8,
+    name_len: usize,
+
+    pub fn create(name: []const u8, size: usize) !SharedMemory {
+        if (size == 0) return error.InvalidSize;
+        var normalized: [128:0]u8 = undefined;
+        const normalized_len = try normalizeName(name, &normalized);
+        if (is_windows) {
+            return createWindows(normalized, normalized_len, size);
+        }
+        return createPosix(normalized, normalized_len, size);
+    }
+
+    pub fn open(name: []const u8, size: usize) !SharedMemory {
+        if (size == 0) return error.InvalidSize;
+        var normalized: [128:0]u8 = undefined;
+        const normalized_len = try normalizeName(name, &normalized);
+        if (is_windows) {
+            return openWindows(normalized, normalized_len, size);
+        }
+        return openPosix(normalized, normalized_len, size);
+    }
+
+    pub fn unlinkName(name: []const u8) void {
+        var normalized: [128:0]u8 = undefined;
+        const normalized_len = normalizeName(name, &normalized) catch return;
+        if (is_windows) return;
+        _ = std.c.shm_unlink(normalized[0..normalized_len :0].ptr);
+    }
+
+    pub fn deinit(self: *SharedMemory) void {
+        if (is_windows) {
+            _ = UnmapViewOfFile(self.memory.ptr);
+            _ = CloseHandle(self.handle);
+        } else {
+            std.posix.munmap(self.memory);
+            _ = std.c.close(self.handle);
+        }
+        self.* = undefined;
+    }
+
+    pub fn unlink(self: *SharedMemory) void {
+        if (is_windows or !self.owner) return;
+        _ = std.c.shm_unlink(self.name[0..self.name_len :0].ptr);
+    }
+
+    fn normalizeName(name: []const u8, out: *[128:0]u8) !usize {
+        if (name.len == 0) return error.InvalidName;
+        const prefix = if (is_windows) "Local\\" else "/";
+        const skip_prefix = if (is_windows)
+            std.mem.startsWith(u8, name, "Local\\")
+        else
+            std.mem.startsWith(u8, name, "/");
+        const needed = name.len + if (skip_prefix) 0 else prefix.len;
+        if (needed > out.len) return error.NameTooLong;
+        var at: usize = 0;
+        if (!skip_prefix) {
+            @memcpy(out[0..prefix.len], prefix);
+            at = prefix.len;
+        }
+        @memcpy(out[at..needed], name);
+        out[needed] = 0;
+        return needed;
+    }
+
+    fn createPosix(name: [128:0]u8, name_len: usize, size: usize) !SharedMemory {
+        if (is_windows) unreachable;
+        const zname = name[0..name_len :0];
+        const flags: std.posix.O = .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true };
+        const fd = std.c.shm_open(zname.ptr, @bitCast(flags), 0o600);
+        if (fd < 0) return if (std.c.errno(fd) == .EXIST) error.AlreadyExists else error.CreateFailed;
+        errdefer _ = std.c.close(fd);
+        if (std.c.ftruncate(fd, @intCast(size)) != 0) return error.ResizeFailed;
+        const memory = try std.posix.mmap(
+            null,
+            size,
+            .{ .READ = true, .WRITE = true },
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+        errdefer std.posix.munmap(memory);
+        @memset(memory, 0);
+        return .{
+            .handle = fd,
+            .memory = memory,
+            .owner = true,
+            .name = name,
+            .name_len = name_len,
+        };
+    }
+
+    fn openPosix(name: [128:0]u8, name_len: usize, size: usize) !SharedMemory {
+        if (is_windows) unreachable;
+        const zname = name[0..name_len :0];
+        const flags: std.posix.O = .{ .ACCMODE = .RDONLY };
+        const fd = std.c.shm_open(zname.ptr, @bitCast(flags), 0);
+        if (fd < 0) return error.OpenFailed;
+        errdefer _ = std.c.close(fd);
+        const memory = try std.posix.mmap(
+            null,
+            size,
+            .{ .READ = true },
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+        return .{
+            .handle = fd,
+            .memory = memory,
+            .owner = false,
+            .name = name,
+            .name_len = name_len,
+        };
+    }
+
+    const invalid_handle_value: std.os.windows.HANDLE = @ptrFromInt(std.math.maxInt(usize));
+    const page_readwrite: u32 = 0x04;
+    const file_map_all_access: u32 = 0x000f001f;
+    const file_map_read: u32 = 0x00000004;
+
+    fn createWindows(name: [128:0]u8, name_len: usize, size: usize) !SharedMemory {
+        if (!is_windows) unreachable;
+        const size64: u64 = @intCast(size);
+        const handle = CreateFileMappingA(
+            invalid_handle_value,
+            null,
+            page_readwrite,
+            @intCast(size64 >> 32),
+            @truncate(size64),
+            name[0..name_len :0].ptr,
+        ) orelse return error.CreateFailed;
+        errdefer _ = CloseHandle(handle);
+        if (GetLastError() == 183) return error.AlreadyExists;
+        const raw = MapViewOfFile(handle, file_map_all_access, 0, 0, size) orelse return error.MapFailed;
+        const memory = @as([*]align(page_alignment) u8, @ptrCast(@alignCast(raw)))[0..size];
+        @memset(memory, 0);
+        return .{
+            .handle = handle,
+            .memory = memory,
+            .owner = true,
+            .name = name,
+            .name_len = name_len,
+        };
+    }
+
+    fn openWindows(name: [128:0]u8, name_len: usize, size: usize) !SharedMemory {
+        if (!is_windows) unreachable;
+        const handle = OpenFileMappingA(file_map_read, .FALSE, name[0..name_len :0].ptr) orelse
+            return error.OpenFailed;
+        errdefer _ = CloseHandle(handle);
+        const raw = MapViewOfFile(handle, file_map_read, 0, 0, size) orelse return error.MapFailed;
+        const memory = @as([*]align(page_alignment) u8, @ptrCast(@alignCast(raw)))[0..size];
+        return .{
+            .handle = handle,
+            .memory = memory,
+            .owner = false,
+            .name = name,
+            .name_len = name_len,
+        };
+    }
+
+    extern "kernel32" fn CreateFileMappingA(
+        file: std.os.windows.HANDLE,
+        attributes: ?*anyopaque,
+        protect: u32,
+        maximum_size_high: u32,
+        maximum_size_low: u32,
+        name: [*:0]const u8,
+    ) callconv(.winapi) ?std.os.windows.HANDLE;
+    extern "kernel32" fn OpenFileMappingA(
+        desired_access: u32,
+        inherit_handle: std.os.windows.BOOL,
+        name: [*:0]const u8,
+    ) callconv(.winapi) ?std.os.windows.HANDLE;
+    extern "kernel32" fn MapViewOfFile(
+        mapping: std.os.windows.HANDLE,
+        desired_access: u32,
+        offset_high: u32,
+        offset_low: u32,
+        bytes_to_map: usize,
+    ) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn UnmapViewOfFile(address: *const anyopaque) callconv(.winapi) std.os.windows.BOOL;
+    extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
+    extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+};
+
+/// The compiled profile definitions shared by the runtime and viewer.
+pub const CompiledConfig = MissionConfig;
 pub const Math = math;
-pub const TelemetryTransport = MissionConfig.TelemetryTransport;
+pub const TelemetryTransport = CompiledConfig.TelemetryTransport;
 
 pub const DynLib = if (builtin.os.tag == .windows) WindowsDynLib else std.DynLib;
 
@@ -214,7 +460,8 @@ pub const MissionDiynLoader = struct {
     }
 };
 
-pub const ReadPacket = struct {
+/// Mutable control values sent by the viewer over the control socket.
+pub const LiveConfigPacket = struct {
     magic: [4]u8 = magic_value,
     wire_version: u16 = wire_version_value,
     camera_forward: [3]f32,
@@ -253,13 +500,13 @@ pub const ReadPacket = struct {
         NonFinite,
     };
 
-    fn decode(buf: []const u8) DecodeError!ReadPacket {
+    fn decode(buf: []const u8) DecodeError!LiveConfigPacket {
         if (buf.len < 4 + 2) return error.BufferTooShort;
         if (!std.mem.eql(u8, buf[0..4], &magic_value)) return error.BadMagic;
         const version = std.mem.readInt(u16, buf[4..6], .little);
         if (version != wire_version_value) return error.UnsupportedWireVersion;
 
-        const parsed = SerialBinary.readFromBuffer(ReadPacket, buf) catch return error.BufferTooShort;
+        const parsed = SerialBinary.readFromBuffer(LiveConfigPacket, buf) catch return error.BufferTooShort;
         if (!std.mem.eql(u8, &parsed.value.magic, &magic_value)) return error.BadMagic;
         if (parsed.value.wire_version != wire_version_value) return error.UnsupportedWireVersion;
         return parsed.value;
@@ -296,7 +543,7 @@ pub const ReadPacket = struct {
         }
     }
 
-    fn validate(packet: *const ReadPacket) ValidateError!void {
+    fn validate(packet: *const LiveConfigPacket) ValidateError!void {
         if (packet.tam_len == 0 or packet.tam_len > MissionConfig.thruster_count)
             return error.InvalidTamLen;
         if (packet.queue_capacity == 0 or packet.queue_capacity > MissionConfig.queue_capacity_max)
@@ -314,7 +561,7 @@ pub const ReadPacket = struct {
         _ = try packet.telemetry_log_path.slice();
     }
 
-    pub fn fromConfig(config: *const MissionConfig.MissionConfig) ReadPacket {
+    pub fn fromRuntimeConfig(config: *const MissionConfig.MissionConfig) LiveConfigPacket {
         return .{
             .magic = magic_value,
             .wire_version = wire_version_value,
@@ -337,7 +584,7 @@ pub const ReadPacket = struct {
         };
     }
 
-    fn mergeInto(dst: *MissionConfig.MissionConfig, packet: ReadPacket) void {
+    fn applyToRuntimeConfig(dst: *MissionConfig.MissionConfig, packet: LiveConfigPacket) void {
         const teleop_port = dst.teleop_port;
 
         dst.camera_forward = packet.camera_forward;
@@ -366,56 +613,10 @@ pub const Goal = struct {
     look_at: math.Vector3f,
 };
 
-pub const WritePacket = struct {
-    magic: [4]u8 = "AUV1".*,
-    timestamp: u64,
-    camera_pose: math.Pose,
-    position_ok: Auv.AxisOk,
-    attitude_ok: Auv.AxisOk,
-    depth_ok: bool,
-    depth: f32,
-    objects: []const Auv.Object,
-    boxes: []const Auv.Object2d,
-    thrusters: []const f32,
-    step: []const u8,
-    force_error: math.Vector3f,
-    goals: []const Goal,
-};
-
-/// Values needed to emit the controller's detailed diagnostics away from the
-/// control thread. This deliberately owns every value; it contains no slices.
-pub const ControlDebugSnapshot = struct {
-    clear_screen: bool,
-    cycle_us: u64,
-    has_dt: bool,
-    dt: f32,
-    timestamp_ns: u64,
-    kp: math.Vector6f,
-    ki: math.Vector6f,
-    kd: math.Vector6f,
-    tam: [MissionConfig.thruster_count]math.Vector6f,
-    tam_len: u8,
-    pose: math.Vector6f,
-    position_ok: Auv.AxisOk,
-    attitude_ok: Auv.AxisOk,
-    translation_error: math.Vector3f,
-    target_orientation: math.Quaternionf,
-    target_quaternion: math.Quaternionf,
-    attitude_error: math.Vector3f,
-    rotation_limit: math.Vector3f,
-    input: math.Vector6f,
-    thrusters: [MissionConfig.thruster_count]f32,
-    thrusters_len: u8,
-};
-
-const IoEvent = struct {
-    frame: TelemetryFrame,
-    control_debug: ?ControlDebugSnapshot,
-};
-
+/// Runtime telemetry data produced by the mission loop for publication.
 pub const telemetry_step_max = 64;
 pub const telemetry_ring_slot_count = 32;
-pub const telemetry_frame_abi_version: u32 = 1;
+pub const telemetry_frame_abi_version: u32 = 2;
 
 pub const TelemetryPose = extern struct {
     pos: [3]f32,
@@ -455,8 +656,9 @@ pub const TelemetryGoal = extern struct {
     look_at: [3]f32,
 };
 
-/// Fixed-size shared-memory representation of `WritePacket`.
-/// All variable-length data is stored inline so a consumer can read it by pointer cast.
+/// Canonical fixed-layout runtime telemetry shared with the viewer.
+/// All variable-length data is stored inline with explicit lengths so the same
+/// type can be used for runtime publication, shared memory, UDP, and logs.
 pub const TelemetryFrame = extern struct {
     magic: [4]u8,
     abi_version: u32,
@@ -479,76 +681,26 @@ pub const TelemetryFrame = extern struct {
     step: [telemetry_step_max]u8,
     force_error: [3]f32,
     goals: [MissionConfig.queue_capacity_max]TelemetryGoal,
+    clear_screen: bool,
+    _debug_pad: [7]u8,
+    cycle_us: u64,
+    has_dt: bool,
+    _dt_pad: [3]u8,
+    dt: f32,
+    kp: [6]f32,
+    ki: [6]f32,
+    kd: [6]f32,
+    tam: [MissionConfig.thruster_count][6]f32,
+    tam_len: u8,
+    _tam_pad: [7]u8,
+    control_pose: [6]f32,
+    translation_error: [3]f32,
+    target_orientation: [4]f32,
+    target_quaternion: [4]f32,
+    attitude_error: [3]f32,
+    rotation_limit: [3]f32,
+    input: [6]f32,
 
-    pub fn writeFromPacket(frame: *TelemetryFrame, packet: WritePacket) void {
-        frame.* = std.mem.zeroes(TelemetryFrame);
-        frame.magic = "AUV1".*;
-        frame.abi_version = telemetry_frame_abi_version;
-        frame.timestamp = packet.timestamp;
-        frame.camera_pose = .{
-            .pos = packet.camera_pose.pos,
-            .quat = packet.camera_pose.quat,
-        };
-        frame.position_ok = .{
-            .x = packet.position_ok.x,
-            .y = packet.position_ok.y,
-            .z = packet.position_ok.z,
-            ._pad = 0,
-        };
-        frame.attitude_ok = .{
-            .x = packet.attitude_ok.x,
-            .y = packet.attitude_ok.y,
-            .z = packet.attitude_ok.z,
-            ._pad = 0,
-        };
-        frame.depth_ok = packet.depth_ok;
-        frame.depth = packet.depth;
-        frame.force_error = packet.force_error;
-
-        const objects_len = @min(packet.objects.len, frame.objects.len);
-        frame.objects_len = @intCast(objects_len);
-        for (packet.objects[0..objects_len], frame.objects[0..objects_len]) |source, *dest| {
-            dest.* = .{
-                .pose = .{ .pos = source.bbox.pose.pos, .quat = source.bbox.pose.quat },
-                .size = source.bbox.size,
-                .id = source.id,
-                .cls = source.cls,
-                ._pad = .{ 0, 0, 0 },
-            };
-        }
-
-        const boxes_len = @min(packet.boxes.len, frame.boxes.len);
-        frame.boxes_len = @intCast(boxes_len);
-        for (packet.boxes[0..boxes_len], frame.boxes[0..boxes_len]) |source, *dest| {
-            dest.* = .{
-                .top_left = .{ .x = source.top_left.x, .y = source.top_left.y },
-                .bottom_right = .{ .x = source.bottom_right.x, .y = source.bottom_right.y },
-                .id = source.id,
-                .cls = source.cls,
-                ._pad = .{ 0, 0, 0 },
-            };
-        }
-
-        const thrusters_len = @min(packet.thrusters.len, frame.thrusters.len);
-        frame.thrusters_len = @intCast(thrusters_len);
-        @memcpy(frame.thrusters[0..thrusters_len], packet.thrusters[0..thrusters_len]);
-
-        const step_len = @min(packet.step.len, frame.step.len);
-        frame.step_len = @intCast(step_len);
-        @memcpy(frame.step[0..step_len], packet.step[0..step_len]);
-
-        const goals_len = @min(packet.goals.len, frame.goals.len);
-        frame.goals_len = @intCast(goals_len);
-        for (packet.goals[0..goals_len], frame.goals[0..goals_len]) |source, *dest| {
-            dest.* = .{ .position = source.position, .look_at = source.look_at };
-        }
-    }
-
-    pub fn fromWritePacket(packet: WritePacket) TelemetryFrame {
-        var frame: TelemetryFrame = undefined;
-        frame.writeFromPacket(packet);
-        return frame;
-    }
 };
 
 fn layoutMix(h: u64, value: usize) u64 {
@@ -563,6 +715,11 @@ pub const telemetry_layout_fingerprint: u64 = blk: {
     h = layoutMix(h, @offsetOf(TelemetryFrame, "objects"));
     h = layoutMix(h, @offsetOf(TelemetryFrame, "boxes"));
     h = layoutMix(h, @offsetOf(TelemetryFrame, "goals"));
+    h = layoutMix(h, @offsetOf(TelemetryFrame, "clear_screen"));
+    h = layoutMix(h, @offsetOf(TelemetryFrame, "cycle_us"));
+    h = layoutMix(h, @offsetOf(TelemetryFrame, "kp"));
+    h = layoutMix(h, @offsetOf(TelemetryFrame, "tam"));
+    h = layoutMix(h, @offsetOf(TelemetryFrame, "input"));
     break :blk h;
 };
 
@@ -618,6 +775,23 @@ fn staleSharedMemory(name: []const u8) bool {
 }
 
 comptime {
+    // LiveConfigPacket is serialized field-by-field by SerialBinary. Keep
+    // these anchors in order when changing the control wire schema.
+    const live_fields = @typeInfo(LiveConfigPacket).@"struct".field_names;
+    if (live_fields.len != 18 or
+        !std.mem.eql(u8, live_fields[2], "camera_forward") or
+        !std.mem.eql(u8, live_fields[14], "telemetry_transport") or
+        !std.mem.eql(u8, live_fields[17], "telemetry_log_path"))
+        @compileError("live config packet control fields changed order");
+    // TelemetryFrame is shared-memory ABI, so its fixed offsets are part of
+    // the viewer/runtime contract.
+    if (@offsetOf(TelemetryFrame, "timestamp") != 8)
+        @compileError("telemetry timestamp ABI drift");
+    if (@offsetOf(TelemetryFrame, "objects") <= @offsetOf(TelemetryFrame, "goals_len"))
+        @compileError("telemetry payload ABI drift");
+    if (@offsetOf(TelemetryFrame, "cycle_us") <= @offsetOf(TelemetryFrame, "clear_screen") or
+        @offsetOf(TelemetryFrame, "input") <= @offsetOf(TelemetryFrame, "rotation_limit"))
+        @compileError("telemetry diagnostics ABI drift");
     if (@offsetOf(RingHeader, "published_seq") % @alignOf(u64) != 0)
         @compileError("shared telemetry sequence must be naturally aligned");
     if (@offsetOf(RingSlot, "frame") % @alignOf(TelemetryFrame) != 0)
@@ -737,6 +911,7 @@ pub const SharedMemoryPublisher = struct {
     }
 };
 
+/// Runtime-owned transport selected from the compiled startup configuration.
 pub const TelemetryPublisher = union(TelemetryTransport) {
     udp: UdpPublisher,
     shared_memory: SharedMemoryPublisher,
@@ -764,15 +939,9 @@ pub const TelemetryPublisher = union(TelemetryTransport) {
     }
 };
 
-pub fn encodeWritePacket(buf: []u8, output: WritePacket) ![]const u8 {
+pub fn encodeTelemetryFrame(buf: []u8, frame: TelemetryFrame) ![]const u8 {
     var writer: Io.Writer = .fixed(buf);
-    var packet = output;
-    packet.objects = packet.objects[0..@min(packet.objects.len, std.math.maxInt(u8))];
-    packet.boxes = packet.boxes[0..@min(packet.boxes.len, std.math.maxInt(u8))];
-    packet.thrusters = packet.thrusters[0..@min(packet.thrusters.len, std.math.maxInt(u8))];
-    packet.step = packet.step[0..@min(packet.step.len, std.math.maxInt(u8))];
-    packet.goals = packet.goals[0..@min(packet.goals.len, std.math.maxInt(u8))];
-    try SerialBinary.write(&writer, packet);
+    try SerialBinary.write(&writer, frame);
     return writer.buffered();
 }
 
@@ -784,179 +953,39 @@ pub fn encodeMissionCommand(buf: []u8, command: MissionCommand) ![]const u8 {
     return writer.buffered();
 }
 
-fn encodeTelemetryFrame(buf: []u8, frame: *const TelemetryFrame) ![]const u8 {
-    var objects: [Auv.Frame.max_objects]Auv.Object = undefined;
-    for (frame.objects[0..frame.objects_len], objects[0..frame.objects_len]) |source, *dest| {
-        dest.* = .{
-            .bbox = .{
-                .pose = .{ .pos = source.pose.pos, .quat = source.pose.quat },
-                .size = source.size,
-            },
-            .id = source.id,
-            .cls = source.cls,
-        };
-    }
-
-    var boxes: [Auv.Frame.max_objects]Auv.Object2d = undefined;
-    for (frame.boxes[0..frame.boxes_len], boxes[0..frame.boxes_len]) |source, *dest| {
-        dest.* = .{
-            .top_left = .{ .x = source.top_left.x, .y = source.top_left.y },
-            .bottom_right = .{ .x = source.bottom_right.x, .y = source.bottom_right.y },
-            .id = source.id,
-            .cls = source.cls,
-        };
-    }
-
-    var goals: [MissionConfig.queue_capacity_max]Goal = undefined;
-    for (frame.goals[0..frame.goals_len], goals[0..frame.goals_len]) |source, *dest| {
-        dest.* = .{ .position = source.position, .look_at = source.look_at };
-    }
-
-    return encodeWritePacket(buf, .{
-        .magic = frame.magic,
-        .timestamp = frame.timestamp,
-        .camera_pose = .{ .pos = frame.camera_pose.pos, .quat = frame.camera_pose.quat },
-        .position_ok = .{ .x = frame.position_ok.x, .y = frame.position_ok.y, .z = frame.position_ok.z },
-        .attitude_ok = .{ .x = frame.attitude_ok.x, .y = frame.attitude_ok.y, .z = frame.attitude_ok.z },
-        .depth_ok = frame.depth_ok,
-        .depth = frame.depth,
-        .objects = objects[0..frame.objects_len],
-        .boxes = boxes[0..frame.boxes_len],
-        .thrusters = frame.thrusters[0..frame.thrusters_len],
-        .step = frame.step[0..frame.step_len],
-        .force_error = frame.force_error,
-        .goals = goals[0..frame.goals_len],
-    });
-}
-
-fn printControlDebug(snapshot: ControlDebugSnapshot) void {
-    if (snapshot.clear_screen) std.debug.print("\x1b[2J\x1b[H", .{});
-    std.log.debug("done in {} us", .{snapshot.cycle_us});
-    std.log.debug("control:", .{});
-    math.debug6f("\tkp", snapshot.kp);
-    math.debug6f("\tki", snapshot.ki);
-    math.debug6f("\tkd", snapshot.kd);
-    for (snapshot.tam[0..snapshot.tam_len]) |row| math.debug6f("\ttam", row);
-    if (snapshot.has_dt) {
-        std.log.debug("dt = {d:6.2} ms", .{snapshot.dt * 1000});
-    } else {
-        std.log.debug("dt = unavailable", .{});
-    }
-    std.log.debug("timestamp_ns = {d}", .{snapshot.timestamp_ns});
-    math.debug6f("pose", snapshot.pose);
-    std.log.debug("position ok: {any} attitude ok: {any}", .{ snapshot.position_ok, snapshot.attitude_ok });
-    math.debug3f("translation error", snapshot.translation_error);
-    std.log.debug("target orientation: {any}", .{snapshot.target_orientation});
-    math.debug3f("attitude error body", snapshot.attitude_error);
-    math.debug3f("rotation limit", snapshot.rotation_limit);
-    std.log.debug("target quaternion: {any}", .{snapshot.target_quaternion});
-    math.debug6f("\tinput", snapshot.input);
-    std.log.debug("\tthruster_values = {any}", .{snapshot.thrusters[0..snapshot.thrusters_len]});
-}
-
 fn processTelemetry(
     io: Io,
     publisher: *TelemetryPublisher,
     log_file: ?Io.File,
-    event: IoEvent,
+    frame: TelemetryFrame,
     encoded_buf: *[outbound_buf_len]u8,
 ) void {
-        if (event.control_debug) |debug| printControlDebug(debug);
-
-        const encoded: ?[]const u8 = if (publisher.* == .udp or log_file != null)
-            encodeTelemetryFrame(encoded_buf, &event.frame) catch |err| blk: {
-                std.log.err("telemetry encode failed: {s}", .{@errorName(err)});
-                break :blk null;
-            }
-        else
-            null;
-
-        publisher.publishEncoded(io, event.frame, encoded);
-        if (log_file) |file| {
-            if (encoded) |bytes| file.writeStreamingAll(io, bytes) catch |err| {
-                std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
-            };
+    const encoded: ?[]const u8 = if (publisher.* == .udp or log_file != null)
+        encodeTelemetryFrame(encoded_buf, frame) catch |err| blk: {
+            std.log.err("telemetry encode failed: {s}", .{@errorName(err)});
+            break :blk null;
         }
+    else
+        null;
+
+    publisher.publishEncoded(io, frame, encoded);
+    if (log_file) |file| {
+        if (encoded) |bytes| file.writeStreamingAll(io, bytes) catch |err| {
+            std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
+        };
+    }
 }
 
-/// Decode the legacy `AUV1` UDP/log representation into the same fixed frame
-/// used by shared memory. This keeps viewer code independent of slice lifetimes.
-pub fn decodeWritePacket(buf: []const u8, frame: *TelemetryFrame) !void {
+/// Decode the fixed telemetry frame used by both UDP/log and shared memory.
+pub fn decodeTelemetryFrame(buf: []const u8, frame: *TelemetryFrame) !void {
     var reader: Io.Reader = .fixed(buf);
-    frame.* = std.mem.zeroes(TelemetryFrame);
-    frame.magic = try SerialBinary.read(&reader, [4]u8);
+    frame.* = try SerialBinary.read(&reader, TelemetryFrame);
     if (!std.mem.eql(u8, &frame.magic, "AUV1")) return error.BadMagic;
-    frame.abi_version = telemetry_frame_abi_version;
-    frame.timestamp = try SerialBinary.read(&reader, u64);
-    const pose = try SerialBinary.read(&reader, math.Pose);
-    frame.camera_pose = .{ .pos = pose.pos, .quat = pose.quat };
-    const position_ok = try SerialBinary.read(&reader, Auv.AxisOk);
-    frame.position_ok = .{
-        .x = position_ok.x,
-        .y = position_ok.y,
-        .z = position_ok.z,
-        ._pad = 0,
-    };
-    const attitude_ok = try SerialBinary.read(&reader, Auv.AxisOk);
-    frame.attitude_ok = .{
-        .x = attitude_ok.x,
-        .y = attitude_ok.y,
-        .z = attitude_ok.z,
-        ._pad = 0,
-    };
-    frame.depth_ok = try SerialBinary.read(&reader, bool);
-    frame.depth = try SerialBinary.read(&reader, f32);
-
-    const objects_len = try SerialBinary.read(&reader, u8);
-    frame.objects_len = @intCast(@min(@as(usize, objects_len), frame.objects.len));
-    for (0..objects_len) |i| {
-        const source = try SerialBinary.read(&reader, Auv.Object);
-        if (i < frame.objects.len) frame.objects[i] = .{
-            .pose = .{ .pos = source.bbox.pose.pos, .quat = source.bbox.pose.quat },
-            .size = source.bbox.size,
-            .id = source.id,
-            .cls = source.cls,
-            ._pad = .{ 0, 0, 0 },
-        };
-    }
-
-    const boxes_len = try SerialBinary.read(&reader, u8);
-    frame.boxes_len = @intCast(@min(@as(usize, boxes_len), frame.boxes.len));
-    for (0..boxes_len) |i| {
-        const source = try SerialBinary.read(&reader, Auv.Object2d);
-        if (i < frame.boxes.len) frame.boxes[i] = .{
-            .top_left = .{ .x = source.top_left.x, .y = source.top_left.y },
-            .bottom_right = .{ .x = source.bottom_right.x, .y = source.bottom_right.y },
-            .id = source.id,
-            .cls = source.cls,
-            ._pad = .{ 0, 0, 0 },
-        };
-    }
-
-    const thrusters_len = try SerialBinary.read(&reader, u8);
-    frame.thrusters_len = @intCast(@min(@as(usize, thrusters_len), frame.thrusters.len));
-    for (0..thrusters_len) |i| {
-        const value = try SerialBinary.read(&reader, f32);
-        if (i < frame.thrusters.len) frame.thrusters[i] = value;
-    }
-
-    const step_len = try SerialBinary.read(&reader, u8);
-    frame.step_len = @intCast(@min(@as(usize, step_len), frame.step.len));
-    for (0..step_len) |i| {
-        const byte = try SerialBinary.read(&reader, u8);
-        if (i < frame.step.len) frame.step[i] = byte;
-    }
-    frame.force_error = try SerialBinary.read(&reader, math.Vector3f);
-
-    // Goals were appended after the original packet format; accept old senders.
-    if (reader.seek == buf.len) return;
-    const goals_len = try SerialBinary.read(&reader, u8);
-    frame.goals_len = @intCast(@min(@as(usize, goals_len), frame.goals.len));
-    for (0..goals_len) |i| {
-        const source = try SerialBinary.read(&reader, Goal);
-        if (i < frame.goals.len)
-            frame.goals[i] = .{ .position = source.position, .look_at = source.look_at };
-    }
+    if (frame.abi_version != telemetry_frame_abi_version) return error.UnsupportedAbiVersion;
+    if (frame.objects_len > frame.objects.len or frame.boxes_len > frame.boxes.len or
+        frame.thrusters_len > frame.thrusters.len or frame.step_len > frame.step.len or
+        frame.goals_len > frame.goals.len or frame.tam_len > frame.tam.len)
+        return error.InvalidTelemetryLengths;
 }
 
 pub const TeleopCommand = struct {
@@ -1042,11 +1071,11 @@ pub const Telemetry = struct {
     control_socket: Io.net.Socket = undefined,
     teleop_command: ?TeleopCommand = null,
     mission_command: ?MissionCommand = null,
-    read_packet: ReadPacket = undefined,
-    initial_read_packet: ReadPacket = undefined,
+    live_config_packet: LiveConfigPacket = undefined,
+    initial_config_packet: LiveConfigPacket = undefined,
 
-    fn syncConfigFields(self: *Telemetry, config: MissionConfig.MissionConfig) void {
-        self.read_packet = ReadPacket.fromConfig(&config);
+    fn refreshLiveConfigPacket(self: *Telemetry, config: MissionConfig.MissionConfig) void {
+        self.live_config_packet = LiveConfigPacket.fromRuntimeConfig(&config);
     }
 
     pub fn init(_: std.mem.Allocator, io: Io, config: MissionConfig.MissionConfig) !Telemetry {
@@ -1075,9 +1104,9 @@ pub const Telemetry = struct {
             .publisher = publisher,
             .log_file = log_file,
             .control_socket = control_socket,
-            .initial_read_packet = ReadPacket.fromConfig(&config),
+            .initial_config_packet = LiveConfigPacket.fromRuntimeConfig(&config),
         };
-        telemetry.syncConfigFields(config);
+        telemetry.refreshLiveConfigPacket(config);
         return telemetry;
     }
 
@@ -1088,8 +1117,8 @@ pub const Telemetry = struct {
         self.* = undefined;
     }
 
-    pub fn warnInitOnlyFields(self: *const Telemetry, config: MissionConfig.MissionConfig) void {
-        const init_telemetry = self.initial_read_packet.telemetry_addr.slice() catch "";
+    pub fn warnImmutableFields(self: *const Telemetry, config: MissionConfig.MissionConfig) void {
+        const init_telemetry = self.initial_config_packet.telemetry_addr.slice() catch "";
         const new_telemetry = config.telemetryAddr() catch {
             std.log.err("live config has invalid telemetry_addr", .{});
             return;
@@ -1097,10 +1126,10 @@ pub const Telemetry = struct {
         if (!std.mem.eql(u8, new_telemetry, init_telemetry)) {
             std.log.warn("config telemetry_addr changed; restart required", .{});
         }
-        if (config.telemetry_transport != self.initial_read_packet.telemetry_transport) {
+        if (config.telemetry_transport != self.initial_config_packet.telemetry_transport) {
             std.log.warn("config telemetry_transport changed; restart required", .{});
         }
-        const init_shm_name = self.initial_read_packet.telemetry_shm_name.slice() catch "";
+        const init_shm_name = self.initial_config_packet.telemetry_shm_name.slice() catch "";
         const new_shm_name = config.telemetryShmName() catch {
             std.log.err("live config has invalid telemetry_shm_name", .{});
             return;
@@ -1108,7 +1137,7 @@ pub const Telemetry = struct {
         if (!std.mem.eql(u8, new_shm_name, init_shm_name)) {
             std.log.warn("config telemetry_shm_name changed; restart required", .{});
         }
-        const init_log_path = self.initial_read_packet.telemetry_log_path.slice() catch "";
+        const init_log_path = self.initial_config_packet.telemetry_log_path.slice() catch "";
         const new_log_path = config.telemetryLogPath() catch {
             std.log.err("live config has invalid telemetry_log_path", .{});
             return;
@@ -1173,86 +1202,31 @@ pub const Telemetry = struct {
                 };
                 continue;
             }
-            const packet = ReadPacket.decode(msg.data) catch |err| {
+            const packet = LiveConfigPacket.decode(msg.data) catch |err| {
                 if (print_stuff) std.log.debug("live config UDP decode: {s}", .{@errorName(err)});
                 continue;
             };
-            ReadPacket.validate(&packet) catch |err| {
+            LiveConfigPacket.validate(&packet) catch |err| {
                 std.log.warn("live config UDP rejected: {s}", .{@errorName(err)});
                 continue;
             };
-            ReadPacket.mergeInto(&working, packet);
+            LiveConfigPacket.applyToRuntimeConfig(&working, packet);
             if (print_stuff) std.log.debug("applied live config UDP on control port", .{});
             applied = true;
         }
         if (applied) {
-            self.syncConfigFields(working);
+            self.refreshLiveConfigPacket(working);
             merged_out.* = working;
         }
         return applied;
     }
 
-    pub fn pushToIoQueue(
+    /// Publish one runtime telemetry frame synchronously.
+    pub fn publishTelemetry(
         self: *Telemetry,
         io: Io,
-        output: WritePacket,
-        control_debug: ?ControlDebugSnapshot,
+        frame: TelemetryFrame,
     ) void {
-        var frame: TelemetryFrame = undefined;
-        frame.writeFromPacket(output);
-        processTelemetry(io, &self.publisher, self.log_file, .{
-            .frame = frame,
-            .control_debug = control_debug,
-        }, &self.encoded_buf);
+        processTelemetry(io, &self.publisher, self.log_file, frame, &self.encoded_buf);
     }
 };
-
-test "mission command round trips and normalizes point direction" {
-    var buf: [64]u8 = undefined;
-    const encoded = try encodeMissionCommand(&buf, .{
-        .kind = .point,
-        .maneuver = .move,
-        .position = .{ 1, 2, 3 },
-        .look_direction = .{ 0, 0, 5 },
-    });
-    const decoded = try MissionCommand.decode(encoded);
-
-    try std.testing.expectEqual(MissionCommandKind.point, decoded.kind);
-    try std.testing.expectEqual(MissionManeuver.move, decoded.maneuver);
-    try std.testing.expectEqual(@as(f32, 1), decoded.position[0]);
-    try std.testing.expectEqual(@as(f32, 2), decoded.position[1]);
-    try std.testing.expectEqual(@as(f32, 3), decoded.position[2]);
-    try std.testing.expectEqual(@as(f32, 1), decoded.look_direction[2]);
-}
-
-test "mission command rejects invalid point maneuvers and directions" {
-    var buf: [64]u8 = undefined;
-    const encoded = try encodeMissionCommand(&buf, .{
-        .kind = .point,
-        .maneuver = .move,
-        .position = .{ 1, 2, 3 },
-        .look_direction = .{ 0, 0, 1 },
-    });
-
-    buf[7] = @backingInt(MissionManeuver.pass);
-    try std.testing.expectError(error.InvalidPointManeuver, MissionCommand.decode(encoded));
-
-    buf[7] = @backingInt(MissionManeuver.move);
-    for (20..32) |i| buf[i] = 0;
-    try std.testing.expectError(error.InvalidLookDirection, MissionCommand.decode(encoded));
-}
-
-test "mission command accepts every object maneuver" {
-    var buf: [64]u8 = undefined;
-    for (std.enums.values(MissionManeuver)) |maneuver| {
-        const encoded = try encodeMissionCommand(&buf, .{
-            .kind = .object,
-            .maneuver = maneuver,
-            .object_class = 2,
-        });
-        const decoded = try MissionCommand.decode(encoded);
-        try std.testing.expectEqual(MissionCommandKind.object, decoded.kind);
-        try std.testing.expectEqual(maneuver, decoded.maneuver);
-        try std.testing.expectEqual(@as(u8, 2), decoded.object_class);
-    }
-}
