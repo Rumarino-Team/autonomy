@@ -22,8 +22,6 @@ seen_objects_len: u8,
 goal_dist_threshold: f32,
 thrustor_saturate: f32,
 
-log_counter: u32,
-log_freq_div: u16,
 print_stuff: bool,
 clear_print_stuff: bool,
 
@@ -62,24 +60,12 @@ pub fn init(self: *MissionContext, allocator: std.mem.Allocator, io: Io, args: M
 
     const config = MissionArgs.configForProfile(args.mission_profile);
     try config.validate();
-    if (config.print_stuff) {
-        const profile_name = std.enums.tagName(MissionConfig.MissionProfileId, args.mission_profile) orelse "?";
-        std.log.debug("mission profile: {s}", .{profile_name});
-        std.log.debug("{any}", .{config});
-    }
 
     var mission_diyn_loader = MissionIO.MissionDiynLoader.init(args.auv_dynlib_path);
     const auv = mission_diyn_loader.load() catch |err| {
-        const dl_err = MissionIO.loadError();
-        std.log.err("dlerror: `{s}`", .{dl_err});
-        std.log.err("failed to load auv: {s}", .{mission_diyn_loader.auv_path});
         return err;
     };
     auv.init();
-    if (config.print_stuff) {
-        std.log.debug("succesfully loaded auv: {s}", .{mission_diyn_loader.auv_path});
-        std.log.debug("{any}", .{auv});
-    }
 
     const telemetry = try MissionIO.Telemetry.init(allocator, io, config);
 
@@ -92,8 +78,6 @@ pub fn init(self: *MissionContext, allocator: std.mem.Allocator, io: Io, args: M
         .goal_dist_threshold = config.goal_dist_threshold,
         .thrustor_saturate = config.thrustor_saturate,
 
-        .log_counter = 0,
-        .log_freq_div = config.log_freq_div,
         .print_stuff = config.print_stuff,
         .clear_print_stuff = config.clear_print_stuff,
 
@@ -133,7 +117,6 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     ctx.auv.yieldUntilNextFrame(&ctx.frame);
     if (MissionIO.stopRequested()) return error.Stopped;
 
-    // std.log.debug("updating seen_objects...", .{});
     for (ctx.frame.objects[0..ctx.frame.objects_len]) |frame_object| {
         const maybe_seen_object = for (ctx.seen_objects[0..ctx.seen_objects_len]) |*seen_object| {
             if (frame_object.id == seen_object.id) {
@@ -169,7 +152,6 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         ctx.config = live_config;
         ctx.goal_dist_threshold = live_config.goal_dist_threshold;
         ctx.thrustor_saturate = live_config.thrustor_saturate;
-        ctx.log_freq_div = live_config.log_freq_div;
         ctx.print_stuff = live_config.print_stuff;
         ctx.clear_print_stuff = live_config.clear_print_stuff;
         ctx.telemetry.warnImmutableFields(live_config);
@@ -247,7 +229,6 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     }
     ctx.telemetry.publishTelemetry(ctx.io, telemetry_frame);
 
-    ctx.log_counter +%= 1;
 }
 
 pub fn resetOdometryPid(ctx: *MissionContext) void {
@@ -353,12 +334,7 @@ fn visualBodyError(ctx: *MissionContext) ?[6]f32 {
     for (&interaction_rows, ctx.config.ibvs.interaction) |*row, interaction_row| {
         row.* = interaction_row[0..ibvs_cols];
     }
-    const mapped = math.mapInteraction(interaction_rows[0..], &image_error) catch |err| {
-        std.log.err(
-            "interaction map failed ({s}): expected {d} rows, each with {d} columns",
-            .{ @errorName(err), math.interaction_output_len, image_error.len },
-        );
-        std.log.err("config interaction_cols = {}", .{ibvs.interaction_cols});
+    const mapped = math.mapInteraction(interaction_rows[0..], &image_error) catch {
         return null;
     };
     const current = bc.normalizedQuat(ctx.frame.camera_pose.quat) catch unreachable;
@@ -561,10 +537,6 @@ pub fn yieldFind(ctx: *MissionContext, cls: u8) !*const Auv.Object {
 const object_clearance: f32 = 2;
 const look_done: f32 = 0.1;
 
-fn shouldLogMissionState(ctx: *const MissionContext) bool {
-    return ctx.print_stuff and ctx.log_freq_div != 0 and ctx.log_counter % ctx.log_freq_div == 0;
-}
-
 fn reached(ctx: *const MissionContext, target: math.Vector3f) bool {
     const ok = ctx.frame.position_ok;
     if (!ok.x or !ok.y or !ok.z) return false;
@@ -667,20 +639,8 @@ pub fn yieldQueue(ctx: *MissionContext) !void {
         const goal = ctx.queue.front().?;
         ctx.target_position = goal.position;
         try ctx.setLookAtTarget(goal.look_at);
-        const distance = math.length3f(goal.position - ctx.frame.camera_pose.pos);
-        if (shouldLogMissionState(ctx)) {
-            std.log.debug(
-                "mission goal step={s} target={any} look_at={any} current={any} distance={d:.3} threshold={d:.3}",
-                .{ ctx.step, goal.position, goal.look_at, ctx.frame.camera_pose.pos, distance, ctx.goal_dist_threshold },
-            );
-        }
         try ctx.yieldUntilNextFrameAndUpdate();
         if (reached(ctx, goal.position)) {
-            if (shouldLogMissionState(ctx)) {
-                std.log.debug("mission goal reached distance={d:.3}", .{
-                    math.length3f(goal.position - ctx.frame.camera_pose.pos),
-                });
-            }
             _ = ctx.queue.popFront();
         }
     }

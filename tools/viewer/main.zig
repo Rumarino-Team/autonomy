@@ -261,8 +261,8 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     const compiled_config = MissionConfig.compiledProfile(MissionConfig.viewer_profile);
-    const telemetry_shm_name = compiled_config.telemetryShmName() catch unreachable;
-    const telemetry_addr = compiled_config.telemetryAddr() catch unreachable;
+    const telemetry_shm_name = compiled_config.telemetryShmName() catch "";
+    const telemetry_addr = compiled_config.telemetryAddr() catch "";
 
     var subscriber: ?MissionIO.TelemetrySubscriber = null;
     defer if (subscriber) |*value| value.deinit();
@@ -277,6 +277,7 @@ pub fn main(init: std.process.Init) !void {
                 return error.UdpOpenFailed;
             };
         },
+        .stdout => {},
     }
 
     const teleop_dest = blk: {
@@ -420,6 +421,7 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             },
+            .stdout => {},
         }
 
         if (pixels) |video_pixels| {
@@ -683,6 +685,13 @@ pub fn main(init: std.process.Init) !void {
                 20,
                 20,
                 if (source_ok) rl.Color.green else rl.Color.red,
+            ),
+            .stdout => rl.drawText(
+                "telemetry stdout (producer-only)",
+                x,
+                20,
+                20,
+                rl.Color.gray,
             ),
         }
 

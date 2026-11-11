@@ -481,7 +481,7 @@ pub const LiveConfigPacket = struct {
     telemetry_shm_name: MissionConfig.FixedText(MissionConfig.telemetry_shm_name_max),
     telemetry_log_path: MissionConfig.FixedText(MissionConfig.telemetry_log_path_max),
 
-    const wire_version_value: u16 = 2;
+    const wire_version_value: u16 = 3;
     const magic_value: [4]u8 = "MCF1".*;
 
     const DecodeError = error{
@@ -553,10 +553,16 @@ pub const LiveConfigPacket = struct {
         try validateIbvs(&packet.ibvs);
         try requireFinite(packet.goal_dist_threshold);
         try requireFinite(packet.thrustor_saturate);
-        _ = try packet.telemetry_addr.slice();
-        if (packet.telemetry_transport == .shared_memory) {
-            const shm_name = try packet.telemetry_shm_name.slice();
-            if (shm_name.len == 0) return error.InvalidTextLength;
+        switch (packet.telemetry_transport) {
+            .udp => {
+                const address = try packet.telemetry_addr.slice();
+                if (address.len == 0) return error.InvalidTextLength;
+            },
+            .shared_memory => {
+                const shm_name = try packet.telemetry_shm_name.slice();
+                if (shm_name.len == 0) return error.InvalidTextLength;
+            },
+            .stdout => {},
         }
         _ = try packet.telemetry_log_path.slice();
     }
@@ -911,22 +917,61 @@ pub const SharedMemoryPublisher = struct {
     }
 };
 
+pub const StdoutPublisher = struct {
+    file: Io.File,
+    clear_before_frame: bool,
+
+    fn init(io: Io) !StdoutPublisher {
+        const file = Io.File.stdout();
+        return .{
+            .file = file,
+            .clear_before_frame = try file.isTty(io),
+        };
+    }
+
+    fn publishEncoded(self: *StdoutPublisher, io: Io, bytes: []const u8) void {
+        if (self.clear_before_frame) {
+            self.file.writeStreamingAll(io, "\x1b[2J\x1b[H") catch |err| {
+                std.log.err("telemetry stdout clear failed: {s}", .{@errorName(err)});
+                return;
+            };
+        }
+        self.file.writeStreamingAll(io, bytes) catch |err| {
+            std.log.err("telemetry stdout write failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    fn deinit(self: *StdoutPublisher) void {
+        // stdout is owned by the process, not by the telemetry publisher.
+        self.* = undefined;
+    }
+};
+
 /// Runtime-owned transport selected from the compiled startup configuration.
 pub const TelemetryPublisher = union(TelemetryTransport) {
     udp: UdpPublisher,
     shared_memory: SharedMemoryPublisher,
+    stdout: StdoutPublisher,
 
     fn init(io: Io, config: MissionConfig.MissionConfig) !TelemetryPublisher {
         return switch (config.telemetry_transport) {
             .udp => .{ .udp = try .init(io, config) },
             .shared_memory => .{ .shared_memory = try .init(try config.telemetryShmName()) },
+            .stdout => .{ .stdout = try .init(io) },
         };
     }
 
-    fn publishEncoded(self: *TelemetryPublisher, io: Io, frame: TelemetryFrame, encoded: ?[]const u8) void {
+    fn publishEncoded(
+        self: *TelemetryPublisher,
+        io: Io,
+        frame: TelemetryFrame,
+        encoded: ?[]const u8,
+        ascii_encoded: ?[]const u8,
+    ) void {
         switch (self.*) {
             .udp => |*publisher| if (encoded) |bytes| publisher.publishEncoded(io, bytes),
             .shared_memory => |*publisher| publisher.publishFrame(frame),
+            .stdout => |*publisher| if (ascii_encoded) |bytes| publisher.publishEncoded(io, bytes),
         }
     }
 
@@ -934,6 +979,7 @@ pub const TelemetryPublisher = union(TelemetryTransport) {
         switch (self.*) {
             .udp => |*publisher| publisher.deinit(io),
             .shared_memory => |*publisher| publisher.deinit(),
+            .stdout => |*publisher| publisher.deinit(),
         }
         self.* = undefined;
     }
@@ -942,6 +988,158 @@ pub const TelemetryPublisher = union(TelemetryTransport) {
 pub fn encodeTelemetryFrame(buf: []u8, frame: TelemetryFrame) ![]const u8 {
     var writer: Io.Writer = .fixed(buf);
     try SerialBinary.write(&writer, frame);
+    return writer.buffered();
+}
+
+fn roundDisplayFloat(value: f32) f32 {
+    return @round(value * 100000.0) / 100000.0;
+}
+
+fn roundDisplayArray(comptime len: usize, value: [len]f32) [len]f32 {
+    var rounded: [len]f32 = undefined;
+    for (value, &rounded) |source, *dest| dest.* = roundDisplayFloat(source);
+    return rounded;
+}
+
+fn roundDisplayPose(value: TelemetryPose) TelemetryPose {
+    return .{
+        .pos = roundDisplayArray(3, value.pos),
+        .quat = roundDisplayArray(4, value.quat),
+    };
+}
+
+fn writeAsciiFloatList(writer: *Io.Writer, values: anytype) !void {
+    try writer.writeAll("[");
+    for (values, 0..) |value, i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{d:.5}", .{roundDisplayFloat(value)});
+    }
+    try writer.writeAll("]");
+}
+
+fn writeAsciiIntList(writer: *Io.Writer, values: anytype) !void {
+    try writer.writeAll("[");
+    for (values, 0..) |value, i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{}", .{value});
+    }
+    try writer.writeAll("]");
+}
+
+pub fn encodeTelemetryFrameAscii(buf: []u8, frame: TelemetryFrame) ![]const u8 {
+    var objects: [Auv.Frame.max_objects]struct {
+        pose: TelemetryPose,
+        size: [3]f32,
+        id: u32,
+        cls: u8,
+    } = undefined;
+    for (frame.objects[0..frame.objects_len], objects[0..frame.objects_len]) |source, *dest| {
+        dest.* = .{
+            .pose = roundDisplayPose(source.pose),
+            .size = roundDisplayArray(3, source.size),
+            .id = source.id,
+            .cls = source.cls,
+        };
+    }
+
+    var writer: Io.Writer = .fixed(buf);
+    try writer.writeAll("FRAME_BEGIN\n");
+    try writer.print("magic={s}\nabi_version={}\ntimestamp={}\n", .{
+        frame.magic[0..],
+        frame.abi_version,
+        frame.timestamp,
+    });
+    try writer.writeAll("camera_pose.pos=");
+    try writeAsciiFloatList(&writer, frame.camera_pose.pos);
+    try writer.writeAll("\ncamera_pose.quat=");
+    try writeAsciiFloatList(&writer, frame.camera_pose.quat);
+    try writer.print("\nposition_ok={},{},{}\nattitude_ok={},{},{}\n", .{
+        frame.position_ok.x,
+        frame.position_ok.y,
+        frame.position_ok.z,
+        frame.attitude_ok.x,
+        frame.attitude_ok.y,
+        frame.attitude_ok.z,
+    });
+    try writer.print("depth_ok={}\ndepth={d:.5}\n", .{
+        frame.depth_ok,
+        roundDisplayFloat(frame.depth),
+    });
+    try writer.print("objects_len={}\n", .{frame.objects_len});
+    for (objects[0..frame.objects_len], 0..) |object, i| {
+        try writer.print("object[{}].pose.pos=", .{i});
+        try writeAsciiFloatList(&writer, object.pose.pos);
+        try writer.print("\nobject[{}].pose.quat=", .{i});
+        try writeAsciiFloatList(&writer, object.pose.quat);
+        try writer.print("\nobject[{}].size=", .{i});
+        try writeAsciiFloatList(&writer, object.size);
+        try writer.print("\nobject[{}].id={}\nobject[{}].cls={}\n", .{
+            i,
+            object.id,
+            i,
+            object.cls,
+        });
+    }
+    try writer.print("boxes_len={}\n", .{frame.boxes_len});
+    for (frame.boxes[0..frame.boxes_len], 0..) |box, i| {
+        try writer.print("box[{}].top_left=[{},{}]\nbox[{}].bottom_right=[{},{}]\nbox[{}].id={}\nbox[{}].cls={}\n", .{
+            i,
+            box.top_left.x,
+            box.top_left.y,
+            i,
+            box.bottom_right.x,
+            box.bottom_right.y,
+            i,
+            box.id,
+            i,
+            box.cls,
+        });
+    }
+    try writer.print("thrusters_len={}\nthrusters=", .{frame.thrusters_len});
+    try writeAsciiFloatList(&writer, frame.thrusters[0..frame.thrusters_len]);
+    try writer.print("\nstep_len={}\nstep_bytes=", .{frame.step_len});
+    try writeAsciiIntList(&writer, frame.step[0..frame.step_len]);
+    try writer.writeAll("\nforce_error=");
+    try writeAsciiFloatList(&writer, frame.force_error);
+    try writer.print("\ngoals_len={}\n", .{frame.goals_len});
+    for (frame.goals[0..frame.goals_len], 0..) |goal, i| {
+        try writer.print("goal[{}].position=", .{i});
+        try writeAsciiFloatList(&writer, goal.position);
+        try writer.print("\ngoal[{}].look_at=", .{i});
+        try writeAsciiFloatList(&writer, goal.look_at);
+        try writer.writeAll("\n");
+    }
+    try writer.print(
+        "clear_screen={}\ncycle_us={}\nhas_dt={}\ndt={d:.5}\n",
+        .{ frame.clear_screen, frame.cycle_us, frame.has_dt, roundDisplayFloat(frame.dt) },
+    );
+    try writer.writeAll("kp=");
+    try writeAsciiFloatList(&writer, frame.kp);
+    try writer.writeAll("\nki=");
+    try writeAsciiFloatList(&writer, frame.ki);
+    try writer.writeAll("\nkd=");
+    try writeAsciiFloatList(&writer, frame.kd);
+    try writer.print("\ntam_len={}\n", .{frame.tam_len});
+    for (frame.tam[0..frame.tam_len], 0..) |row, i| {
+        try writer.print("tam[{}]=", .{i});
+        try writeAsciiFloatList(&writer, row);
+        try writer.writeAll("\n");
+    }
+    try writer.writeAll("control_pose=");
+    try writeAsciiFloatList(&writer, frame.control_pose);
+    try writer.writeAll("\ntranslation_error=");
+    try writeAsciiFloatList(&writer, frame.translation_error);
+    try writer.writeAll("\ntarget_orientation=");
+    try writeAsciiFloatList(&writer, frame.target_orientation);
+    try writer.writeAll("\ntarget_quaternion=");
+    try writeAsciiFloatList(&writer, frame.target_quaternion);
+    try writer.writeAll("\nattitude_error=");
+    try writeAsciiFloatList(&writer, frame.attitude_error);
+    try writer.writeAll("\nrotation_limit=");
+    try writeAsciiFloatList(&writer, frame.rotation_limit);
+    try writer.writeAll("\ninput=");
+    try writeAsciiFloatList(&writer, frame.input);
+    try writer.writeAll("\nFRAME_END\n");
     return writer.buffered();
 }
 
@@ -959,6 +1157,8 @@ fn processTelemetry(
     log_file: ?Io.File,
     frame: TelemetryFrame,
     encoded_buf: *[outbound_buf_len]u8,
+    ascii_buf: *[outbound_buf_len]u8,
+    stdout_enabled: bool,
 ) void {
     const encoded: ?[]const u8 = if (publisher.* == .udp or log_file != null)
         encodeTelemetryFrame(encoded_buf, frame) catch |err| blk: {
@@ -967,8 +1167,15 @@ fn processTelemetry(
         }
     else
         null;
+    const ascii_encoded: ?[]const u8 = if (publisher.* == .stdout and stdout_enabled)
+        encodeTelemetryFrameAscii(ascii_buf, frame) catch |err| blk: {
+            std.log.err("telemetry ASCII encode failed: {s}", .{@errorName(err)});
+            break :blk null;
+        }
+    else
+        null;
 
-    publisher.publishEncoded(io, frame, encoded);
+    publisher.publishEncoded(io, frame, encoded, ascii_encoded);
     if (log_file) |file| {
         if (encoded) |bytes| file.writeStreamingAll(io, bytes) catch |err| {
             std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
@@ -1068,6 +1275,9 @@ pub const Telemetry = struct {
     publisher: TelemetryPublisher,
     log_file: ?Io.File,
     encoded_buf: [outbound_buf_len]u8 = undefined,
+    ascii_buf: [outbound_buf_len]u8 = undefined,
+    stdout_log_counter: u64 = 0,
+    stdout_log_freq_div: u16,
     control_socket: Io.net.Socket = undefined,
     teleop_command: ?TeleopCommand = null,
     mission_command: ?MissionCommand = null,
@@ -1103,6 +1313,7 @@ pub const Telemetry = struct {
         var telemetry: Telemetry = .{
             .publisher = publisher,
             .log_file = log_file,
+            .stdout_log_freq_div = config.log_freq_div,
             .control_socket = control_socket,
             .initial_config_packet = LiveConfigPacket.fromRuntimeConfig(&config),
         };
@@ -1118,24 +1329,29 @@ pub const Telemetry = struct {
     }
 
     pub fn warnImmutableFields(self: *const Telemetry, config: MissionConfig.MissionConfig) void {
-        const init_telemetry = self.initial_config_packet.telemetry_addr.slice() catch "";
-        const new_telemetry = config.telemetryAddr() catch {
-            std.log.err("live config has invalid telemetry_addr", .{});
-            return;
-        };
-        if (!std.mem.eql(u8, new_telemetry, init_telemetry)) {
-            std.log.warn("config telemetry_addr changed; restart required", .{});
+        const initial_transport = self.initial_config_packet.telemetry_transport;
+        if (initial_transport == .udp or config.telemetry_transport == .udp) {
+            const init_telemetry = self.initial_config_packet.telemetry_addr.slice() catch "";
+            const new_telemetry = config.telemetryAddr() catch {
+                std.log.err("live config has invalid telemetry_addr", .{});
+                return;
+            };
+            if (!std.mem.eql(u8, new_telemetry, init_telemetry)) {
+                std.log.warn("config telemetry_addr changed; restart required", .{});
+            }
         }
         if (config.telemetry_transport != self.initial_config_packet.telemetry_transport) {
             std.log.warn("config telemetry_transport changed; restart required", .{});
         }
-        const init_shm_name = self.initial_config_packet.telemetry_shm_name.slice() catch "";
-        const new_shm_name = config.telemetryShmName() catch {
-            std.log.err("live config has invalid telemetry_shm_name", .{});
-            return;
-        };
-        if (!std.mem.eql(u8, new_shm_name, init_shm_name)) {
-            std.log.warn("config telemetry_shm_name changed; restart required", .{});
+        if (initial_transport == .shared_memory or config.telemetry_transport == .shared_memory) {
+            const init_shm_name = self.initial_config_packet.telemetry_shm_name.slice() catch "";
+            const new_shm_name = config.telemetryShmName() catch {
+                std.log.err("live config has invalid telemetry_shm_name", .{});
+                return;
+            };
+            if (!std.mem.eql(u8, new_shm_name, init_shm_name)) {
+                std.log.warn("config telemetry_shm_name changed; restart required", .{});
+            }
         }
         const init_log_path = self.initial_config_packet.telemetry_log_path.slice() catch "";
         const new_log_path = config.telemetryLogPath() catch {
@@ -1216,6 +1432,7 @@ pub const Telemetry = struct {
         }
         if (applied) {
             self.refreshLiveConfigPacket(working);
+            self.stdout_log_freq_div = working.log_freq_div;
             merged_out.* = working;
         }
         return applied;
@@ -1227,6 +1444,17 @@ pub const Telemetry = struct {
         io: Io,
         frame: TelemetryFrame,
     ) void {
-        processTelemetry(io, &self.publisher, self.log_file, frame, &self.encoded_buf);
+        self.stdout_log_counter +%= 1;
+        const stdout_enabled = self.stdout_log_freq_div != 0 and
+            self.stdout_log_counter % self.stdout_log_freq_div == 0;
+        processTelemetry(
+            io,
+            &self.publisher,
+            self.log_file,
+            frame,
+            &self.encoded_buf,
+            &self.ascii_buf,
+            stdout_enabled,
+        );
     }
 };

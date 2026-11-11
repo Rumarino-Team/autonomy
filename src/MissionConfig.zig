@@ -16,6 +16,7 @@ pub const queue_capacity_max = 64;
 pub const TelemetryTransport = enum(u8) {
     udp,
     shared_memory,
+    stdout,
 };
 
 pub fn FixedText(comptime capacity: usize) type {
@@ -124,8 +125,11 @@ pub const MissionConfig = struct {
         if (self.tam_len == 0 or self.tam_len > thruster_count) return error.InvalidTamLen;
         if (self.queue_capacity == 0 or self.queue_capacity > queue_capacity_max) return error.InvalidQueueCapacity;
         if (self.ibvs.interaction_cols == 0 or self.ibvs.interaction_cols > max_ibvs_error_cols) return error.InvalidInteractionCols;
-        _ = try self.telemetryAddr();
-        if (self.telemetry_transport == .shared_memory) _ = try self.telemetryShmName();
+        switch (self.telemetry_transport) {
+            .udp => _ = try self.telemetryAddr(),
+            .shared_memory => _ = try self.telemetryShmName(),
+            .stdout => {},
+        }
         _ = try self.telemetryLogPath();
     }
 };
