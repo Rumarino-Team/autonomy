@@ -9,9 +9,7 @@ extern fn video_open(source: [*:0]const u8, width: *c_int, height: *c_int) callc
 extern fn video_frame(out: [*]u8) callconv(.c) bool;
 extern fn video_close() callconv(.c) void;
 
-const default_shm_name = "autonomy_telemetry";
 const default_stream_source = "127.0.0.1:5610";
-const default_teleop_port = 8080;
 const teleop_step: f32 = 0.05;
 const teleop_period: f64 = 0.05;
 const mission_target_step: f32 = 0.25;
@@ -37,16 +35,8 @@ const PidSliderLayout = struct {
     col_step: f32,
 };
 
-const TelemetrySource = union(enum) {
-    shared_memory: [:0]const u8,
-    udp: u16,
-};
-
 const Config = struct {
-    source: TelemetrySource = .{ .shared_memory = default_shm_name },
     video_source: [:0]const u8 = default_stream_source,
-    teleop_port: u16 = default_teleop_port,
-    profile: MissionConfig.MissionProfileId = .stonefish_sim,
     mission_control: bool = false,
 };
 
@@ -55,31 +45,15 @@ fn parseArgs(args: []const [:0]const u8) !Config {
     var i: usize = 1;
     while (i < args.len) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--shm")) {
-            i += 1;
-            if (i >= args.len) return error.MissingSharedMemoryName;
-            config.source = .{ .shared_memory = args[i] };
-        } else if (std.mem.eql(u8, arg, "--udp")) {
-            i += 1;
-            if (i >= args.len) return error.MissingUdpPort;
-            config.source = .{ .udp = try std.fmt.parseInt(u16, args[i], 10) };
-        } else if (std.mem.eql(u8, arg, "--video")) {
+        if (std.mem.eql(u8, arg, "--video")) {
             i += 1;
             if (i >= args.len) return error.MissingVideoSource;
             config.video_source = args[i];
-        } else if (std.mem.eql(u8, arg, "--teleop-port")) {
-            i += 1;
-            if (i >= args.len) return error.MissingTeleopPort;
-            config.teleop_port = try std.fmt.parseInt(u16, args[i], 10);
-        } else if (std.mem.eql(u8, arg, "--profile")) {
-            i += 1;
-            if (i >= args.len) return error.MissingProfile;
-            config.profile = MissionConfig.MissionProfileId.fromName(args[i]) orelse return error.InvalidProfile;
         } else if (std.mem.eql(u8, arg, "--mission-control")) {
             config.mission_control = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             std.debug.print(
-                "usage: viewer [--shm name | --udp port] [--video source|none] [--teleop-port port] [--profile name] [--mission-control]\n",
+                "usage: viewer [--video source|none] [--mission-control]\n",
                 .{},
             );
             return error.HelpRequested;
@@ -96,13 +70,6 @@ fn videoDisabled(source: []const u8) bool {
     return std.mem.eql(u8, source, "none") or
         std.mem.eql(u8, source, "off") or
         std.mem.eql(u8, source, "-");
-}
-
-fn profileConfig(profile: MissionConfig.MissionProfileId) *const MissionConfig.MissionConfig {
-    return switch (profile) {
-        .stonefish_sim => &MissionConfig.mission_profiles.stonefish_sim,
-        .proteus_hwd => &MissionConfig.mission_profiles.proteus_hwd,
-    };
 }
 
 fn tuningValue(packet: *MissionIO.ReadPacket, index: usize) *f32 {
@@ -293,17 +260,20 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("viewer argument error: {s}\n", .{@errorName(err)});
         return err;
     };
+    const compiled_config = &MissionConfig.mission_profiles.stonefish_sim;
+    const telemetry_shm_name = compiled_config.telemetryShmName() catch unreachable;
+    const telemetry_addr = compiled_config.telemetryAddr() catch unreachable;
 
     var subscriber: ?MissionIO.TelemetrySubscriber = null;
     defer if (subscriber) |*value| value.deinit();
     var udp_socket: ?Io.net.Socket = null;
     defer if (udp_socket) |*socket| socket.close(init.io);
-    switch (config.source) {
+    switch (compiled_config.telemetry_transport) {
         .shared_memory => {},
-        .udp => |port| {
-            const bind_addr: Io.net.IpAddress = .{ .ip4 = .unspecified(port) };
+        .udp => {
+            const bind_addr = try Io.net.IpAddress.parseLiteral(telemetry_addr);
             udp_socket = bind_addr.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch {
-                std.debug.print("can't listen on udp port {d}\n", .{port});
+                std.debug.print("can't listen on telemetry address {s}\n", .{telemetry_addr});
                 return error.UdpOpenFailed;
             };
         },
@@ -311,19 +281,19 @@ pub fn main(init: std.process.Init) !void {
 
     const teleop_dest = blk: {
         var address_buf: [48]u8 = undefined;
-        const text = try std.fmt.bufPrint(&address_buf, "127.0.0.1:{d}", .{config.teleop_port});
+        const text = try std.fmt.bufPrint(&address_buf, "127.0.0.1:{d}", .{compiled_config.teleop_port});
         break :blk try Io.net.IpAddress.parseLiteral(text);
     };
-    var config_packet = MissionIO.ReadPacket.fromConfig(profileConfig(config.profile));
+    var config_packet = MissionIO.ReadPacket.fromConfig(compiled_config);
     const teleop_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
     var teleop_socket: ?Io.net.Socket = teleop_bind.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch null;
     defer if (teleop_socket) |*socket| socket.close(init.io);
     if (teleop_socket == null)
-        std.debug.print("can't send control commands to 127.0.0.1:{d}\n", .{config.teleop_port})
+        std.debug.print("can't send control commands to 127.0.0.1:{d}\n", .{compiled_config.teleop_port})
     else if (config.mission_control)
-        std.debug.print("mission commands -> 127.0.0.1:{d}\n", .{config.teleop_port})
+        std.debug.print("mission commands -> 127.0.0.1:{d}\n", .{compiled_config.teleop_port})
     else
-        std.debug.print("teleop command -> 127.0.0.1:{d}\n", .{config.teleop_port});
+        std.debug.print("teleop command -> 127.0.0.1:{d}\n", .{compiled_config.teleop_port});
 
     const read_video = !videoDisabled(config.video_source);
     rl.setConfigFlags(.{ .window_resizable = true });
@@ -409,12 +379,12 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        switch (config.source) {
-            .shared_memory => |name| {
+        switch (compiled_config.telemetry_transport) {
+            .shared_memory => {
                 if (subscriber == null and now - last_source_try > 2) {
                     last_source_try = now;
-                    subscriber = MissionIO.TelemetrySubscriber.open(name) catch |err| blk: {
-                        std.debug.print("waiting for shared telemetry '{s}': {s}\n", .{ name, @errorName(err) });
+                    subscriber = MissionIO.TelemetrySubscriber.open(telemetry_shm_name) catch |err| blk: {
+                        std.debug.print("waiting for shared telemetry '{s}': {s}\n", .{ telemetry_shm_name, @errorName(err) });
                         break :blk null;
                     };
                 }
@@ -697,19 +667,18 @@ pub fn main(init: std.process.Init) !void {
 
         const x: i32 = 920;
         const source_ok = last_packet >= 0 and now - last_packet <= 1;
-        switch (config.source) {
-            .shared_memory => |name| {
-                const name_z = name;
+        switch (compiled_config.telemetry_transport) {
+            .shared_memory => {
                 rl.drawText(
-                    rl.textFormat(if (source_ok) "shm %s" else "no telemetry on shm %s", .{name_z.ptr}),
+                    rl.textFormat(if (source_ok) "shm %s" else "no telemetry on shm %s", .{telemetry_shm_name.ptr}),
                     x,
                     20,
                     20,
                     if (source_ok) rl.Color.green else rl.Color.red,
                 );
             },
-            .udp => |port| rl.drawText(
-                rl.textFormat(if (source_ok) "udp %d" else "no telemetry on udp %d", .{port}),
+            .udp => rl.drawText(
+                rl.textFormat(if (source_ok) "udp %s" else "no telemetry on udp %s", .{telemetry_addr.ptr}),
                 x,
                 20,
                 20,
@@ -773,7 +742,7 @@ pub fn main(init: std.process.Init) !void {
                 .circle => "circle",
             };
             rl.drawText(
-                rl.textFormat("mission %s/%s  port %d", .{ kind_name.ptr, maneuver_name.ptr, config.teleop_port }),
+                rl.textFormat("mission %s/%s  port %d", .{ kind_name.ptr, maneuver_name.ptr, compiled_config.teleop_port }),
                 x,
                 270,
                 18,

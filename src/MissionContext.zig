@@ -125,17 +125,6 @@ pub fn init(self: *MissionContext, allocator: std.mem.Allocator, io: Io, args: M
     self.queue = .initBuffer(&self.goal_queue_buf);
 }
 
-fn applyLiveConfigScalars(ctx: *MissionContext, config: MissionConfig.MissionConfig) void {
-    ctx.config = config;
-    ctx.goal_dist_threshold = config.goal_dist_threshold;
-    ctx.thrustor_saturate = config.thrustor_saturate;
-    ctx.log_freq_div = config.log_freq_div;
-    ctx.print_stuff = config.print_stuff;
-    ctx.clear_print_stuff = config.clear_print_stuff;
-    ctx.telemetry.warnInitOnlyFields(config);
-    ctx.resetOdometryPid();
-}
-
 pub fn reset(ctx: *MissionContext) void {
     ctx.seen_objects_len = 0;
     ctx.clearQueue();
@@ -187,7 +176,14 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
 
     var live_config: MissionConfig.MissionConfig = ctx.config;
     if (ctx.telemetry.pollLiveConfig(ctx.io, ctx.config, ctx.print_stuff, &live_config)) {
-        applyLiveConfigScalars(ctx, live_config);
+        ctx.config = live_config;
+        ctx.goal_dist_threshold = live_config.goal_dist_threshold;
+        ctx.thrustor_saturate = live_config.thrustor_saturate;
+        ctx.log_freq_div = live_config.log_freq_div;
+        ctx.print_stuff = live_config.print_stuff;
+        ctx.clear_print_stuff = live_config.clear_print_stuff;
+        ctx.telemetry.warnInitOnlyFields(live_config);
+        ctx.resetOdometryPid();
     }
 
     var thruster_buffer: [MissionConfig.thruster_count]f32 = @splat(0);
