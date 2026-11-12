@@ -749,12 +749,12 @@ const RingMemory = extern struct {
     slots: [telemetry_ring_slot_count]RingSlot,
 };
 
-fn publishTelemetryFrame(ring: *RingMemory, frame: TelemetryFrame) void {
+fn publishTelemetryFrame(ring: *RingMemory, frame: *const TelemetryFrame) void {
     const previous = @atomicLoad(u64, &ring.header.published_seq, .monotonic);
     const seq = previous +% 1;
     const slot = &ring.slots[seq % telemetry_ring_slot_count];
     @atomicStore(u64, &slot.seq, seq *% 2 -% 1, .release);
-    slot.frame = frame;
+    slot.frame = frame.*;
     @atomicStore(u64, &slot.seq, seq *% 2, .release);
     @atomicStore(u64, &ring.header.published_seq, seq, .release);
 }
@@ -906,10 +906,6 @@ pub const SharedMemoryPublisher = struct {
         return .{ .shared = shared, .ring = ring };
     }
 
-    fn publishFrame(self: *SharedMemoryPublisher, frame: TelemetryFrame) void {
-        publishTelemetryFrame(self.ring, frame);
-    }
-
     fn deinit(self: *SharedMemoryPublisher) void {
         self.shared.unlink();
         self.shared.deinit();
@@ -970,7 +966,7 @@ pub const TelemetryPublisher = union(TelemetryTransport) {
     ) void {
         switch (self.*) {
             .udp => |*publisher| if (encoded) |bytes| publisher.publishEncoded(io, bytes),
-            .shared_memory => |*publisher| publisher.publishFrame(frame),
+            .shared_memory => |*publisher| publishTelemetryFrame(publisher.ring, &frame),
             .stdout => |*publisher| if (ascii_encoded) |bytes| publisher.publishEncoded(io, bytes),
         }
     }
@@ -1442,8 +1438,17 @@ pub const Telemetry = struct {
     pub fn publishTelemetry(
         self: *Telemetry,
         io: Io,
-        frame: TelemetryFrame,
+        frame: *const TelemetryFrame,
     ) void {
+        if (self.log_file == null) {
+            switch (self.publisher) {
+                .shared_memory => |*publisher| {
+                    publishTelemetryFrame(publisher.ring, frame);
+                    return;
+                },
+                else => {},
+            }
+        }
         self.stdout_log_counter +%= 1;
         const stdout_enabled = self.stdout_log_freq_div != 0 and
             self.stdout_log_counter % self.stdout_log_freq_div == 0;
@@ -1451,7 +1456,7 @@ pub const Telemetry = struct {
             io,
             &self.publisher,
             self.log_file,
-            frame,
+            frame.*,
             &self.encoded_buf,
             &self.ascii_buf,
             stdout_enabled,

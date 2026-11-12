@@ -42,6 +42,7 @@ force_error: math.Vector3f = .{ 0, 0, 0 },
 pid_prev_timestamp_ns: ?u64,
 
 step: []const u8,
+telemetry_frame: MissionIO.TelemetryFrame = std.mem.zeroes(MissionIO.TelemetryFrame),
 telemetry: MissionIO.Telemetry = undefined,
 
 seen_objects2d: [Auv.Frame.max_objects]Auv.Object2d = undefined,
@@ -158,7 +159,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         ctx.resetOdometryPid();
     }
 
-    var telemetry_frame = std.mem.zeroes(MissionIO.TelemetryFrame);
+    var telemetry_frame = &ctx.telemetry_frame;
     telemetry_frame.magic = "AUV1".*;
     telemetry_frame.abi_version = MissionIO.telemetry_frame_abi_version;
     telemetry_frame.timestamp = ctx.frame.timestamp;
@@ -185,7 +186,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
     @memcpy(telemetry_frame.step[0..step_len], ctx.step[0..step_len]);
 
     var thruster_buffer: [MissionConfig.thruster_count]f32 = @splat(0);
-    const thruster_values = ctx.controlStep(&thruster_buffer, &telemetry_frame);
+    const thruster_values = ctx.controlStep(&thruster_buffer, telemetry_frame);
     ctx.auv.setThrustorValues(thruster_values.ptr, @intCast(thruster_values.len));
 
     const nobj = @min(@as(usize, ctx.seen_objects_len), ctx.seen_objects.len);
