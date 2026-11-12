@@ -1,19 +1,20 @@
 zig-out/
 .zig-cache/
-<<<<<<< Updated upstream
 .cache/
 build
 tmp/
-=======
 demo
 frames
 build
 build-rtx
 auvs/stonefish_sim
 tmp
-tools
+tools/viewer/build/
+zig-pkg/
 
 
-
+/auvs/simulator
 .cache
->>>>>>> Stashed changes
+.zig-cache/
+.zig-cache-test
+

@@ -5,12 +5,12 @@ pub const Vector3f = @Vector(3, f32);
 pub const Vector6f = @Vector(6, f32);
 pub const Quaternionf = @Vector(4, f32);
 
-pub const Pose = extern struct {
+pub const Pose = struct {
     pos: Vector3f,
     quat: Quaternionf,
 };
 
-pub const BoundingBox = extern struct {
+pub const BoundingBox = struct {
     pose: Pose,
     size: Vector3f,
 };
@@ -248,6 +248,7 @@ pub fn tamMul(tam: []const Vector6f, v: Vector6f, out: []f32) []f32 {
     return result;
 }
 
+/// Max thrusters in TAM buffers; must match `MissionConfig.thruster_count`.
 pub const max_thrusters = 8;
 /// Linear map from 6-DOF command to per-thruster values: t_i = dot(tam[i], input).
 /// Clamps to ±`thrustor_saturate`, then divides by 5 (backend scale in MissionContext).
