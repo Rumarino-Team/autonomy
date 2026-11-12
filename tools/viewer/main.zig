@@ -1,15 +1,18 @@
 const std = @import("std");
 const rl = @import("raylib");
+const ui = @import("ui.zig");
 const MissionIO = @import("MissionIO");
 const MissionConfig = MissionIO.CompiledConfig;
 const math = MissionIO.Math;
 const Io = std.Io;
 
+extern fn video_default_source() callconv(.c) [*:0]const u8;
 extern fn video_open(source: [*:0]const u8, width: *c_int, height: *c_int) callconv(.c) bool;
-extern fn video_frame(out: [*]u8) callconv(.c) bool;
+extern fn video_get_size(width: *c_int, height: *c_int) callconv(.c) bool;
+extern fn video_frame(out: [*]u8, capacity: usize, width: c_int, height: c_int) callconv(.c) bool;
+extern fn video_has_error() callconv(.c) bool;
 extern fn video_close() callconv(.c) void;
 
-const default_stream_source = "127.0.0.1:5610";
 const teleop_step: f32 = 0.05;
 const teleop_period: f64 = 0.05;
 const mission_target_step: f32 = 0.25;
@@ -22,26 +25,15 @@ const tune_names = [_][:0]const u8{
     "ki_x", "ki_y", "ki_z", "ki_roll", "ki_pitch", "ki_yaw",
     "kd_x", "kd_y", "kd_z", "kd_roll", "kd_pitch", "kd_yaw",
 };
-const pid_group_names = [_][:0]const u8{ "kp", "ki", "kd" };
-const pid_axis_names = [_][:0]const u8{ "x", "y", "z", "roll", "pitch", "yaw" };
 const pid_slider_max = [_]f32{ 10, 2, 10 };
 
-const PidSliderLayout = struct {
-    x: f32,
-    width: f32,
-    height: f32,
-    row_y: f32,
-    row_step: f32,
-    col_step: f32,
-};
-
 const Config = struct {
-    video_source: [:0]const u8 = default_stream_source,
+    video_source: [:0]const u8,
     mission_control: bool = false,
 };
 
 fn parseArgs(args: []const [:0]const u8) !Config {
-    var config = Config{};
+    var config = Config{ .video_source = std.mem.span(video_default_source()) };
     var i: usize = 1;
     while (i < args.len) {
         const arg = args[i];
@@ -83,33 +75,9 @@ fn tuningValue(packet: *MissionIO.LiveConfigPacket, index: usize) *f32 {
     };
 }
 
-fn pidSliderLayout() PidSliderLayout {
-    const width_scale = @max(1.0, @as(f32, @floatFromInt(rl.getScreenWidth())) / 1280.0);
-    const height_scale = @max(1.0, @as(f32, @floatFromInt(rl.getScreenHeight())) / 1000.0);
-    return .{
-        .x = 955,
-        .width = 45 * width_scale,
-        .height = 18 * height_scale,
-        .row_y = 740,
-        .row_step = 90 * height_scale,
-        .col_step = 51 * width_scale,
-    };
-}
-
-fn pidSliderRect(index: usize, layout: PidSliderLayout) rl.Rectangle {
-    const group = index / 6;
-    const axis = index % 6;
-    return .{
-        .x = layout.x + @as(f32, @floatFromInt(axis)) * layout.col_step,
-        .y = layout.row_y + @as(f32, @floatFromInt(group)) * layout.row_step,
-        .width = layout.width,
-        .height = layout.height,
-    };
-}
-
-fn pidSliderValue(index: usize, mouse_x: f32, layout: PidSliderLayout) f32 {
-    const rect = pidSliderRect(index, layout);
-    const ratio = @min(1.0, @max(0.0, (mouse_x - rect.x) / rect.width));
+fn pidSliderValue(index: usize, mouse_x: f32, layout: ui.Layout) f32 {
+    const rect = layout.pidRect(index);
+    const ratio = std.math.clamp((mouse_x - rect.x) / rect.width, 0, 1);
     return ratio * pid_slider_max[index / 6];
 }
 
@@ -246,11 +214,12 @@ fn drawFollowingGrid(sub: rl.Vector3) void {
     }
 }
 
-fn stepText(frame: *const MissionIO.TelemetryFrame, buffer: *[MissionIO.telemetry_step_max + 1]u8) [:0]const u8 {
-    const length = @min(@as(usize, frame.step_len), frame.step.len);
-    @memcpy(buffer[0..length], frame.step[0..length]);
-    buffer[length] = 0;
-    return buffer[0..length :0];
+fn validFrame(frame: *const MissionIO.TelemetryFrame) bool {
+    return std.mem.eql(u8, &frame.magic, "AUV1") and
+        frame.abi_version == MissionIO.telemetry_frame_abi_version and
+        frame.objects_len <= frame.objects.len and frame.boxes_len <= frame.boxes.len and
+        frame.thrusters_len <= frame.thrusters.len and frame.step_len <= frame.step.len and
+        frame.goals_len <= frame.goals.len and frame.tam_len <= frame.tam.len;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -303,16 +272,16 @@ pub fn main(init: std.process.Init) !void {
     rl.setWindowMinSize(1000, 700);
     rl.setTargetFPS(60);
 
-    const scene_w: i32 = 900;
-    const scene_h: i32 = if (read_video) 470 else 990;
-    const scene = try rl.loadRenderTexture(scene_w, scene_h);
+    const embedded_font = @embedFile("assets/IBMPlexSans-Regular.ttf");
+    const loaded_font: ?rl.Font = rl.loadFontFromMemory(".ttf", embedded_font, 32, null) catch null;
+    const font = if (loaded_font) |value| value else try rl.getFontDefault();
+    if (loaded_font != null) rl.setTextureFilter(font.texture, .bilinear);
+    defer if (loaded_font) |value| rl.unloadFont(value);
+
+    var scene_w: i32 = 900;
+    var scene_h: i32 = 470;
+    var scene = try rl.loadRenderTexture(scene_w, scene_h);
     defer rl.unloadRenderTexture(scene);
-    const view3d = rl.Rectangle{
-        .x = 0,
-        .y = if (read_video) 520 else 0,
-        .width = @floatFromInt(scene_w),
-        .height = @floatFromInt(scene_h),
-    };
 
     var orbit_yaw: f32 = 0.8;
     var orbit_pitch: f32 = 0.55;
@@ -337,7 +306,9 @@ pub fn main(init: std.process.Init) !void {
     var last_packet: f64 = -1;
     var last_frame: f64 = -1;
     var last_video_try: f64 = -10;
+    var video_started = false;
     var last_source_try: f64 = -10;
+    var source_opened_at: f64 = -1;
     var last_teleop: f64 = -1;
     var mission_target_initialized = false;
     var mission_kind: MissionIO.MissionCommandKind = .point;
@@ -348,56 +319,111 @@ pub fn main(init: std.process.Init) !void {
     var mission_look_pitch: f32 = 0;
     var mission_object_class: u8 = 0;
     var mission_control = config.mission_control;
-    var show_command_legend = false;
+    var workspace: ui.Workspace = if (config.mission_control) .mission else .operation;
+    var font_percent: u8 = 100;
+    var mission_sent = false;
+    var tune_sent = false;
+    var object_scroll: usize = 0;
+    var goal_scroll: usize = 0;
     var tune_selection: usize = 0;
     var last_tune_adjust: f64 = -1;
     var tune_error_logged = false;
     var mission_error_logged = false;
     var teleop_error_logged = false;
     var pid_drag: ?usize = null;
+    defer if (!mission_control) {
+        if (teleop_socket) |*socket| {
+            const neutral = encodeGoal(.{ 0, 0, 0, orientation[0], orientation[1], orientation[2], orientation[3] });
+            socket.send(init.io, &teleop_dest, &neutral) catch {};
+        }
+    };
 
     while (!rl.windowShouldClose()) {
         telemetry = &udp_telemetry;
-        var shared_view: ?MissionIO.LatestFrame = null;
         const now = rl.getTime();
-        const pid_layout = pidSliderLayout();
-        if (read_video and video_w == 0 and now - last_video_try > 2) {
+        const layout = ui.Layout.init(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()), read_video);
+        if (rl.isKeyPressed(.equal) or rl.isKeyPressed(.kp_add)) font_percent = ui.adjustFontPercent(font_percent, 5);
+        if (rl.isKeyPressed(.minus) or rl.isKeyPressed(.kp_subtract)) font_percent = ui.adjustFontPercent(font_percent, -5);
+        if (rl.isKeyPressed(.zero)) font_percent = 100;
+        if (rl.isKeyPressed(.one)) workspace = .operation;
+        if (rl.isKeyPressed(.two)) workspace = .mission;
+        if (rl.isKeyPressed(.three)) workspace = .tuning;
+        if (rl.isMouseButtonPressed(.left)) {
+            const mouse = rl.getMousePosition();
+            if (rl.checkCollisionPointRec(mouse, layout.fontButton(false))) font_percent = ui.adjustFontPercent(font_percent, -5);
+            if (rl.checkCollisionPointRec(mouse, layout.fontButton(true))) font_percent = ui.adjustFontPercent(font_percent, 5);
+            for (0..3) |i| if (rl.checkCollisionPointRec(rl.getMousePosition(), layout.navRect(i))) {
+                workspace = @fromBackingInt(@intCast(i));
+                pid_drag = null;
+                break;
+            };
+        }
+        const view3d = layout.sceneContent(if (workspace == .mission) .mission else .operation);
+        const next_w: i32 = @max(1, @as(i32, @intFromFloat(view3d.width)));
+        const next_h: i32 = @max(1, @as(i32, @intFromFloat(view3d.height)));
+        if (next_w != scene_w or next_h != scene_h) {
+            const replacement = try rl.loadRenderTexture(next_w, next_h);
+            rl.unloadRenderTexture(scene);
+            scene = replacement;
+            scene_w = next_w;
+            scene_h = next_h;
+        }
+        if (read_video and !video_started and now - last_video_try > 2) {
             last_video_try = now;
             var width: c_int = 0;
             var height: c_int = 0;
-            if (video_open(config.video_source.ptr, &width, &height)) {
+            video_started = video_open(config.video_source.ptr, &width, &height);
+        }
+        if (video_started) {
+            var width: c_int = 0;
+            var height: c_int = 0;
+            if (video_get_size(&width, &height) and width > 0 and height > 0 and
+                (width != video_w or height != video_h))
+            {
                 const blank = rl.genImageColor(width, height, rl.Color.black);
-                video = rl.loadTextureFromImage(blank) catch {
+                const new_video = rl.loadTextureFromImage(blank) catch {
                     rl.unloadImage(blank);
-                    video_close();
                     continue;
                 };
+                if (video.id != 0) rl.unloadTexture(video);
+                if (video_image) |old| rl.unloadImage(old);
+                video = new_video;
                 video_w = width;
                 video_h = height;
                 pixels = @ptrCast(blank.data);
                 video_image = blank;
-                std.debug.print("zed stream connected: {s}\n", .{config.video_source});
+                last_frame = -1;
+                std.debug.print("video dimensions: {d}x{d}\n", .{ width, height });
             }
         }
 
         switch (compiled_config.telemetry_transport) {
             .shared_memory => {
+                // A restarted publisher can replace the shared-memory object. Reopen
+                // stale mappings so the viewer can follow the new publisher.
+                const last_activity = if (last_packet >= source_opened_at) last_packet else source_opened_at;
+                if (subscriber != null and last_activity >= 0 and now - last_activity > 2) {
+                    subscriber.?.deinit();
+                    subscriber = null;
+                }
                 if (subscriber == null and now - last_source_try > 2) {
                     last_source_try = now;
                     subscriber = MissionIO.TelemetrySubscriber.open(telemetry_shm_name) catch |err| blk: {
                         std.debug.print("waiting for shared telemetry '{s}': {s}\n", .{ telemetry_shm_name, @errorName(err) });
                         break :blk null;
                     };
+                    if (subscriber != null) source_opened_at = now;
                 }
                 if (subscriber) |*source| {
                     var attempts: usize = 0;
                     while (attempts < 2) : (attempts += 1) {
                         const latest = source.latest() orelse break;
                         if (!latest.valid()) continue;
-                        shared_view = latest;
-                        telemetry = latest.frame;
-                        if (last_timestamp == null or telemetry.timestamp != last_timestamp.?) {
-                            last_timestamp = telemetry.timestamp;
+                        const snapshot = latest.frame.*;
+                        if (!latest.valid() or !validFrame(&snapshot)) continue;
+                        udp_telemetry = snapshot;
+                        if (last_timestamp == null or snapshot.timestamp != last_timestamp.?) {
+                            last_timestamp = snapshot.timestamp;
                             last_packet = now;
                         }
                         break;
@@ -414,24 +440,50 @@ pub fn main(init: std.process.Init) !void {
                         error.Timeout => break,
                         else => break,
                     };
-                    MissionIO.decodeTelemetryFrame(message.data, &udp_telemetry) catch continue;
-                    {
-                        last_timestamp = udp_telemetry.timestamp;
-                        last_packet = now;
-                    }
+                    var snapshot: MissionIO.TelemetryFrame = undefined;
+                    MissionIO.decodeTelemetryFrame(message.data, &snapshot) catch continue;
+                    udp_telemetry = snapshot;
+                    last_timestamp = snapshot.timestamp;
+                    last_packet = now;
                 }
             },
             .stdout => {},
         }
 
+        const list_capacity = ui.Layout.listCapacity(layout.objects);
+        const object_max = @as(usize, telemetry.objects_len) -| list_capacity;
+        const goal_max = @as(usize, telemetry.goals_len) -| list_capacity;
+        object_scroll = @min(object_scroll, object_max);
+        goal_scroll = @min(goal_scroll, goal_max);
+        if (workspace == .mission and rl.isWindowFocused()) {
+            const wheel = rl.getMouseWheelMove();
+            if (wheel != 0) {
+                const mouse = rl.getMousePosition();
+                if (rl.checkCollisionPointRec(mouse, layout.objects)) {
+                    object_scroll = if (wheel > 0) object_scroll -| 1 else @min(object_scroll + 1, object_max);
+                } else if (rl.checkCollisionPointRec(mouse, layout.goals)) {
+                    goal_scroll = if (wheel > 0) goal_scroll -| 1 else @min(goal_scroll + 1, goal_max);
+                }
+            }
+        }
+
         if (pixels) |video_pixels| {
-            if (video_frame(video_pixels)) {
+            const capacity = @as(usize, @intCast(video_w)) * @as(usize, @intCast(video_h)) * 4;
+            if (video_frame(video_pixels, capacity, video_w, video_h)) {
                 rl.updateTexture(video, video_pixels);
                 last_frame = now;
             }
         }
 
         if (rl.isKeyPressed(.t)) {
+            // Release any held teleoperation translation before leaving teleop mode.
+            if (!mission_control) if (teleop_socket) |*socket| {
+                const neutral = encodeGoal(.{ 0, 0, 0, orientation[0], orientation[1], orientation[2], orientation[3] });
+                socket.send(init.io, &teleop_dest, &neutral) catch {
+                    teleop_error_logged = true;
+                };
+                translation = .{ 0, 0, 0 };
+            };
             mission_control = !mission_control;
             if (mission_control) mission_target_initialized = false;
             std.debug.print(
@@ -439,14 +491,19 @@ pub fn main(init: std.process.Init) !void {
                 .{if (mission_control) "mission-control" else "teleop"},
             );
         }
-        if (rl.isKeyPressed(.h)) show_command_legend = !show_command_legend;
+        const focused = rl.isWindowFocused();
+        const mouse_click = focused and workspace == .mission and rl.isMouseButtonPressed(.left);
+        if (mouse_click and mission_control) {
+            if (rl.checkCollisionPointRec(rl.getMousePosition(), layout.missionButton(0))) mission_kind = .point;
+            if (rl.checkCollisionPointRec(rl.getMousePosition(), layout.missionButton(1))) mission_kind = .object;
+        }
 
-        if (mission_control and !mission_target_initialized and last_timestamp != null) {
+        if (mission_control and !mission_target_initialized and last_packet >= 0 and now - last_packet <= 1) {
             mission_position = telemetry.camera_pose.pos + @as(math.Vector3f, .{ 0, 2, 0 });
             mission_target_initialized = true;
         }
 
-        if (mission_control) {
+        if (mission_control and focused and workspace == .mission) {
             if (rl.isKeyPressed(.p)) mission_kind = .point;
             if (rl.isKeyPressed(.o)) mission_kind = .object;
             if (rl.isKeyPressed(.m)) mission_maneuver = .move;
@@ -475,7 +532,8 @@ pub fn main(init: std.process.Init) !void {
                 @sin(mission_look_pitch),
             };
 
-            if (rl.isKeyPressed(.enter) and teleop_socket != null) {
+            const clicked_send = mouse_click and rl.checkCollisionPointRec(rl.getMousePosition(), layout.sendButton());
+            if (workspace == .mission and (rl.isKeyPressed(.enter) or clicked_send) and teleop_socket != null and (mission_kind != .point or (mission_target_initialized and last_packet >= 0 and now - last_packet <= 1))) {
                 const command: MissionIO.MissionCommand = switch (mission_kind) {
                     .point => .{
                         .kind = .point,
@@ -489,30 +547,31 @@ pub fn main(init: std.process.Init) !void {
                         .object_class = mission_object_class,
                     },
                 };
-                sendMissionCommand(init.io, &teleop_socket.?, &teleop_dest, command) catch {
-                    if (!mission_error_logged) {
-                        std.debug.print("mission command send failed\n", .{});
-                        mission_error_logged = true;
-                    }
-                };
+                if (sendMissionCommand(init.io, &teleop_socket.?, &teleop_dest, command)) |_| {
+                    mission_error_logged = false;
+                    mission_sent = true;
+                } else |_| {
+                    if (!mission_error_logged) std.debug.print("mission command send failed\n", .{});
+                    mission_error_logged = true;
+                }
             }
-        } else if (teleop_socket != null and now - last_teleop >= teleop_period) {
+        } else if (!mission_control and teleop_socket != null and now - last_teleop >= teleop_period) {
             last_teleop = now;
             translation = .{ 0, 0, 0 };
-            if (rl.isKeyDown(.d)) translation[0] += 1;
-            if (rl.isKeyDown(.a)) translation[0] -= 1;
-            if (rl.isKeyDown(.w)) translation[1] += 1;
-            if (rl.isKeyDown(.s)) translation[1] -= 1;
-            if (rl.isKeyDown(.r)) translation[2] += 1;
-            if (rl.isKeyDown(.f)) translation[2] -= 1;
+            if (focused and rl.isKeyDown(.d)) translation[0] += 1;
+            if (focused and rl.isKeyDown(.a)) translation[0] -= 1;
+            if (focused and rl.isKeyDown(.w)) translation[1] += 1;
+            if (focused and rl.isKeyDown(.s)) translation[1] -= 1;
+            if (focused and rl.isKeyDown(.r)) translation[2] += 1;
+            if (focused and rl.isKeyDown(.f)) translation[2] -= 1;
             normalizeTranslation(&translation);
 
-            if (rl.isKeyDown(.right)) orientation = math.quaternionMul(axisAngle(.{ 0, 0, 1 }, -teleop_step), orientation);
-            if (rl.isKeyDown(.left)) orientation = math.quaternionMul(axisAngle(.{ 0, 0, 1 }, teleop_step), orientation);
-            if (rl.isKeyDown(.up)) orientation = math.quaternionMul(orientation, axisAngle(.{ 1, 0, 0 }, -teleop_step));
-            if (rl.isKeyDown(.down)) orientation = math.quaternionMul(orientation, axisAngle(.{ 1, 0, 0 }, teleop_step));
-            if (rl.isKeyDown(.i)) orientation = math.quaternionMul(orientation, axisAngle(.{ 0, 1, 0 }, teleop_step));
-            if (rl.isKeyDown(.k)) orientation = math.quaternionMul(orientation, axisAngle(.{ 0, 1, 0 }, -teleop_step));
+            if (focused and rl.isKeyDown(.right)) orientation = math.quaternionMul(axisAngle(.{ 0, 0, 1 }, -teleop_step), orientation);
+            if (focused and rl.isKeyDown(.left)) orientation = math.quaternionMul(axisAngle(.{ 0, 0, 1 }, teleop_step), orientation);
+            if (focused and rl.isKeyDown(.up)) orientation = math.quaternionMul(orientation, axisAngle(.{ 1, 0, 0 }, -teleop_step));
+            if (focused and rl.isKeyDown(.down)) orientation = math.quaternionMul(orientation, axisAngle(.{ 1, 0, 0 }, teleop_step));
+            if (focused and rl.isKeyDown(.i)) orientation = math.quaternionMul(orientation, axisAngle(.{ 0, 1, 0 }, teleop_step));
+            if (focused and rl.isKeyDown(.k)) orientation = math.quaternionMul(orientation, axisAngle(.{ 0, 1, 0 }, -teleop_step));
             normalizeQuaternion(&orientation);
 
             const command = [7]f32{
@@ -521,15 +580,15 @@ pub fn main(init: std.process.Init) !void {
                 orientation[3],
             };
             const goal_packet = encodeGoal(command);
-            teleop_socket.?.send(init.io, &teleop_dest, &goal_packet) catch {
-                if (!teleop_error_logged) {
-                    std.debug.print("teleop send failed\n", .{});
-                    teleop_error_logged = true;
-                }
-            };
+            if (teleop_socket.?.send(init.io, &teleop_dest, &goal_packet)) |_| {
+                teleop_error_logged = false;
+            } else |_| {
+                if (!teleop_error_logged) std.debug.print("teleop send failed\n", .{});
+                teleop_error_logged = true;
+            }
         }
 
-        if (!mission_control) {
+        if (!mission_control and focused and workspace == .tuning) {
             if (rl.isKeyPressed(.q)) {
                 tune_selection = (tune_selection + tune_names.len - 1) % tune_names.len;
             }
@@ -539,20 +598,20 @@ pub fn main(init: std.process.Init) !void {
         }
 
         var tune_changed = false;
-        if (rl.isMouseButtonPressed(.left)) {
+        if (focused and workspace == .tuning and rl.isMouseButtonPressed(.left)) {
             const mouse = rl.getMousePosition();
             for (0..tune_names.len) |index| {
-                if (rl.checkCollisionPointRec(mouse, pidSliderRect(index, pid_layout))) {
+                if (rl.checkCollisionPointRec(mouse, layout.pidRect(index))) {
                     tune_selection = index;
                     pid_drag = index;
                     break;
                 }
             }
         }
-        if (!rl.isMouseButtonDown(.left)) pid_drag = null;
+        if (!focused or workspace != .tuning or !rl.isMouseButtonDown(.left)) pid_drag = null;
         if (pid_drag) |index| {
             if (now - last_tune_adjust >= tune_period) {
-                const value = pidSliderValue(index, rl.getMousePosition().x, pid_layout);
+                const value = pidSliderValue(index, rl.getMousePosition().x, layout);
                 const target = tuningValue(&config_packet, index);
                 if (@abs(target.* - value) > 1e-5) {
                     target.* = value;
@@ -561,7 +620,7 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         }
-        if (now - last_tune_adjust >= tune_period) {
+        if (focused and workspace == .tuning and now - last_tune_adjust >= tune_period) {
             var delta: f32 = 0;
             if (rl.isKeyDown(.z)) delta -= tune_step;
             if (rl.isKeyDown(.x)) delta += tune_step;
@@ -572,15 +631,16 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         if (tune_changed and teleop_socket != null) {
-            sendTuning(init.io, &teleop_socket.?, &teleop_dest, config_packet) catch {
-                if (!tune_error_logged) {
-                    std.debug.print("live tuning send failed\n", .{});
-                    tune_error_logged = true;
-                }
-            };
+            if (sendTuning(init.io, &teleop_socket.?, &teleop_dest, config_packet)) |_| {
+                tune_error_logged = false;
+                tune_sent = true;
+            } else |_| {
+                if (!tune_error_logged) std.debug.print("live tuning send failed\n", .{});
+                tune_error_logged = true;
+            }
         }
 
-        if (rl.checkCollisionPointRec(rl.getMousePosition(), view3d)) {
+        if (focused and workspace != .tuning and rl.checkCollisionPointRec(rl.getMousePosition(), view3d)) {
             if (rl.isMouseButtonDown(.right)) {
                 const delta = rl.getMouseDelta();
                 orbit_yaw -= delta.x * 0.01;
@@ -609,7 +669,7 @@ pub fn main(init: std.process.Init) !void {
         rl.drawLine3D(sub, .{ .x = sub.x, .y = 0, .z = sub.z }, rl.fade(rl.Color.sky_blue, 0.45));
         drawBox(telemetry.camera_pose.pos, telemetry.camera_pose.quat, .{ 0.35, 0.8, 0.22 }, rl.Color.sky_blue);
 
-        const nose = math.quaternionRotate(telemetry.camera_pose.quat, [3]f32{ 0, 0.7, 0 });
+        const nose = math.quaternionRotate(telemetry.camera_pose.quat, [3]f32{ 0, 1, 0 });
         rl.drawLine3D(sub, toRay(add3(telemetry.camera_pose.pos, nose)), rl.Color.orange);
         const command_forward = math.quaternionRotate(orientation, [3]f32{ 0, 2, 0 });
         drawArrow(telemetry.camera_pose.pos, command_forward, 0.02, rl.Color.green);
@@ -624,7 +684,8 @@ pub fn main(init: std.process.Init) !void {
         if (math.dot3f(force_error, force_error) > 1e-6)
             drawArrow(telemetry.camera_pose.pos, force_error, 0.03, rl.Color.yellow);
 
-        for (telemetry.objects[0..telemetry.objects_len]) |object| {
+        for (telemetry.objects[0..telemetry.objects_len], 0..) |object, i| {
+            if (i == 0) rl.drawLine3D(sub, toRay(object.pose.pos), rl.fade(rl.Color.ray_white, 0.45));
             var size = object.size;
             for (&size) |*axis| if (axis.* < 0.05) {
                 axis.* = 0.3;
@@ -641,222 +702,57 @@ pub fn main(init: std.process.Init) !void {
             rl.drawSphere(at, if (i == 0) 0.18 else 0.1, color);
         }
         rl.endMode3D();
-        rl.drawText("sub blue   objects colored by coco class   right-drag orbit   wheel zoom", 8, 8, 16, rl.Color.light_gray);
-        rl.drawText("y forward   x right   z down", 8, 28, 16, rl.Color.gray);
-        rl.drawText("orange nose   green cmd   pink move   yellow err   lime goals", 8, 48, 16, rl.Color.gray);
         rl.endTextureMode();
 
+        const telemetry_status: ui.Status = if (compiled_config.telemetry_transport == .stdout)
+            .unavailable
+        else if (last_packet < 0)
+            .connecting
+        else if (now - last_packet > 1)
+            .stale
+        else
+            .live;
+        const video_status: ui.Status = if (!read_video)
+            .disabled
+        else if (video_has_error())
+            .unavailable
+        else if (video_w == 0 or last_frame < 0)
+            .connecting
+        else if (now - last_frame > 1)
+            .stale
+        else
+            .live;
         rl.beginDrawing();
-        rl.clearBackground(rl.Color.black);
-        if (read_video and video_w != 0) {
-            var scale: f32 = 900.0 / @as(f32, @floatFromInt(video_w));
-            if (@as(f32, @floatFromInt(video_h)) * scale > 500)
-                scale = 500.0 / @as(f32, @floatFromInt(video_h));
-            rl.drawTextureEx(video, .{ .x = 0, .y = 0 }, 0, scale, rl.Color.white);
-            for (telemetry.boxes[0..telemetry.boxes_len]) |box| {
-                rl.drawRectangleLinesEx(.{
-                    .x = @as(f32, @floatFromInt(box.top_left.x)) * scale,
-                    .y = @as(f32, @floatFromInt(box.top_left.y)) * scale,
-                    .width = @as(f32, @floatFromInt(box.bottom_right.x - box.top_left.x)) * scale,
-                    .height = @as(f32, @floatFromInt(box.bottom_right.y - box.top_left.y)) * scale,
-                }, 2, rl.Color.yellow);
-            }
-            if (last_frame < 0 or now - last_frame > 1)
-                rl.drawText(rl.textFormat("no frames from %s", .{config.video_source.ptr}), 20, 20, 20, rl.Color.red);
-        } else if (read_video) {
-            rl.drawText(rl.textFormat("video: connecting to %s", .{config.video_source.ptr}), 20, 20, 20, rl.Color.yellow);
-        }
-
-        const x: i32 = 920;
-        const source_ok = last_packet >= 0 and now - last_packet <= 1;
-        switch (compiled_config.telemetry_transport) {
-            .shared_memory => {
-                rl.drawText(
-                    rl.textFormat(if (source_ok) "shm %s" else "no telemetry on shm %s", .{telemetry_shm_name.ptr}),
-                    x,
-                    20,
-                    20,
-                    if (source_ok) rl.Color.green else rl.Color.red,
-                );
-            },
-            .udp => rl.drawText(
-                rl.textFormat(if (source_ok) "udp %s" else "no telemetry on udp %s", .{telemetry_addr.ptr}),
-                x,
-                20,
-                20,
-                if (source_ok) rl.Color.green else rl.Color.red,
-            ),
-            .stdout => rl.drawText(
-                "telemetry stdout (producer-only)",
-                x,
-                20,
-                20,
-                rl.Color.gray,
-            ),
-        }
-
-        const zed_color = if (!read_video) rl.Color.gray else if (video_w != 0) rl.Color.green else rl.Color.orange;
-        rl.drawText(
-            if (read_video) rl.textFormat("zed  %s", .{config.video_source.ptr}) else "zed  off",
-            x,
-            40,
-            18,
-            zed_color,
-        );
-        var step_buffer: [MissionIO.telemetry_step_max + 1]u8 = undefined;
-        rl.drawText(rl.textFormat("step  %s", .{stepText(telemetry, &step_buffer).ptr}), x, 60, 20, rl.Color.ray_white);
-        rl.drawText(rl.textFormat("pos   %.2f %.2f %.2f", .{
-            @as(f64, telemetry.camera_pose.pos[0]),
-            @as(f64, telemetry.camera_pose.pos[1]),
-            @as(f64, telemetry.camera_pose.pos[2]),
-        }), x, 90, 20, rl.Color.ray_white);
-        rl.drawText(rl.textFormat("quat  %.2f %.2f %.2f %.2f", .{
-            @as(f64, telemetry.camera_pose.quat[0]),
-            @as(f64, telemetry.camera_pose.quat[1]),
-            @as(f64, telemetry.camera_pose.quat[2]),
-            @as(f64, telemetry.camera_pose.quat[3]),
-        }), x, 120, 20, rl.Color.ray_white);
-        rl.drawText(rl.textFormat("objs  %d", .{@as(c_int, telemetry.objects_len)}), x, 150, 20, rl.Color.ray_white);
-
-        const pos_ok = telemetry.position_ok;
-        rl.drawText(rl.textFormat("pos xyz  %s %s %s", .{
-            if (pos_ok.x) "ok" else "--",
-            if (pos_ok.y) "ok" else "--",
-            if (pos_ok.z) "ok" else "--",
-        }), x, 180, 20, if (pos_ok.x and pos_ok.y and pos_ok.z) rl.Color.green else rl.Color.orange);
-        const att_ok = telemetry.attitude_ok;
-        rl.drawText(rl.textFormat("att xyz  %s %s %s", .{
-            if (att_ok.x) "ok" else "--",
-            if (att_ok.y) "ok" else "--",
-            if (att_ok.z) "ok" else "--",
-        }), x, 210, 20, if (att_ok.x and att_ok.y and att_ok.z) rl.Color.green else rl.Color.orange);
-        rl.drawText(
-            if (telemetry.depth_ok)
-                rl.textFormat("depth %.2f m", .{@as(f64, telemetry.depth)})
-            else
-                "depth -",
-            x,
-            240,
-            20,
-            rl.Color.ray_white,
-        );
-        if (mission_control) {
-            const kind_name = switch (mission_kind) {
-                .point => "point",
-                .object => "object",
-            };
-            const maneuver_name = switch (mission_maneuver) {
-                .move => "move",
-                .pass => "pass",
-                .circle => "circle",
-            };
-            rl.drawText(
-                rl.textFormat("mission %s/%s  port %d", .{ kind_name.ptr, maneuver_name.ptr, compiled_config.teleop_port }),
-                x,
-                270,
-                18,
-                if (teleop_socket != null) rl.Color.green else rl.Color.red,
-            );
-            rl.drawText(rl.textFormat("target %.2f %.2f %.2f", .{
-                @as(f64, mission_position[0]),
-                @as(f64, mission_position[1]),
-                @as(f64, mission_position[2]),
-            }), x, 296, 16, rl.Color.ray_white);
-            rl.drawText(rl.textFormat("look   %.2f %.2f %.2f", .{
-                @as(f64, mission_look_direction[0]),
-                @as(f64, mission_look_direction[1]),
-                @as(f64, mission_look_direction[2]),
-            }), x, 318, 16, rl.Color.ray_white);
-            rl.drawText(rl.textFormat("class  %d", .{@as(c_int, mission_object_class)}), x, 340, 16, rl.Color.ray_white);
-            rl.drawText("P/O mode  M/B/C move/pass/circle  Enter send", x, 360, 14, rl.Color.gray);
-            rl.drawText("WASD/RF target  arrows look  Q/E class", x, 378, 14, rl.Color.gray);
-        } else {
-            rl.drawText(rl.textFormat("move  %.2f %.2f %.2f", .{
-                @as(f64, translation[0]),
-                @as(f64, translation[1]),
-                @as(f64, translation[2]),
-            }), x, 270, 20, if (teleop_socket != null) rl.Color.ray_white else rl.Color.red);
-            rl.drawText(rl.textFormat("cmd   %.2f %.2f %.2f %.2f", .{
-                @as(f64, orientation[0]),
-                @as(f64, orientation[1]),
-                @as(f64, orientation[2]),
-                @as(f64, orientation[3]),
-            }), x, 300, 20, rl.Color.ray_white);
-            rl.drawText(rl.textFormat("err   %.2f %.2f %.2f", .{
-                @as(f64, telemetry.force_error[0]),
-                @as(f64, telemetry.force_error[1]),
-                @as(f64, telemetry.force_error[2]),
-            }), x, 330, 20, rl.Color.yellow);
-            rl.drawText("teleop W/S surge  A/D sway  R/F heave  I/K roll", x, 360, 16, rl.Color.gray);
-            rl.drawText("arrows yaw and pitch", x, 378, 16, rl.Color.gray);
-        }
-        rl.drawText(
-            rl.textFormat("tune %s %.3f", .{
-                tune_names[tune_selection].ptr,
-                @as(f64, tuningValue(&config_packet, tune_selection).*),
-            }),
-            x,
-            396,
-            18,
-            if (teleop_socket != null and !tune_error_logged) rl.Color.green else rl.Color.red,
-        );
-        rl.drawText("tune on teleop port  Q/E select  Z/X adjust", x, 418, 16, rl.Color.gray);
-        rl.drawText("H show mission command legend", x, 448, 14, rl.Color.gray);
-        rl.drawText("PID gains  drag sliders", x, @intFromFloat(pid_layout.row_y - 50), 18, rl.Color.ray_white);
-        for (0..3) |group| {
-            const group_y: i32 = @intFromFloat(
-                pid_layout.row_y - 40 + @as(f32, @floatFromInt(group)) * pid_layout.row_step,
-            );
-            rl.drawText(pid_group_names[group], x, group_y, 16, rl.Color.light_gray);
-            for (0..6) |axis| {
-                const index = group * 6 + axis;
-                const rect = pidSliderRect(index, pid_layout);
-                const value = tuningValue(&config_packet, index).*;
-                const ratio = @min(1.0, @max(0.0, value / pid_slider_max[group]));
-                const track_x: i32 = @intFromFloat(rect.x);
-                const track_y: i32 = @intFromFloat(rect.y);
-                const track_width: i32 = @intFromFloat(rect.width);
-                const track_height: i32 = @intFromFloat(rect.height);
-                const filled_width: i32 = @intFromFloat(rect.width * ratio);
-                const color = if (index == tune_selection) rl.Color.orange else rl.Color.sky_blue;
-
-                rl.drawText(pid_axis_names[axis], track_x, group_y + 18, 12, rl.Color.gray);
-                rl.drawText(rl.textFormat("%.2f", .{@as(f64, value)}), track_x, group_y + 60, 12, color);
-                rl.drawRectangle(track_x, track_y, track_width, track_height, rl.Color.dark_gray);
-                if (filled_width > 0)
-                    rl.drawRectangle(track_x, track_y, filled_width, track_height, color);
-                rl.drawRectangleLinesEx(rect, 1, rl.Color.gray);
-            }
-        }
-        rl.drawTextureRec(scene.texture, .{
-            .x = 0,
-            .y = 0,
-            .width = @floatFromInt(scene_w),
-            .height = -@as(f32, @floatFromInt(scene_h)),
-        }, .{ .x = view3d.x, .y = view3d.y }, rl.Color.white);
-        rl.drawRectangleLinesEx(view3d, 1, rl.Color.gray);
-
-        for (telemetry.thrusters[0..telemetry.thrusters_len], 0..) |thruster, index| {
-            const y: i32 = 450 + @as(i32, @intCast(index)) * 30;
-            const width: i32 = @intFromFloat(thruster * 100);
-            rl.drawText(rl.textFormat("t%d %+.2f", .{ @as(c_int, @intCast(index)), @as(f64, thruster) }), x, y, 20, rl.Color.ray_white);
-            rl.drawRectangle(if (width < 0) x + 240 + width else x + 240, y, @intCast(@abs(width)), 20, rl.Color.sky_blue);
-            rl.drawLine(x + 240, y - 2, x + 240, y + 22, rl.Color.gray);
-        }
-        if (show_command_legend) {
-            const legend_y: i32 = 438;
-            rl.drawRectangle(x - 8, legend_y - 8, 365, 150, rl.fade(rl.Color.black, 0.95));
-            rl.drawText("mission command legend", x, legend_y, 16, rl.Color.light_gray);
-            rl.drawText("T  teleop / mission-control", x, legend_y + 20, 14, rl.Color.gray);
-            rl.drawText("P/O  point or object target", x, legend_y + 38, 14, rl.Color.gray);
-            rl.drawText("M/B/C  move, pass, or circle", x, legend_y + 56, 14, rl.Color.gray);
-            rl.drawText("WASD/RF  edit point target", x, legend_y + 74, 14, rl.Color.gray);
-            rl.drawText("arrows  edit look direction", x, legend_y + 92, 14, rl.Color.gray);
-            rl.drawText("Q/E class   Enter send", x, legend_y + 110, 14, rl.Color.gray);
-        }
+        ui.draw(.{
+            .font = font,
+            .font_percent = font_percent,
+            .workspace = workspace,
+            .layout = layout,
+            .frame = telemetry,
+            .telemetry_status = telemetry_status,
+            .video_status = video_status,
+            .video = video,
+            .video_w = video_w,
+            .video_h = video_h,
+            .scene = scene,
+            .mission_control = mission_control,
+            .socket_ok = teleop_socket != null,
+            .send_error = teleop_error_logged or mission_error_logged or tune_error_logged,
+            .translation = translation,
+            .orientation = orientation,
+            .mission_kind = mission_kind,
+            .mission_maneuver = mission_maneuver,
+            .mission_position = mission_position,
+            .mission_look = mission_look_direction,
+            .mission_class = mission_object_class,
+            .target_initialized = mission_target_initialized,
+            .config = &config_packet,
+            .tune_selection = tune_selection,
+            .mission_sent = mission_sent,
+            .tune_sent = tune_sent,
+            .object_scroll = object_scroll,
+            .goal_scroll = goal_scroll,
+        });
         rl.endDrawing();
-        if (shared_view) |view| {
-            if (!view.valid()) last_packet = -1;
-        }
     }
 }

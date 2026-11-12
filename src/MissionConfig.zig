@@ -221,6 +221,7 @@ fn presetProteusHwd() MissionConfig {
     var config = presetBaseline();
     config.rotation_limit = .{ 0.3, 0, 100 };
     config.ibvs.target_height = 0.35;
+    config.telemetry_transport = .shared_memory;
     config.odometry = .{
         .rotation_gate = 0.392699081688714,
         .kp = .{ 1.0, 1.0, 2.2, 2.4, 2.4, 2.0 },

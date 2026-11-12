@@ -12,7 +12,10 @@ static std::mutex lock;
 static std::vector<unsigned char> latest;
 static bool fresh = false;
 static bool opened = false;
+static int cached_width = 0;
+static int cached_height = 0;
 
+extern "C" const char *video_default_source() { return "127.0.0.1:5610"; }
 extern "C" void video_close();
 
 static void grab_loop() {
@@ -70,8 +73,8 @@ extern "C" bool video_open(const char *source, int *width, int *height) {
   }
 
   const auto size = zed.getCameraInformation().camera_configuration.resolution;
-  *width = static_cast<int>(size.width);
-  *height = static_cast<int>(size.height);
+  *width = cached_width = static_cast<int>(size.width);
+  *height = cached_height = static_cast<int>(size.height);
   latest.resize(size.width * size.height * 4);
 
   running = true;
@@ -80,9 +83,20 @@ extern "C" bool video_open(const char *source, int *width, int *height) {
   return true;
 }
 
-extern "C" bool video_frame(unsigned char *out) {
+extern "C" bool video_get_size(int *width, int *height) {
+  if (!opened) return false;
+  *width = cached_width;
+  *height = cached_height;
+  return *width > 0 && *height > 0;
+}
+
+extern "C" bool video_has_error() { return false; }
+
+extern "C" bool video_frame(unsigned char *out, size_t capacity, int width, int height) {
   std::lock_guard<std::mutex> guard(lock);
-  if (!fresh) return false;
+  if (!fresh || width <= 0 || height <= 0 ||
+      static_cast<size_t>(width) * static_cast<size_t>(height) * 4 != latest.size() ||
+      capacity < latest.size()) return false;
 
   std::memcpy(out, latest.data(), latest.size());
   fresh = false;
@@ -98,4 +112,5 @@ extern "C" void video_close() {
   opened = false;
   fresh = false;
   latest.clear();
+  cached_width = cached_height = 0;
 }

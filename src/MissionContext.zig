@@ -126,7 +126,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
 
         if (maybe_seen_object) |seen_object| {
             seen_object.* = frame_object;
-        } else {
+        } else if (ctx.seen_objects_len < ctx.seen_objects.len) {
             ctx.seen_objects[ctx.seen_objects_len] = frame_object;
             ctx.seen_objects_len += 1;
         }
@@ -141,7 +141,7 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
 
         if (maybe_seen_object) |seen_object| {
             seen_object.* = frame_object;
-        } else {
+        } else if (ctx.seen_objects2d_len < ctx.seen_objects2d.len) {
             ctx.seen_objects2d[ctx.seen_objects2d_len] = frame_object;
             ctx.seen_objects2d_len += 1;
         }
@@ -198,6 +198,17 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         goals[goals_len] = goal;
         goals_len += 1;
     }
+    if (goals_len == 0 and ctx.use_position and ctx.frame.position_ok.x and
+        ctx.frame.position_ok.y and ctx.frame.position_ok.z)
+    {
+        const q = bc.normalizedQuat(ctx.target_orientation) catch bc.identity;
+        const ray = math.quaternionRotate(q, ctx.config.camera_forward);
+        goals[0] = .{
+            .position = ctx.target_position,
+            .look_at = if (ctx.use_orientation) ctx.frame.camera_pose.pos + ray * @as(math.Vector3f, @splat(2.0)) else ctx.target_position,
+        };
+        goals_len = 1;
+    }
     const elapsed = start.untilNow(ctx.io);
     telemetry_frame.cycle_us = @intCast(@max(0, elapsed.raw.toMicroseconds()));
     telemetry_frame.force_error = ctx.force_error;
@@ -228,7 +239,6 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
         dest.* = .{ .position = source.position, .look_at = source.look_at };
     }
     ctx.telemetry.publishTelemetry(ctx.io, telemetry_frame);
-
 }
 
 pub fn resetOdometryPid(ctx: *MissionContext) void {

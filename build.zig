@@ -76,6 +76,8 @@ pub fn build(b: *std.Build) !void {
     });
 
     const viewer_zed = b.option(bool, "viewer-zed", "Enable ZED stream/SVO video in the Zig viewer") orelse false;
+    const viewer_gstreamer = b.option(bool, "viewer-gstreamer", "Enable standard RTP video in the viewer using GStreamer") orelse false;
+    if (viewer_zed and viewer_gstreamer) @panic("-Dviewer-zed and -Dviewer-gstreamer select different video backends");
     if (viewer_zed) {
         const compile_video = b.addSystemCommand(&.{
             cxx,
@@ -103,6 +105,14 @@ pub fn build(b: *std.Build) !void {
         viewer.root_module.linkSystemLibrary("cudart", .{});
         viewer.root_module.linkSystemLibrary("gcc_s", .{ .use_pkg_config = .no });
         viewer.root_module.addObjectFile(.{ .cwd_relative = stdcxx_path });
+    } else if (viewer_gstreamer) {
+        viewer.root_module.link_libcpp = true;
+        viewer.root_module.addCSourceFile(.{
+            .file = b.path("tools/viewer/video_gstreamer.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" },
+        });
+        viewer.root_module.linkSystemLibrary("gstreamer-app-1.0", .{ .use_pkg_config = .force });
+        viewer.root_module.linkSystemLibrary("gstreamer-video-1.0", .{ .use_pkg_config = .force });
     } else {
         viewer.root_module.addCSourceFile(.{
             .file = b.path("tools/viewer/video_stub.cpp"),
@@ -135,6 +145,52 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run tests");
     // test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const viewer_ui_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools/viewer/ui.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "raylib", .module = raylib_dep.module("raylib") },
+            .{ .name = "MissionIO", .module = mission_io },
+        },
+    });
+    viewer_ui_test_mod.linkLibrary(raylib_dep.artifact("raylib"));
+    const viewer_ui_tests = b.addTest(.{ .root_module = viewer_ui_test_mod });
+    const run_viewer_ui_tests = b.addRunArtifact(viewer_ui_tests);
+    test_step.dependOn(&run_viewer_ui_tests.step);
+
+    const map_tests = b.addExecutable(.{
+        .name = "object_map_test",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        }),
+    });
+    map_tests.root_module.addCSourceFile(.{ .file = b.path("tests/object_map_test.cpp"), .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } });
+    map_tests.root_module.addCSourceFile(.{ .file = b.path("auvs/proteus_hwd/object_map.cpp"), .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } });
+    const run_map_tests = b.addRunArtifact(map_tests);
+    test_step.dependOn(&run_map_tests.step);
+
+    if (viewer_gstreamer) {
+        const rtp_test_mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        for ([_][]const u8{ "tests/rtp_stream_test.cpp", "tools/viewer/video_gstreamer.cpp", "auvs/proteus_hwd/rtp_relay.cpp" }) |path| {
+            rtp_test_mod.addCSourceFile(.{ .file = b.path(path), .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } });
+        }
+        rtp_test_mod.linkSystemLibrary("gstreamer-app-1.0", .{ .use_pkg_config = .force });
+        rtp_test_mod.linkSystemLibrary("gstreamer-video-1.0", .{ .use_pkg_config = .force });
+        const rtp_tests = b.addExecutable(.{ .name = "rtp_stream_test", .root_module = rtp_test_mod });
+        const run_rtp_tests = b.addRunArtifact(rtp_tests);
+        test_step.dependOn(&run_rtp_tests.step);
+    }
 
     const arduino_cli = b.option([]const u8, "arduino-cli", "Arduino CLI executable") orelse "arduino-cli";
     const arduino_fqbn = b.option([]const u8, "arduino-fqbn", "Arduino board FQBN") orelse "arduino:avr:uno";
@@ -187,6 +243,8 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(lib_auv_stationary_sim);
 
     const zed = b.option(bool, "zed", "Build the ZED camera plugin (requires ZED SDK and CUDA)") orelse false;
+    const zed_rtp = b.option(bool, "zed-rtp", "Enable standard RTP relay in the ZED plugin (SDK >= 5.4 and GStreamer)") orelse false;
+    if (zed_rtp and !zed) @panic("-Dzed-rtp requires -Dzed");
     if (zed) {
         const lib_auv_proteus_hwd = b.addSystemCommand(&.{cxx});
         lib_auv_proteus_hwd.addArgs(&.{ "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra", "-Werror" });
@@ -196,8 +254,16 @@ pub fn build(b: *std.Build) !void {
 
         lib_auv_proteus_hwd.addArg("-o");
         const lib_auv_proteus_hwd_so = lib_auv_proteus_hwd.addOutputFileArg("libauv_proteus_hwd.so");
+        if (zed_rtp) {
+            lib_auv_proteus_hwd.addArg("-DAUV_STANDARD_RTP");
+            lib_auv_proteus_hwd.addFileArg(b.path("auvs/proteus_hwd/rtp_relay.cpp"));
+            lib_auv_proteus_hwd.addFileInput(b.path("auvs/proteus_hwd/rtp_relay.hpp"));
+        }
         lib_auv_proteus_hwd.addFileArg(b.path("auvs/proteus_hwd/auv.cpp"));
+        lib_auv_proteus_hwd.addFileArg(b.path("auvs/proteus_hwd/object_map.cpp"));
         lib_auv_proteus_hwd.addFileArg(b.path("auvs/proteus_hwd/arduino.cpp"));
+        lib_auv_proteus_hwd.addFileInput(b.path("auvs/proteus_hwd/object_map.hpp"));
+        lib_auv_proteus_hwd.addFileInput(b.path("auvs/proteus_hwd/coordinates.hpp"));
         lib_auv_proteus_hwd.addFileInput(b.path("auvs/proteus_hwd/arduino.hpp"));
         lib_auv_proteus_hwd.addFileInput(b.path("include/auv.h"));
         lib_auv_proteus_hwd.addFileInput(b.path("include/object_classes.h"));
@@ -217,6 +283,12 @@ pub fn build(b: *std.Build) !void {
             "-lcuda",
             "-pthread",
         });
+
+        if (zed_rtp) {
+            const flags = b.run(&.{ "pkg-config", "--cflags", "--libs", "gstreamer-app-1.0" });
+            var parts = std.mem.tokenizeAny(u8, flags, " \t\r\n");
+            while (parts.next()) |part| lib_auv_proteus_hwd.addArg(part);
+        }
 
         const install_lib_auv_proteus_hwd = b.addInstallFileWithDir(lib_auv_proteus_hwd_so, .lib, "libauv_proteus_hwd.so");
         b.getInstallStep().dependOn(&install_lib_auv_proteus_hwd.step);
