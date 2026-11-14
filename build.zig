@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     const viewer_mod = b.createModule(.{
-        .root_source_file = b.path("tools/viewer/main.zig"),
+        .root_source_file = b.path("viewer/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) !void {
             "-o",
         });
         const video_object = compile_video.addOutputFileArg("viewer_video.o");
-        compile_video.addFileArg(b.path("tools/viewer/video.cpp"));
+        compile_video.addFileArg(b.path("viewer/video.cpp"));
         viewer.root_module.addObjectFile(video_object);
         viewer.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{zed_prefix}) });
         viewer.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib64", .{cuda_prefix}) });
@@ -89,14 +89,14 @@ pub fn build(b: *std.Build) !void {
     } else if (viewer_gstreamer) {
         viewer.root_module.link_libcpp = true;
         viewer.root_module.addCSourceFile(.{
-            .file = b.path("tools/viewer/video_gstreamer.cpp"),
+            .file = b.path("viewer/video_gstreamer.cpp"),
             .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" },
         });
         viewer.root_module.linkSystemLibrary("gstreamer-app-1.0", .{ .use_pkg_config = .force });
         viewer.root_module.linkSystemLibrary("gstreamer-video-1.0", .{ .use_pkg_config = .force });
     } else {
         viewer.root_module.addCSourceFile(.{
-            .file = b.path("tools/viewer/video_stub.cpp"),
+            .file = b.path("viewer/video_stub.cpp"),
             .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" },
         });
         viewer.root_module.linkSystemLibrary("stdc++", .{});
@@ -128,7 +128,7 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_exe_tests.step);
 
     const viewer_ui_test_mod = b.createModule(.{
-        .root_source_file = b.path("tools/viewer/ui.zig"),
+        .root_source_file = b.path("viewer/ui.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -163,7 +163,7 @@ pub fn build(b: *std.Build) !void {
             .link_libc = true,
             .link_libcpp = true,
         });
-        for ([_][]const u8{ "tests/rtp_stream_test.cpp", "tools/viewer/video_gstreamer.cpp", "auvs/proteus_hwd/rtp_relay.cpp" }) |path| {
+        for ([_][]const u8{ "tests/rtp_stream_test.cpp", "viewer/video_gstreamer.cpp", "auvs/proteus_hwd/rtp_relay.cpp" }) |path| {
             rtp_test_mod.addCSourceFile(.{ .file = b.path(path), .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } });
         }
         rtp_test_mod.linkSystemLibrary("gstreamer-app-1.0", .{ .use_pkg_config = .force });
