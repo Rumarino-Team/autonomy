@@ -10,12 +10,12 @@ sys.path.insert(0,str(root.parents[1]/"tools"))
 from data_binary import read
 manifest = read(root / "data/robots/manifest.bin",kind="metadata")
 assert [r["name"] for r in manifest["robots"]] == ["hydrus", "proteus", "bluerov", "girona500"]
-source = (root / "robots.cpp").read_text()
+source = (root / "zig/robot_data.zig").read_text()
 for robot in manifest["robots"]:
     asset = root / "data" / robot["asset"]
     digest = hashlib.sha256(asset.read_bytes()).digest()
     assert digest.hex() == robot["asset_sha256"], f"changed saved asset: {asset}"
-    pattern = rf"constinit const Robot {robot['name']}\{{.*?\.asset_hash\s*=\s*\{{(.*?)\}}"
+    pattern = rf"pub const {robot['name']} = blk: \{{.*?robot\.asset_hash = \.{{(.*?)\}};"
     match = re.search(pattern, source, re.S)
     assert match, f"missing compiled definition: {robot['name']}"
     compiled_digest = bytes(int(h, 16) for h in re.findall(r"0x([0-9a-fA-F]{2})", match[1]))

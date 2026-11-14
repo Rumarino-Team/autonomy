@@ -8,6 +8,12 @@ commands, reload ownership, binary reports, and validation. Native C interfaces
 described below remain available.
 
 
+The simulator core, scene snapshot loader, AUV adapter, and MuJoCo backend are
+implemented in `zig/`. They retain the shared C headers and ABI v5. The core and
+adapter require libc; the backend additionally links MuJoCo through its C API.
+MuJoCo itself remains the pinned native engine. The independent C++ binary codec
+is used only by interoperability tests, not by either runtime library.
+
 This is the programmatic-scene simulator in the isolated `tmp2/autonomy`
 checkout, branch `codex/data-oriented-simulator-core`. `BASE_COMMIT.txt` records
 its `main` base and MuJoCo revision. The implementation started from the four
@@ -29,7 +35,7 @@ build/simulator/auvs/simulator/simulator_c_example \
 ```
 
 The default build fetches the pinned MuJoCo revision. An existing matching
-installation can be selected with `SIMULATOR_MUJOCO_PREFIX`. Python 3 and Zig 0.16
+installation can be selected with `SIMULATOR_MUJOCO_PREFIX`. Python 3 and Zig 0.17.1
 run validation; ROS/colcon and Stonefish dependencies are not needed. Existing
 Stonefish targets are opt-in through `SIMULATOR_ENABLE_STONEFISH` and are outside
 this delivery's fuzz implementation and validation.
@@ -94,7 +100,7 @@ mass. Wrenches use world axes and act at COM; their ID is the external body ID.
 
 ## Robot presets
 
-`robots.h` exposes four immutable templates defined in `robots.cpp`: `hydrus`
+`robots.h` exposes four immutable templates defined in `zig/robot_data.zig`: `hydrus`
 (five colliders, eight thrusters, five fluid hulls), `proteus` (one/six/one),
 `bluerov` (one/eight/one), and `girona500` (one/five/one). Each includes its
 physical body, local collision geometry, calibrated fluid surfaces, ordered

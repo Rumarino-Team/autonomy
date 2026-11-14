@@ -1,5 +1,5 @@
 #include "scene_presets.h"
-#include "../data_binary.hpp"
+#include "data_binary.hpp"
 using V = autonomy::data::Value;
 #include <cmath>
 #include <cstring>

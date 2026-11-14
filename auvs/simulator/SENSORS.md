@@ -21,9 +21,7 @@ From `/home/cesar/tmp2/autonomy`:
 zig build -Dsimulator=true
 
 # MuJoCo is the default backend next to the installed AUV plugin.
-./zig-out/bin/src_3 \
-  "$PWD/zig-out/lib/libauv_simulator.so" prequalify_robosub \
-  "$PWD/zig-out/share/autonomy/simulator/config/hydrus.json"
+./zig-out/bin/src_3 run
 
 ```
 
@@ -33,12 +31,13 @@ opening target, a marker, and a floor. The saved Hydrus optical camera faces bod
 is in front of it. Only visible targets enter the mocked camera detections.
 The current mission passes the opening, circles the marker, and returns to its
 circle starting position. This is a headless run, without rendered images or a
-viewer. Normal Zig controller logs show progress; shutdown prints a JSON summary
-with ticks, final diagnostic hash, depth bounds, and status.
+viewer. Normal Zig controller logs show progress; shutdown prints a text summary
+with ticks, final diagnostic hash, depth bounds, and status. Set `run_result_path`
+in the Zig configuration to save an AUVDATA1 binary result.
 
 `-Dsimulator=true` builds/installs the core, AUV plugin, MuJoCo backend/native library,
 headers, assets, and Hydrus controller config. It requires native Linux, Zig
-0.16, and the simulator's existing native build dependencies. No ROS, camera SDK,
+0.17.1, and the simulator's existing native build dependencies. No ROS, camera SDK,
 or hardware connection is used. The normal build and existing plugin choices
 remain available.
 
@@ -134,7 +133,8 @@ Thruster slots/counts retain preset ordering. Commands are normalized shaft-spee
 requests in [-1,1]; the adapter rejects invalid counts/non-finite/out-of-range
 values and applies no extra scaling. Commands are held between controller frames.
 
-Defaults and environment settings:
+Defaults and environment settings for direct native `auv_init` callers (the Zig
+host uses compiled configuration and explicit scene/options calls instead):
 
 - `AUTONOMY_SIM_ROBOT=hydrus`: also supports proteus, bluerov, girona500.
 - `AUTONOMY_SIM_SCENE=robosub_course`: `robot_only` omits scenery.
@@ -159,9 +159,11 @@ its config with `simulator_controller_config` and the calibration test after
 changing the preset. Other presets pass bridge tests; their mission tuning is
 not supplied here.
 
-Plugin reload initializes a fresh world and resets controller history. Core,
-backend, or shared-layout changes require a process restart. Model edits apply
-when building a new scene; saved Blender edits are not loaded automatically.
+Application-library reload can retain the native world and controller history
+when `reload.preserve_state` is enabled. Reloads with preservation disabled create
+a fresh world. Core, backend, or shared-layout changes require a process restart.
+Model edits apply when building a new scene; saved Blender edits are not loaded
+automatically. See the root [usage guide](../../README.md) for both reload modes.
 
 The scene and backend ABI is now v5 and rejects v4. Rebuild/install all simulator
 artifacts together. ASIMSC03 and worker protocol v2 remain physics-only: sensors,

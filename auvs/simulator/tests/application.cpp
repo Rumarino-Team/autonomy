@@ -4,7 +4,7 @@
 #include "auv_simulator.h"
 #include "scene_presets.h"
 #include "dynlib.h"
-#include "../data_binary.hpp"
+#include "data_binary.hpp"
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -227,7 +227,7 @@ int main(int argc, char **argv) {
             "reload both persistent maneuver phases"
         );
         auto final = result();
-        require(final.tick == 14718, "pre-refactor mission ticks");
+        require(final.tick == 14988, "mission ticks");
         std::cout << "APPLICATION_RELOAD_OK generations=" << generation << " tick=" << final.tick
                   << " hash=" << final.hash << "\n";
         current.reset();

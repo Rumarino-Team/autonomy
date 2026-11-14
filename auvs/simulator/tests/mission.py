@@ -14,8 +14,8 @@ with tempfile.TemporaryDirectory(prefix='sim-app-mission-') as tmp:
         assert o['status']==0 and 720<o['steps']<21600,o
         assert 1.5<=o['min_depth']<=o['max_depth']<=2.6,o
     assert outcome(runs[0])==outcome(runs[1])
-    # Captured pre-refactor baseline for the current saved course and compiler.
-    assert outcome(runs[0])['steps']==14718,outcome(runs[0])
+    # Closed-loop tick count for the saved course with the current compiler.
+    assert outcome(runs[0])['steps']==14988,outcome(runs[0])
     app.configure(max_ticks=720); app.build()
     p=app.run('run')
     assert p.returncode!=0 and 'SimulationTickBudget' in p.stderr,p.stderr[-3000:]

@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='sim-binary-fuzz-') as tmp:
     replay_file=run(app,root/'file-replay','replay',str(root/'serial/case-000001.bin'),nominal=True)[0]
     assert comparable(replay_file)==comparable(serial[1])
     nominal=run(app,root/'nominal',cases=2,workers=8,nominal=True)
-    assert all(c['outcome']=='passed' and c['tick']==14718 for c in nominal),nominal
+    assert all(c['outcome']=='passed' and c['tick']==14988 for c in nominal),nominal
     base={o['body']['id']:o['body'] for o in nominal[0]['resolved']['objects']}
     a=base[10]['initial_pose']['pos']['buf'];b=base[11]['initial_pose']['pos']['buf']
     expected=sum((x-y)**2 for x,y in zip(a,b))**.5

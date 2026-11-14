@@ -125,6 +125,63 @@ pub fn build(b: *std.Build) !void {
     const auv_c_mod = auv_c.createModule();
     const sim_c_mod = sim_c.createModule();
     const application_c_mod = application_c.createModule();
+    const simulator_core_mod = b.createModule(.{
+        .root_source_file = b.path("auvs/simulator/zig/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    simulator_core_mod.addImport("sim_c", sim_c_mod);
+    simulator_core_mod.addImport("binary_data", b.createModule(.{
+        .root_source_file = b.path("src/BinaryData.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const simulator_core = b.addLibrary(.{
+        .name = "simulator_core",
+        .linkage = .dynamic,
+        .root_module = simulator_core_mod,
+    });
+    simulator_core_mod.linkSystemLibrary("dl", .{});
+    const simulator_core_step = b.step("simulator-core", "Build the Zig simulator core shared library");
+    simulator_core_step.dependOn(&b.addInstallArtifact(simulator_core, .{}).step);
+    const auv_simulator_mod = b.createModule(.{
+        .root_source_file = b.path("auvs/simulator/zig/plugin.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    auv_simulator_mod.addImport("sim_c", sim_c_mod);
+    auv_simulator_mod.addImport("auv_c", auv_c_mod);
+    auv_simulator_mod.linkLibrary(simulator_core);
+    auv_simulator_mod.addRPathSpecial("$ORIGIN");
+    const auv_simulator = b.addLibrary(.{
+        .name = "auv_simulator",
+        .linkage = .dynamic,
+        .root_module = auv_simulator_mod,
+    });
+    simulator_core_step.dependOn(&b.addInstallArtifact(auv_simulator, .{}).step);
+    const mujoco_include = b.option([]const u8, "mujoco-include", "MuJoCo C header directory") orelse "build/simulator/_deps/simulator_mujoco-src/include";
+    const mujoco_library = b.option([]const u8, "mujoco-library", "Pinned MuJoCo shared library") orelse "build/simulator/lib/libmujoco.so";
+    const mujoco_c = b.addTranslateC(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ mujoco_include, "mujoco/mujoco.h" }) },
+        .target = target,
+        .optimize = optimize,
+    });
+    mujoco_c.addIncludePath(.{ .cwd_relative = mujoco_include });
+    const mujoco_mod = b.createModule(.{
+        .root_source_file = b.path("auvs/simulator/zig/mujoco.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mujoco_mod.addImport("sim_c", sim_c_mod);
+    mujoco_mod.addImport("mujoco_c", mujoco_c.createModule());
+    mujoco_mod.linkLibrary(simulator_core);
+    mujoco_mod.addObjectFile(.{ .cwd_relative = mujoco_library });
+    mujoco_mod.addRPathSpecial("$ORIGIN");
+    const mujoco_backend = b.addLibrary(.{ .name = "simulator_backend_mujoco", .linkage = .dynamic, .root_module = mujoco_mod });
+    b.step("simulator-mujoco", "Build the Zig MuJoCo backend against its pinned C library").dependOn(&b.addInstallArtifact(mujoco_backend, .{}).step);
     exe.root_module.addImport("auv_c", auv_c_mod);
     exe.root_module.addImport("sim_c", sim_c_mod);
     exe.root_module.addImport("application_c", application_c_mod);
@@ -379,8 +436,13 @@ pub fn build(b: *std.Build) !void {
         }
         const build_simulator = b.addSystemCommand(&.{ "cmake", "--build", "build/simulator", "--target", "simulator_all", "--parallel", b.fmt("{d}", .{@min(cpu_count, 8)}) });
         build_simulator.step.dependOn(&configure_simulator.step);
-        const install_prefix = if (@hasDecl(@TypeOf(b.*), "getInstallPath")) b.getInstallPath(.prefix, "") else "zig-out";
-        const install_simulator = b.addSystemCommand(&.{ "cmake", "--install", "build/simulator", "--prefix", install_prefix, "--component", "simulator" });
+        const install_simulator = b.addSystemCommand(&.{ "cmake", "--install", "build/simulator", "--prefix" });
+        if (@hasDecl(std.Build, "getInstallPath")) {
+            install_simulator.addArg(b.getInstallPath(.prefix, ""));
+        } else {
+            install_simulator.addDirectoryArg(.{ .relative = .{ .base = .install_prefix } });
+        }
+        install_simulator.addArgs(&.{ "--component", "simulator" });
         install_simulator.step.dependOn(&build_simulator.step);
         b.getInstallStep().dependOn(&install_simulator.step);
     }

@@ -218,6 +218,7 @@ pub export fn autonomy_application_api(version: u32) callconv(.c) ?*const Abi.Ap
 }
 
 test {
+    _ = @import("AckermannControl.zig");
     _ = @import("Pid.zig");
     _ = @import("BinaryData.zig");
     _ = @import("SceneContext.zig");

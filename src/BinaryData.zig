@@ -140,6 +140,41 @@ pub const Decoder = struct {
         if (n > max_elements or n > d.bytes.len -| d.offset) return error.BinaryLimit;
         return n;
     }
+    fn allocate(d: *Decoder, comptime T: type, n: usize) ![]T {
+        const size = std.math.mul(usize, @sizeOf(T), n) catch return error.BinaryLimit;
+        if (size > max_bytes -| d.allocated) return error.BinaryLimit;
+        d.allocated += size;
+        return d.allocator.alloc(T, n);
+    }
+    pub fn dynamic(d: *Decoder) anyerror!Value {
+        if (d.depth >= 64 or d.nodes >= max_elements) return error.BinaryLimit;
+        d.nodes += 1;
+        d.depth += 1;
+        defer d.depth -= 1;
+        return switch (try d.tag()) {
+            .null_value => .null_value,
+            .boolean => blk: {
+                const b = try d.number(u8);
+                if (b > 1) return error.InvalidBinaryBoolean;
+                break :blk .{ .boolean = b == 1 };
+            },
+            .signed => .{ .signed = try d.number(i64) },
+            .unsigned => .{ .unsigned = try d.number(u64) },
+            .float => .{ .float = @bitCast(try d.number(u64)) },
+            .bytes => .{ .bytes = try d.text() },
+            .enumeration => .{ .enumeration = try d.text() },
+            .sequence => blk: {
+                const items = try d.allocate(Value, try d.count());
+                for (items) |*item| item.* = try d.dynamic();
+                break :blk .{ .sequence = items };
+            },
+            .record => blk: {
+                const fields = try d.allocate(Value.Field, try d.count());
+                for (fields) |*field| field.* = .{ .name = try d.text(), .value = try d.dynamic() };
+                break :blk .{ .record = fields };
+            },
+        };
+    }
     pub fn value(d: *Decoder, comptime T: type) anyerror!T {
         if (d.depth >= 64 or d.nodes >= max_elements) return error.BinaryLimit;
         d.nodes += 1;
@@ -231,6 +266,26 @@ pub const Decoder = struct {
         }
     }
 };
+/// Dynamic interchange records, for schemas with optional or unordered fields.
+/// Strings borrow the input; child arrays use the decoder allocator (normally an arena).
+pub const Value = union(Tag) {
+    null_value,
+    boolean: bool,
+    signed: i64,
+    unsigned: u64,
+    float: f64,
+    bytes: []const u8,
+    sequence: []Value,
+    record: []Field,
+    enumeration: []const u8,
+
+    pub const Field = struct { name: []const u8, value: Value };
+    pub fn field(v: *const Value, name: []const u8) ?*const Value {
+        if (v.* != .record) return null;
+        for (v.record) |*f| if (std.mem.eql(u8, f.name, name)) return &f.value;
+        return null;
+    }
+};
 pub const Payload = struct { kind: Kind, schema: u32, bytes: []const u8 };
 pub fn pack(allocator: std.mem.Allocator, kind: Kind, schema: u32, v: anytype) ![]u8 {
     var e: Encoder = .{ .allocator = allocator };
@@ -266,6 +321,14 @@ pub fn decode(allocator: std.mem.Allocator, comptime T: type, bytes: []const u8,
     if (d.offset != d.bytes.len) return error.TrailingBinaryData;
     return out;
 }
+pub fn decodeDynamic(allocator: std.mem.Allocator, bytes: []const u8, kind: Kind, schema: u32) !Value {
+    const p = try unpack(bytes);
+    if (p.kind != kind or p.schema != schema) return error.UnsupportedBinarySchema;
+    var d: Decoder = .{ .allocator = allocator, .bytes = p.bytes };
+    const out = try d.dynamic();
+    if (d.offset != d.bytes.len) return error.TrailingBinaryData;
+    return out;
+}
 pub fn writeFile(io: Io, allocator: std.mem.Allocator, path: []const u8, kind: Kind, v: anytype) !void {
     const data = try pack(allocator, kind, 1, v);
     defer allocator.free(data);
@@ -295,6 +358,31 @@ test "binary round trip excludes padding and bounds malformed input" {
     try std.testing.expectError(error.TruncatedBinary, unpack(data[0 .. data.len - 1]));
     data[data.len - 1] ^= 1;
     try std.testing.expectError(error.BinaryChecksum, unpack(data));
+}
+
+test "dynamic interchange preserves numeric types, optional fields and bounds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const Input = struct { extra: ?u8, id: u64, values: [2]i64, name: []const u8, kind: Kind };
+    const data = try pack(allocator, .scene, 1, Input{ .extra = null, .id = std.math.maxInt(u64), .values = .{ -7, 4 }, .name = "mesh", .kind = .scene });
+    const value = try decodeDynamic(allocator, data, .scene, 1);
+    try std.testing.expectEqual(std.math.maxInt(u64), value.field("id").?.unsigned);
+    try std.testing.expectEqual(@as(i64, -7), value.field("values").?.sequence[0].signed);
+    try std.testing.expectEqualStrings("mesh", value.field("name").?.bytes);
+    try std.testing.expectEqualStrings("scene", value.field("kind").?.enumeration);
+    try std.testing.expect(value.field("extra").?.* == .null_value);
+    try std.testing.expect(value.field("missing") == null);
+    try std.testing.expectError(error.UnsupportedBinarySchema, decodeDynamic(allocator, data, .state, 1));
+    var too_many: Decoder = .{ .allocator = allocator, .bytes = &.{ @intFromEnum(Tag.sequence), 255, 255, 255, 255 } };
+    try std.testing.expectError(error.BinaryLimit, too_many.dynamic());
+    var unknown: Decoder = .{ .allocator = allocator, .bytes = &.{255} };
+    try std.testing.expectError(error.InvalidBinaryTag, unknown.dynamic());
+    var nested: [64 * 5 + 1]u8 = undefined;
+    for (0..64) |i| @memcpy(nested[i * 5 ..][0..5], &[_]u8{ @intFromEnum(Tag.sequence), 1, 0, 0, 0 });
+    nested[nested.len - 1] = @intFromEnum(Tag.null_value);
+    var too_deep: Decoder = .{ .allocator = allocator, .bytes = &nested };
+    try std.testing.expectError(error.BinaryLimit, too_deep.dynamic());
 }
 
 fn dump(d: *Decoder, w: *Io.Writer, depth: usize) anyerror!void {

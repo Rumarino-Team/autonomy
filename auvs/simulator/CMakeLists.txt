@@ -2,11 +2,48 @@ enable_language(C)
 
 include(CTest)
 
-add_library(simulator_core SHARED arena_allocator.c dynlib.c sim.cpp runtime.cpp forces.cpp robots.cpp sensors.cpp scene_presets.c scene_snapshot.cpp)
+find_program(SIMULATOR_ZIG_EXECUTABLE zig REQUIRED)
+set(simulator_zig_prefix "${CMAKE_CURRENT_BINARY_DIR}/zig-core")
+set(simulator_zig_cache "${CMAKE_CURRENT_BINARY_DIR}/zig-core-cache")
+if(WIN32)
+    set(simulator_core_staged "${simulator_zig_prefix}/bin/simulator_core.dll")
+    set(auv_simulator_staged "${simulator_zig_prefix}/bin/auv_simulator.dll")
+    set(simulator_core_library "${CMAKE_CURRENT_BINARY_DIR}/simulator_core.dll")
+    set(auv_simulator_library "${CMAKE_CURRENT_BINARY_DIR}/auv_simulator.dll")
+else()
+    set(simulator_core_staged "${simulator_zig_prefix}/lib/libsimulator_core.so")
+    set(auv_simulator_staged "${simulator_zig_prefix}/lib/libauv_simulator.so")
+    set(simulator_core_library "${CMAKE_CURRENT_BINARY_DIR}/libsimulator_core.so")
+    set(auv_simulator_library "${CMAKE_CURRENT_BINARY_DIR}/libauv_simulator.so")
+endif()
+file(GLOB simulator_zig_sources CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/zig/*.zig"
+    "${PROJECT_SOURCE_DIR}/src/BinaryData.zig"
+    "${PROJECT_SOURCE_DIR}/build.zig"
+)
+add_custom_command(
+    OUTPUT "${simulator_core_library}" "${auv_simulator_library}"
+    COMMAND ${SIMULATOR_ZIG_EXECUTABLE} build simulator-core
+            -Doptimize=ReleaseSafe
+            --prefix "${simulator_zig_prefix}"
+            --cache-dir "${simulator_zig_cache}"
+            --summary line
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${simulator_core_staged}" "${simulator_core_library}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${auv_simulator_staged}" "${auv_simulator_library}"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    DEPENDS ${simulator_zig_sources}
+    COMMENT "Building Zig simulator core"
+    VERBATIM
+)
+add_custom_target(simulator_zig_libraries DEPENDS "${simulator_core_library}" "${auv_simulator_library}")
+
+add_library(simulator_core SHARED IMPORTED GLOBAL)
+set_target_properties(simulator_core PROPERTIES IMPORTED_LOCATION "${simulator_core_library}")
+add_dependencies(simulator_core simulator_zig_libraries)
 
 target_include_directories(
     simulator_core
-    PUBLIC
+    INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include/autonomy/simulator>
 )
@@ -14,24 +51,8 @@ target_include_directories(
 # Keep our math.h out of the system <cmath> search path.
 target_compile_options(
     simulator_core
-    PUBLIC
+    INTERFACE
         "-iquote${PROJECT_SOURCE_DIR}/include"
-    PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -ffp-contract=off
-        -fno-fast-math
-)
-
-target_link_libraries(simulator_core PRIVATE ${CMAKE_DL_LIBS})
-
-set_target_properties(
-    simulator_core
-    PROPERTIES
-        C_STANDARD 11
-        C_STANDARD_REQUIRED YES
-        POSITION_INDEPENDENT_CODE YES
 )
 
 option(SIMULATOR_SANITIZE "Enable address/undefined sanitizers" OFF)
@@ -40,26 +61,26 @@ if(SIMULATOR_SANITIZE AND SIMULATOR_THREAD_SANITIZE)
     message(FATAL_ERROR "ASan and TSan need separate builds")
 endif()
 if(SIMULATOR_THREAD_SANITIZE)
-    target_compile_options(simulator_core PUBLIC -fsanitize=thread -fno-omit-frame-pointer -g)
-    target_link_options(simulator_core PUBLIC -fsanitize=thread)
+    target_compile_options(simulator_core INTERFACE -fsanitize=thread -fno-omit-frame-pointer -g)
+    target_link_options(simulator_core INTERFACE -fsanitize=thread)
 endif()
 
 if(SIMULATOR_SANITIZE)
     target_compile_options(
         simulator_core
-        PUBLIC
+        INTERFACE
             -fsanitize=address,undefined
             -fno-omit-frame-pointer
     )
 
-    target_link_options(simulator_core PUBLIC -fsanitize=address,undefined)
+    target_link_options(simulator_core INTERFACE -fsanitize=address,undefined)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         # The Zig host preloads ASan. Use the same shared runtime in native
         # clients/workers so exec never mixes static and shared ASan runtimes.
         execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libclang_rt.asan-${CMAKE_SYSTEM_PROCESSOR}.so
             OUTPUT_VARIABLE simulator_asan_runtime OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
         get_filename_component(simulator_asan_runtime_dir "${simulator_asan_runtime}" DIRECTORY)
-        target_link_options(simulator_core PUBLIC -shared-libasan "-Wl,-rpath,${simulator_asan_runtime_dir}")
+        target_link_options(simulator_core INTERFACE -shared-libasan "-Wl,-rpath,${simulator_asan_runtime_dir}")
     endif()
 endif()
 
@@ -120,19 +141,38 @@ else()
     set(SIMULATOR_MUJOCO_INCLUDE "${simulator_mujoco_SOURCE_DIR}/include")
 endif()
 
-add_library(simulator_backend_mujoco SHARED backends/mujoco.cpp)
-
-target_include_directories(simulator_backend_mujoco SYSTEM PRIVATE "${SIMULATOR_MUJOCO_INCLUDE}")
-
-target_link_libraries(simulator_backend_mujoco PRIVATE simulator_core ${SIMULATOR_MUJOCO_LIB})
-
 if(TARGET mujoco)
-    add_custom_command(
-        TARGET simulator_backend_mujoco
-        POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:mujoco> $<TARGET_FILE_DIR:simulator_backend_mujoco>
-    )
+    set(simulator_mujoco_binary "$<TARGET_FILE:mujoco>")
+else()
+    set(simulator_mujoco_binary "${SIMULATOR_MUJOCO_LIB}")
 endif()
+if(WIN32)
+    set(simulator_mujoco_staged "${simulator_zig_prefix}/bin/simulator_backend_mujoco.dll")
+    set(simulator_mujoco_library "${CMAKE_CURRENT_BINARY_DIR}/simulator_backend_mujoco.dll")
+else()
+    set(simulator_mujoco_staged "${simulator_zig_prefix}/lib/libsimulator_backend_mujoco.so")
+    set(simulator_mujoco_library "${CMAKE_CURRENT_BINARY_DIR}/libsimulator_backend_mujoco.so")
+endif()
+add_custom_command(
+    OUTPUT "${simulator_mujoco_library}"
+    COMMAND ${SIMULATOR_ZIG_EXECUTABLE} build simulator-mujoco
+            -Doptimize=ReleaseSafe
+            "-Dmujoco-include=${SIMULATOR_MUJOCO_INCLUDE}"
+            "-Dmujoco-library=${simulator_mujoco_binary}"
+            --prefix "${simulator_zig_prefix}"
+            --cache-dir "${simulator_zig_cache}"
+            --summary line
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${simulator_mujoco_staged}" "${simulator_mujoco_library}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${simulator_mujoco_binary}" "${CMAKE_CURRENT_BINARY_DIR}"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    DEPENDS ${simulator_zig_sources} "${simulator_core_library}" "${simulator_mujoco_binary}"
+    COMMENT "Building Zig MuJoCo backend"
+    VERBATIM
+)
+add_custom_target(simulator_zig_mujoco DEPENDS "${simulator_mujoco_library}")
+add_library(simulator_backend_mujoco SHARED IMPORTED GLOBAL)
+set_target_properties(simulator_backend_mujoco PROPERTIES IMPORTED_LOCATION "${simulator_mujoco_library}")
+add_dependencies(simulator_backend_mujoco simulator_zig_mujoco)
 
 if(SIMULATOR_ENABLE_STONEFISH)
 set(SIMULATOR_STONEFISH_PREFIX "" CACHE PATH "Existing Stonefish installation")
@@ -214,7 +254,7 @@ add_dependencies(simulator_backend_stonefish simulator_stonefish_worker)
 endif()
 
 set(simulator_engines mujoco)
-set(simulator_plugins simulator_core simulator_backend_mujoco)
+set(simulator_plugins simulator_backend_mujoco)
 if(SIMULATOR_ENABLE_STONEFISH)
     list(APPEND simulator_engines stonefish)
     list(APPEND simulator_plugins simulator_backend_stonefish)
@@ -223,6 +263,8 @@ endif()
 add_custom_target(
     simulator_all
     DEPENDS
+    simulator_zig_libraries
+    simulator_zig_mujoco
     ${simulator_plugins}
 )
 
@@ -285,6 +327,10 @@ foreach(engine IN LISTS simulator_engines)
 endforeach()
 
 foreach(target IN LISTS simulator_plugins)
+    get_target_property(simulator_target_imported ${target} IMPORTED)
+    if(simulator_target_imported)
+        continue()
+    endif()
     set_target_properties(
         ${target}
         PROPERTIES
@@ -307,12 +353,24 @@ set_target_properties(
 endif()
 
 install(
+    FILES
+    "${simulator_core_library}"
+    "${auv_simulator_library}"
+    "${simulator_mujoco_library}"
+    DESTINATION lib
+    COMPONENT simulator
+)
+set(simulator_native_plugins ${simulator_plugins})
+list(REMOVE_ITEM simulator_native_plugins simulator_backend_mujoco)
+if(simulator_native_plugins)
+install(
     TARGETS
-    ${simulator_plugins}
+    ${simulator_native_plugins}
     RUNTIME DESTINATION lib
     LIBRARY DESTINATION lib
     COMPONENT simulator
 )
+endif()
 
 if(SIMULATOR_ENABLE_STONEFISH)
 install(TARGETS simulator_stonefish_worker RUNTIME DESTINATION lib COMPONENT simulator)
@@ -581,18 +639,11 @@ install(DIRECTORY data/robots DESTINATION share/autonomy/simulator/data COMPONEN
 install(FILES data/pool_scene.blend DESTINATION share/autonomy/simulator/data COMPONENT simulator)
 install(DIRECTORY data/textures DESTINATION share/autonomy/simulator/data COMPONENT simulator)
 
-add_library(auv_simulator SHARED auv_plugin.cpp)
-target_link_libraries(auv_simulator PRIVATE simulator_core ${CMAKE_DL_LIBS})
-if(WIN32)
-    target_link_libraries(auv_simulator PRIVATE ws2_32)
-endif()
-target_compile_definitions(auv_simulator PRIVATE "SIMULATOR_MUJOCO_BACKEND_FILENAME=\"$<TARGET_FILE_NAME:simulator_backend_mujoco>\"")
-set_target_properties(auv_simulator PROPERTIES CXX_VISIBILITY_PRESET hidden)
-if(UNIX)
-    set_target_properties(auv_simulator PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
-endif()
+add_library(auv_simulator SHARED IMPORTED GLOBAL)
+set_target_properties(auv_simulator PROPERTIES IMPORTED_LOCATION "${auv_simulator_library}")
+add_dependencies(auv_simulator simulator_zig_libraries)
+target_link_libraries(auv_simulator INTERFACE simulator_core)
 add_dependencies(simulator_all auv_simulator)
-install(TARGETS auv_simulator RUNTIME DESTINATION lib LIBRARY DESTINATION lib COMPONENT simulator)
 install(FILES scene_presets.h auv_simulator.h "${PROJECT_SOURCE_DIR}/include/auv.h" "${PROJECT_SOURCE_DIR}/include/object_classes.h"
         DESTINATION include/autonomy/simulator COMPONENT simulator)
 

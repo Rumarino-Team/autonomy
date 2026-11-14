@@ -89,8 +89,9 @@ leaves no callbacks or threads behind. Fuzz workers join before their library ca
 unload. Campaigns pin their application/configuration until completion or cancellation.
 
 Changes to host implementation, public host ABI, or shared host-side math/AUV
-layouts require executable restart and are reported explicitly. Native C/C++ plugin
-reload is outside this boundary. Development watching needs the source checkout
+layouts require executable restart and are reported explicitly. Native simulator
+and hardware libraries, including the Zig-built simulator, are outside this reload
+boundary. Development watching needs the source checkout
 recorded at build time; packaged runs can execute without recompilation.
 
 ## Writing missions

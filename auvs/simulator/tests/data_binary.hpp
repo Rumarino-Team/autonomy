@@ -1,6 +1,6 @@
 #ifndef AUTONOMY_DATA_BINARY_HPP
 #define AUTONOMY_DATA_BINARY_HPP
-// AUVDATA1 interchange, matching src/BinaryData.zig and tools/data_binary.py.
+// Independent test codec, matching src/BinaryData.zig and tools/data_binary.py.
 // Values are encoded by field, never by the C++ object's memory representation.
 #include <bit>
 #include <cmath>
