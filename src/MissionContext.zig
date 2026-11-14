@@ -161,7 +161,6 @@ pub fn yieldUntilNextFrameAndUpdate(ctx: *MissionContext) !void {
 
     var telemetry_frame = &ctx.telemetry_frame;
     telemetry_frame.magic = "AUV1".*;
-    telemetry_frame.abi_version = MissionIO.telemetry_frame_abi_version;
     telemetry_frame.timestamp = ctx.frame.timestamp;
     telemetry_frame.camera_pose = .{
         .pos = ctx.frame.camera_pose.pos,

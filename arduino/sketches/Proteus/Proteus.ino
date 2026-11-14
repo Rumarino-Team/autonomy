@@ -61,17 +61,15 @@ ISR(TIMER1_COMPA_vect) {
 
 const uint8_t PACKET_MAGIC_0 = 0xA5;
 const uint8_t PACKET_MAGIC_1 = 0x5A;
-const uint8_t PACKET_VERSION = 2;
 const uint8_t READY_PACKET_TYPE = 0x80;
 const uint8_t ERROR_PACKET_TYPE = 0xE0;
 const unsigned long COMMAND_TIMEOUT_MS = 500;
 const size_t FLOAT32_SIZE = 4;
-const size_t PACKET_MAX_SIZE = 6 + FLOAT32_SIZE * PINS_COUNT;
+const size_t PACKET_MAX_SIZE = 5 + FLOAT32_SIZE * PINS_COUNT;
 
 enum class ErrorCode : uint8_t {
   InvalidCrc = 1,
   InvalidValue = 2,
-  UnsupportedVersion = 3,
   InvalidCount = 4,
   CommandTimeout = 9,
 };
@@ -114,21 +112,19 @@ uint16_t crc16Ccitt(const uint8_t *data, size_t size) {
 }
 
 void sendReadyPacket() {
-  uint8_t packet[6] = {
-      PACKET_MAGIC_0, PACKET_MAGIC_1, PACKET_VERSION, READY_PACKET_TYPE, 0, 0};
-  const uint16_t crc = crc16Ccitt(packet + 2, 2);
-  packet[4] = static_cast<uint8_t>(crc & 0xFF);
-  packet[5] = static_cast<uint8_t>(crc >> 8);
+  uint8_t packet[5] = {PACKET_MAGIC_0, PACKET_MAGIC_1, READY_PACKET_TYPE, 0, 0};
+  const uint16_t crc = crc16Ccitt(packet + 2, 1);
+  packet[3] = static_cast<uint8_t>(crc & 0xFF);
+  packet[4] = static_cast<uint8_t>(crc >> 8);
   Serial.write(packet, sizeof(packet));
 }
 
 void sendErrorPacket(ErrorCode errorCode, uint8_t detail) {
-  uint8_t packet[8] = {PACKET_MAGIC_0, PACKET_MAGIC_1, PACKET_VERSION,
-                       ERROR_PACKET_TYPE, static_cast<uint8_t>(errorCode),
-                       detail, 0, 0};
-  const uint16_t crc = crc16Ccitt(packet + 2, 4);
-  packet[6] = static_cast<uint8_t>(crc & 0xFF);
-  packet[7] = static_cast<uint8_t>(crc >> 8);
+  uint8_t packet[7] = {PACKET_MAGIC_0, PACKET_MAGIC_1, ERROR_PACKET_TYPE,
+                       static_cast<uint8_t>(errorCode), detail, 0, 0};
+  const uint16_t crc = crc16Ccitt(packet + 2, 3);
+  packet[5] = static_cast<uint8_t>(crc & 0xFF);
+  packet[6] = static_cast<uint8_t>(crc >> 8);
   Serial.write(packet, sizeof(packet));
 }
 
@@ -138,7 +134,7 @@ void neutralizeThrusters() {
 }
 
 void applyThrusterPacket() {
-  const uint8_t count = packetBuffer[3];
+  const uint8_t count = packetBuffer[2];
   const uint16_t receivedCrc = readU16LE(packetBuffer + expectedPacketLength - 2);
   const uint16_t calculatedCrc = crc16Ccitt(packetBuffer + 2, expectedPacketLength - 4);
   if (receivedCrc != calculatedCrc) {
@@ -148,7 +144,7 @@ void applyThrusterPacket() {
 
   float thrustValues[PINS_COUNT] = {};
   for (uint8_t i = 0; i < count; ++i) {
-    const float thrust = readF32LE(packetBuffer + 4 + FLOAT32_SIZE * i);
+    const float thrust = readF32LE(packetBuffer + 3 + FLOAT32_SIZE * i);
     if (!isfinite(thrust)) {
       sendErrorPacket(ErrorCode::InvalidValue, i);
       return;
@@ -182,21 +178,15 @@ void consumeSerialByte(uint8_t value) {
   }
 
   packetBuffer[packetLength++] = value;
-  if (packetLength == 4) {
-    const uint8_t count = packetBuffer[3];
-    if (packetBuffer[2] != PACKET_VERSION) {
-      sendErrorPacket(ErrorCode::UnsupportedVersion, packetBuffer[2]);
-      packetLength = 0;
-      expectedPacketLength = 0;
-      return;
-    }
+  if (packetLength == 3) {
+    const uint8_t count = packetBuffer[2];
     if (count > PINS_COUNT) {
       sendErrorPacket(ErrorCode::InvalidCount, count);
       packetLength = 0;
       expectedPacketLength = 0;
       return;
     }
-    expectedPacketLength = 6 + FLOAT32_SIZE * count;
+    expectedPacketLength = 5 + FLOAT32_SIZE * count;
   }
 
   if (expectedPacketLength != 0 && packetLength == expectedPacketLength) {

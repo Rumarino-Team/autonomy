@@ -332,11 +332,7 @@ pub const SerialBinary = struct {
     pub fn write(w: *Io.Writer, value: anytype) !void {
         const T = @TypeOf(value);
         switch (@typeInfo(T)) {
-            .int => {
-                var buf: [@sizeOf(T)]u8 = undefined;
-                std.mem.writeInt(T, &buf, value, .little);
-                try w.writeAll(&buf);
-            },
+            .int => try w.writeInt(T, value, .little),
             .float => try write(w, @as(u32, @bitCast(value))),
             .bool => try write(w, @as(u8, @intFromBool(value))),
             .@"enum" => |info| try write(w, @as(info.tag_type, @backingInt(value))),
@@ -370,11 +366,7 @@ pub const SerialBinary = struct {
 
     pub fn read(r: *Io.Reader, comptime T: type) !T {
         switch (@typeInfo(T)) {
-            .int => {
-                var buf: [@sizeOf(T)]u8 = undefined;
-                try r.readSliceAll(&buf);
-                return std.mem.readInt(T, &buf, .little);
-            },
+            .int => return try r.takeInt(T, .little),
             .float => return @bitCast(try read(r, u32)),
             .bool => return try read(r, u8) != 0,
             .@"enum" => |info| {
@@ -424,6 +416,143 @@ pub const SerialBinary = struct {
     }
 };
 
+/// Transport-neutral message kinds. UDP carries these as datagrams; TCP adds
+/// a length prefix because TCP itself is a byte stream.
+pub const LogicalMessageKind = enum(u8) {
+    telemetry = 1,
+    teleop = 2,
+    mission_command = 3,
+    live_config = 4,
+    command_ack = 5,
+};
+
+pub const LogicalMessage = struct {
+    kind: LogicalMessageKind,
+    sequence: u32,
+    payload: []const u8,
+};
+
+pub const CommandAckStatus = enum(u8) {
+    rejected = 0,
+    accepted = 1,
+};
+
+pub fn decodeCommandAck(payload: []const u8) !CommandAckStatus {
+    if (payload.len != 1) return error.InvalidLength;
+    return std.enums.fromInt(CommandAckStatus, payload[0]) orelse error.InvalidKind;
+}
+
+pub const LogicalMessageDecodeError = error{
+    BufferTooShort,
+    InvalidLength,
+    BadMagic,
+    InvalidKind,
+    FrameTooLarge,
+};
+
+const logical_message_magic: [4]u8 = "AUVP".*;
+const logical_message_header_len = 4 + 1 + 4 + 2;
+pub const logical_message_max_len = 64 * 1024;
+
+pub fn encodeLogicalMessage(
+    buf: []u8,
+    kind: LogicalMessageKind,
+    sequence: u32,
+    payload: []const u8,
+) ![]const u8 {
+    if (payload.len > std.math.maxInt(u16)) return error.MessageTooLarge;
+    const total_len = logical_message_header_len + payload.len;
+    if (buf.len < total_len) return error.BufferTooSmall;
+    @memcpy(buf[0..4], &logical_message_magic);
+    buf[4] = @backingInt(kind);
+    std.mem.writeInt(u32, buf[5..9], sequence, .little);
+    std.mem.writeInt(u16, buf[9..11], @intCast(payload.len), .little);
+    @memcpy(buf[11..total_len], payload);
+    return buf[0..total_len];
+}
+
+pub fn encodePacket(
+    buffer: []u8,
+    kind: LogicalMessageKind,
+    sequence: u32,
+    value: anytype,
+) ![]const u8 {
+    if (buffer.len < logical_message_header_len) return error.BufferTooSmall;
+
+    var payload_writer: Io.Writer = .fixed(buffer[logical_message_header_len..]);
+    try SerialBinary.write(&payload_writer, value);
+    const payload = payload_writer.buffered();
+    if (payload.len > std.math.maxInt(u16)) return error.MessageTooLarge;
+
+    @memcpy(buffer[0..4], &logical_message_magic);
+    buffer[4] = @backingInt(kind);
+    std.mem.writeInt(u32, buffer[5..9], sequence, .little);
+    std.mem.writeInt(u16, buffer[9..11], @intCast(payload.len), .little);
+    return buffer[0 .. logical_message_header_len + payload.len];
+}
+
+pub fn decodeLogicalMessage(buf: []const u8) LogicalMessageDecodeError!LogicalMessage {
+    if (buf.len < logical_message_header_len) return error.BufferTooShort;
+    if (!std.mem.eql(u8, buf[0..4], &logical_message_magic)) return error.BadMagic;
+    const kind = std.enums.fromInt(LogicalMessageKind, buf[4]) orelse return error.InvalidKind;
+    const payload_len = std.mem.readInt(u16, buf[9..11], .little);
+    if (payload_len > logical_message_max_len - logical_message_header_len)
+        return error.FrameTooLarge;
+    if (buf.len != logical_message_header_len + payload_len) return error.InvalidLength;
+    return .{
+        .kind = kind,
+        .sequence = std.mem.readInt(u32, buf[5..9], .little),
+        .payload = buf[logical_message_header_len..],
+    };
+}
+
+pub const TcpFrameDecoder = struct {
+    bytes: [logical_message_max_len + 4]u8 = undefined,
+    len: usize = 0,
+
+    pub fn feed(self: *TcpFrameDecoder, data: []const u8) !void {
+        if (data.len > self.bytes.len - self.len) return error.FrameTooLarge;
+        @memcpy(self.bytes[self.len..][0..data.len], data);
+        self.len += data.len;
+    }
+
+    pub fn peek(self: *TcpFrameDecoder) !?struct {
+        message: LogicalMessage,
+        consumed: usize,
+    } {
+        if (self.len < 4) return null;
+
+        const frame_len_raw = std.mem.readInt(u32, self.bytes[0..4], .little);
+        const frame_len: usize = @intCast(frame_len_raw);
+        if (frame_len < logical_message_header_len or frame_len > logical_message_max_len)
+            return error.FrameTooLarge;
+
+        const total = 4 + frame_len;
+        if (self.len < total) return null;
+        return .{
+            .message = try decodeLogicalMessage(self.bytes[4..total]),
+            .consumed = total,
+        };
+    }
+
+    pub fn consume(self: *TcpFrameDecoder, count: usize) void {
+        std.debug.assert(count <= self.len);
+        const remaining = self.len - count;
+        std.mem.copyForwards(u8, self.bytes[0..remaining], self.bytes[count..self.len]);
+        self.len = remaining;
+    }
+};
+
+pub fn setSocketNonBlocking(socket: *const Io.net.Socket) !void {
+    if (builtin.os.tag == .windows) return;
+    const current_raw = std.c.fcntl(socket.handle, std.c.F.GETFL);
+    if (current_raw < 0) return error.SetNonBlockingFailed;
+    var current: std.c.O = @bitCast(current_raw);
+    current.NONBLOCK = true;
+    if (std.c.fcntl(socket.handle, std.c.F.SETFL, @as(c_int, @bitCast(current))) < 0)
+        return error.SetNonBlockingFailed;
+}
+
 pub const MissionDiynLoader = struct {
     auv_path: []const u8,
     dynlib: DynLib,
@@ -463,7 +592,6 @@ pub const MissionDiynLoader = struct {
 /// Mutable control values sent by the viewer over the control socket.
 pub const LiveConfigPacket = struct {
     magic: [4]u8 = magic_value,
-    wire_version: u16 = wire_version_value,
     camera_forward: [3]f32,
     rotation_limit: [3]f32,
     tam: [MissionConfig.thruster_count][MissionConfig.tam_cols]f32,
@@ -481,13 +609,11 @@ pub const LiveConfigPacket = struct {
     telemetry_shm_name: MissionConfig.FixedText(MissionConfig.telemetry_shm_name_max),
     telemetry_log_path: MissionConfig.FixedText(MissionConfig.telemetry_log_path_max),
 
-    const wire_version_value: u16 = 3;
     const magic_value: [4]u8 = "MCF1".*;
 
     const DecodeError = error{
         BufferTooShort,
         BadMagic,
-        UnsupportedWireVersion,
         InvalidEnum,
         TooLong,
     };
@@ -501,14 +627,11 @@ pub const LiveConfigPacket = struct {
     };
 
     fn decode(buf: []const u8) DecodeError!LiveConfigPacket {
-        if (buf.len < 4 + 2) return error.BufferTooShort;
+        if (buf.len < 4) return error.BufferTooShort;
         if (!std.mem.eql(u8, buf[0..4], &magic_value)) return error.BadMagic;
-        const version = std.mem.readInt(u16, buf[4..6], .little);
-        if (version != wire_version_value) return error.UnsupportedWireVersion;
 
         const parsed = SerialBinary.readFromBuffer(LiveConfigPacket, buf) catch return error.BufferTooShort;
         if (!std.mem.eql(u8, &parsed.value.magic, &magic_value)) return error.BadMagic;
-        if (parsed.value.wire_version != wire_version_value) return error.UnsupportedWireVersion;
         return parsed.value;
     }
 
@@ -570,7 +693,6 @@ pub const LiveConfigPacket = struct {
     pub fn fromRuntimeConfig(config: *const MissionConfig.MissionConfig) LiveConfigPacket {
         return .{
             .magic = magic_value,
-            .wire_version = wire_version_value,
             .camera_forward = config.camera_forward,
             .rotation_limit = config.rotation_limit,
             .tam = config.tam,
@@ -591,6 +713,7 @@ pub const LiveConfigPacket = struct {
     }
 
     fn applyToRuntimeConfig(dst: *MissionConfig.MissionConfig, packet: LiveConfigPacket) void {
+        const control_port = dst.control_port;
         const teleop_port = dst.teleop_port;
 
         dst.camera_forward = packet.camera_forward;
@@ -610,6 +733,7 @@ pub const LiveConfigPacket = struct {
         dst.telemetry_shm_name = packet.telemetry_shm_name;
         dst.telemetry_log_path = packet.telemetry_log_path;
 
+        dst.control_port = control_port;
         dst.teleop_port = teleop_port;
     }
 };
@@ -622,7 +746,6 @@ pub const Goal = struct {
 /// Runtime telemetry data produced by the mission loop for publication.
 pub const telemetry_step_max = 64;
 pub const telemetry_ring_slot_count = 32;
-pub const telemetry_frame_abi_version: u32 = 2;
 
 pub const TelemetryPose = extern struct {
     pos: [3]f32,
@@ -667,7 +790,6 @@ pub const TelemetryGoal = extern struct {
 /// type can be used for runtime publication, shared memory, UDP, and logs.
 pub const TelemetryFrame = extern struct {
     magic: [4]u8,
-    abi_version: u32,
     timestamp: u64,
     camera_pose: TelemetryPose,
     position_ok: TelemetryAxisOk,
@@ -706,33 +828,10 @@ pub const TelemetryFrame = extern struct {
     attitude_error: [3]f32,
     rotation_limit: [3]f32,
     input: [6]f32,
-
-};
-
-fn layoutMix(h: u64, value: usize) u64 {
-    return h *% 1_000_003 +% @as(u64, @intCast(value));
-}
-
-pub const telemetry_layout_fingerprint: u64 = blk: {
-    var h: u64 = telemetry_frame_abi_version;
-    h = layoutMix(h, @sizeOf(TelemetryFrame));
-    h = layoutMix(h, @alignOf(TelemetryFrame));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "camera_pose"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "objects"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "boxes"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "goals"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "clear_screen"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "cycle_us"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "kp"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "tam"));
-    h = layoutMix(h, @offsetOf(TelemetryFrame, "input"));
-    break :blk h;
 };
 
 const RingHeader = extern struct {
     magic: [4]u8,
-    abi_version: u32,
-    layout_fingerprint: u64,
     owner_pid: u64,
     slot_count: u32,
     slot_size: u32,
@@ -784,10 +883,10 @@ comptime {
     // LiveConfigPacket is serialized field-by-field by SerialBinary. Keep
     // these anchors in order when changing the control wire schema.
     const live_fields = @typeInfo(LiveConfigPacket).@"struct".field_names;
-    if (live_fields.len != 18 or
-        !std.mem.eql(u8, live_fields[2], "camera_forward") or
-        !std.mem.eql(u8, live_fields[14], "telemetry_transport") or
-        !std.mem.eql(u8, live_fields[17], "telemetry_log_path"))
+    if (live_fields.len != 17 or
+        !std.mem.eql(u8, live_fields[1], "camera_forward") or
+        !std.mem.eql(u8, live_fields[13], "telemetry_transport") or
+        !std.mem.eql(u8, live_fields[16], "telemetry_log_path"))
         @compileError("live config packet control fields changed order");
     // TelemetryFrame is shared-memory ABI, so its fixed offsets are part of
     // the viewer/runtime contract.
@@ -844,37 +943,11 @@ pub const TelemetrySubscriber = struct {
 
 fn validateRingHeader(header: *const RingHeader) !void {
     if (!std.mem.eql(u8, &header.magic, "AUVS")) return error.BadMagic;
-    if (header.abi_version != telemetry_frame_abi_version) return error.UnsupportedAbiVersion;
-    if (header.layout_fingerprint != telemetry_layout_fingerprint) return error.LayoutMismatch;
     if (header.slot_count != telemetry_ring_slot_count or header.slot_size != @sizeOf(RingSlot))
         return error.LayoutMismatch;
 }
 
-const live_config_recv_buf_len = 4096;
 const outbound_buf_len = 64 * 1024;
-
-pub const UdpPublisher = struct {
-    socket: Io.net.Socket,
-    dest: Io.net.IpAddress,
-
-    fn init(io: Io, config: MissionConfig.MissionConfig) !UdpPublisher {
-        const dest = try Io.net.IpAddress.parseLiteral(try config.telemetryAddr());
-        const bind_addr: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
-        return .{
-            .socket = try bind_addr.bind(io, .{ .mode = .dgram }),
-            .dest = dest,
-        };
-    }
-
-    fn publishEncoded(self: *UdpPublisher, io: Io, encoded: []const u8) void {
-        self.socket.send(io, &self.dest, encoded) catch {};
-    }
-
-    fn deinit(self: *UdpPublisher, io: Io) void {
-        self.socket.close(io);
-        self.* = undefined;
-    }
-};
 
 pub const SharedMemoryPublisher = struct {
     shared: SharedMemory,
@@ -896,8 +969,6 @@ pub const SharedMemoryPublisher = struct {
         const ring: *RingMemory = @ptrCast(@alignCast(shared.memory.ptr));
         ring.header = .{
             .magic = "AUVS".*,
-            .abi_version = telemetry_frame_abi_version,
-            .layout_fingerprint = telemetry_layout_fingerprint,
             .owner_pid = ownerPid(),
             .slot_count = telemetry_ring_slot_count,
             .slot_size = @sizeOf(RingSlot),
@@ -945,35 +1016,22 @@ pub const StdoutPublisher = struct {
 
 /// Runtime-owned transport selected from the compiled startup configuration.
 pub const TelemetryPublisher = union(TelemetryTransport) {
-    udp: UdpPublisher,
+    udp: void,
     shared_memory: SharedMemoryPublisher,
     stdout: StdoutPublisher,
 
     fn init(io: Io, config: MissionConfig.MissionConfig) !TelemetryPublisher {
         return switch (config.telemetry_transport) {
-            .udp => .{ .udp = try .init(io, config) },
+            .udp => .{ .udp = {} },
             .shared_memory => .{ .shared_memory = try .init(try config.telemetryShmName()) },
             .stdout => .{ .stdout = try .init(io) },
         };
     }
 
-    fn publishEncoded(
-        self: *TelemetryPublisher,
-        io: Io,
-        frame: TelemetryFrame,
-        encoded: ?[]const u8,
-        ascii_encoded: ?[]const u8,
-    ) void {
-        switch (self.*) {
-            .udp => |*publisher| if (encoded) |bytes| publisher.publishEncoded(io, bytes),
-            .shared_memory => |*publisher| publishTelemetryFrame(publisher.ring, &frame),
-            .stdout => |*publisher| if (ascii_encoded) |bytes| publisher.publishEncoded(io, bytes),
-        }
-    }
-
     fn deinit(self: *TelemetryPublisher, io: Io) void {
+        _ = io;
         switch (self.*) {
-            .udp => |*publisher| publisher.deinit(io),
+            .udp => {},
             .shared_memory => |*publisher| publisher.deinit(),
             .stdout => |*publisher| publisher.deinit(),
         }
@@ -1040,9 +1098,8 @@ pub fn encodeTelemetryFrameAscii(buf: []u8, frame: TelemetryFrame) ![]const u8 {
 
     var writer: Io.Writer = .fixed(buf);
     try writer.writeAll("FRAME_BEGIN\n");
-    try writer.print("magic={s}\nabi_version={}\ntimestamp={}\n", .{
+    try writer.print("magic={s}\ntimestamp={}\n", .{
         frame.magic[0..],
-        frame.abi_version,
         frame.timestamp,
     });
     try writer.writeAll("camera_pose.pos=");
@@ -1139,52 +1196,11 @@ pub fn encodeTelemetryFrameAscii(buf: []u8, frame: TelemetryFrame) ![]const u8 {
     return writer.buffered();
 }
 
-pub fn encodeMissionCommand(buf: []u8, command: MissionCommand) ![]const u8 {
-    var writer: Io.Writer = .fixed(buf);
-    var packet = command;
-    try packet.validate();
-    try SerialBinary.write(&writer, packet);
-    return writer.buffered();
-}
-
-fn processTelemetry(
-    io: Io,
-    publisher: *TelemetryPublisher,
-    log_file: ?Io.File,
-    frame: TelemetryFrame,
-    encoded_buf: *[outbound_buf_len]u8,
-    ascii_buf: *[outbound_buf_len]u8,
-    stdout_enabled: bool,
-) void {
-    const encoded: ?[]const u8 = if (publisher.* == .udp or log_file != null)
-        encodeTelemetryFrame(encoded_buf, frame) catch |err| blk: {
-            std.log.err("telemetry encode failed: {s}", .{@errorName(err)});
-            break :blk null;
-        }
-    else
-        null;
-    const ascii_encoded: ?[]const u8 = if (publisher.* == .stdout and stdout_enabled)
-        encodeTelemetryFrameAscii(ascii_buf, frame) catch |err| blk: {
-            std.log.err("telemetry ASCII encode failed: {s}", .{@errorName(err)});
-            break :blk null;
-        }
-    else
-        null;
-
-    publisher.publishEncoded(io, frame, encoded, ascii_encoded);
-    if (log_file) |file| {
-        if (encoded) |bytes| file.writeStreamingAll(io, bytes) catch |err| {
-            std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
-        };
-    }
-}
-
 /// Decode the fixed telemetry frame used by both UDP/log and shared memory.
 pub fn decodeTelemetryFrame(buf: []const u8, frame: *TelemetryFrame) !void {
     var reader: Io.Reader = .fixed(buf);
     frame.* = try SerialBinary.read(&reader, TelemetryFrame);
     if (!std.mem.eql(u8, &frame.magic, "AUV1")) return error.BadMagic;
-    if (frame.abi_version != telemetry_frame_abi_version) return error.UnsupportedAbiVersion;
     if (frame.objects_len > frame.objects.len or frame.boxes_len > frame.boxes.len or
         frame.thrusters_len > frame.thrusters.len or frame.step_len > frame.step.len or
         frame.goals_len > frame.goals.len or frame.tam_len > frame.tam.len)
@@ -1209,7 +1225,6 @@ pub const MissionManeuver = enum(u8) {
 
 pub const MissionCommand = struct {
     magic: [4]u8 = mission_command_magic,
-    wire_version: u16 = mission_command_wire_version,
     kind: MissionCommandKind,
     maneuver: MissionManeuver,
     position: math.Vector3f = @splat(0),
@@ -1220,7 +1235,6 @@ pub const MissionCommand = struct {
         BufferTooShort,
         InvalidLength,
         BadMagic,
-        UnsupportedWireVersion,
         InvalidEnum,
         NonFinite,
         InvalidLookDirection,
@@ -1228,10 +1242,8 @@ pub const MissionCommand = struct {
     };
 
     pub fn decode(buf: []const u8) DecodeError!MissionCommand {
-        if (buf.len < 6) return error.BufferTooShort;
+        if (buf.len < 4) return error.BufferTooShort;
         if (!std.mem.eql(u8, buf[0..4], &mission_command_magic)) return error.BadMagic;
-        if (std.mem.readInt(u16, buf[4..6], .little) != mission_command_wire_version)
-            return error.UnsupportedWireVersion;
 
         const parsed = SerialBinary.readFromBuffer(MissionCommand, buf) catch |err| switch (err) {
             error.InvalidEnum => return error.InvalidEnum,
@@ -1246,7 +1258,6 @@ pub const MissionCommand = struct {
 
     pub fn validate(self: *MissionCommand) DecodeError!void {
         if (!std.mem.eql(u8, &self.magic, &mission_command_magic)) return error.BadMagic;
-        if (self.wire_version != mission_command_wire_version) return error.UnsupportedWireVersion;
         if (self.kind == .point and self.maneuver != .move)
             return error.InvalidPointManeuver;
 
@@ -1265,7 +1276,12 @@ pub const MissionCommand = struct {
 };
 
 const mission_command_magic: [4]u8 = "AUM1".*;
-const mission_command_wire_version: u16 = 1;
+
+const teleop_timeout_ns: i96 = 250 * std.time.ns_per_ms;
+
+fn teleopExpired(received_at: Io.Clock.Timestamp, now: Io.Clock.Timestamp) bool {
+    return received_at.durationTo(now).raw.nanoseconds > teleop_timeout_ns;
+}
 
 pub const Telemetry = struct {
     publisher: TelemetryPublisher,
@@ -1274,8 +1290,14 @@ pub const Telemetry = struct {
     ascii_buf: [outbound_buf_len]u8 = undefined,
     stdout_log_counter: u64 = 0,
     stdout_log_freq_div: u16,
-    control_socket: Io.net.Socket = undefined,
+    telemetry_sequence: u32 = 1,
+    udp: Io.net.Socket,
+    udp_destination: Io.net.IpAddress,
+    server: Io.net.Server,
+    client: ?Io.net.Stream = null,
+    tcp: TcpFrameDecoder = .{},
     teleop_command: ?TeleopCommand = null,
+    last_teleop_at: ?Io.Clock.Timestamp = null,
     mission_command: ?MissionCommand = null,
     live_config_packet: LiveConfigPacket = undefined,
     initial_config_packet: LiveConfigPacket = undefined,
@@ -1288,17 +1310,31 @@ pub const Telemetry = struct {
         var publisher = try TelemetryPublisher.init(io, config);
         errdefer publisher.deinit(io);
 
-        var control_addr_buf: [48]u8 = undefined;
-        const control_addr_text = try std.fmt.bufPrint(&control_addr_buf, "0.0.0.0:{d}", .{config.teleop_port});
-        const control_bind = try Io.net.IpAddress.parseLiteral(control_addr_text);
-        const control_socket = control_bind.bind(io, .{ .mode = .dgram, .protocol = .udp }) catch |err| switch (err) {
+        const udp_destination = try Io.net.IpAddress.parseLiteral(try config.telemetryAddr());
+        const udp_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(config.teleop_port) };
+        var udp = udp_bind.bind(io, .{ .mode = .dgram, .protocol = .udp }) catch |err| switch (err) {
             error.AddressInUse => {
-                std.log.err("control UDP port {d} is already in use", .{config.teleop_port});
+                std.log.err("realtime UDP port {d} is already in use", .{config.teleop_port});
                 return error.AddressInUse;
             },
             else => return err,
         };
-        errdefer control_socket.close(io);
+        errdefer udp.close(io);
+
+        const tcp_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(config.control_port) };
+        var server = tcp_bind.listen(io, .{
+            .mode = .stream,
+            .protocol = .tcp,
+            .reuse_address = true,
+        }) catch |err| switch (err) {
+            error.AddressInUse => {
+                std.log.err("TCP control port {d} is already in use", .{config.control_port});
+                return error.AddressInUse;
+            },
+            else => return err,
+        };
+        errdefer server.deinit(io);
+        try setSocketNonBlocking(&server.socket);
 
         const log_file: ?Io.File = if (try config.telemetryLogPath()) |path|
             try Io.Dir.cwd().createFile(io, path, .{})
@@ -1310,7 +1346,9 @@ pub const Telemetry = struct {
             .publisher = publisher,
             .log_file = log_file,
             .stdout_log_freq_div = config.log_freq_div,
-            .control_socket = control_socket,
+            .udp = udp,
+            .udp_destination = udp_destination,
+            .server = server,
             .initial_config_packet = LiveConfigPacket.fromRuntimeConfig(&config),
         };
         telemetry.refreshLiveConfigPacket(config);
@@ -1320,7 +1358,9 @@ pub const Telemetry = struct {
     pub fn deinit(self: *Telemetry, io: Io) void {
         if (self.log_file) |file| file.close(io);
         self.publisher.deinit(io);
-        self.control_socket.close(io);
+        self.closeClient(io);
+        self.server.deinit(io);
+        self.udp.close(io);
         self.* = undefined;
     }
 
@@ -1359,16 +1399,199 @@ pub const Telemetry = struct {
         }
     }
 
-    pub fn takeTeleopCommand(self: *Telemetry) ?TeleopCommand {
+    fn closeClient(self: *Telemetry, io: Io) void {
+        if (self.client) |*client| client.close(io);
+        self.client = null;
+        self.tcp = .{};
+    }
+
+    fn sendTcp(
+        self: *Telemetry,
+        io: Io,
+        kind: LogicalMessageKind,
+        sequence: u32,
+        value: anytype,
+    ) !void {
+        const client = &(self.client orelse return error.NotConnected);
+        var frame: [logical_message_max_len + 4]u8 = undefined;
+        const packet = try encodePacket(frame[4..], kind, sequence, value);
+        std.mem.writeInt(u32, frame[0..4], @intCast(packet.len), .little);
+        var writer_buffer: [1024]u8 = undefined;
+        var writer = Io.net.Stream.writer(client.*, io, &writer_buffer);
+        try writer.interface.writeAll(frame[0 .. 4 + packet.len]);
+        try writer.interface.flush();
+    }
+
+    pub fn takeTeleopCommand(self: *Telemetry, io: Io) ?TeleopCommand {
         const command = self.teleop_command;
         self.teleop_command = null;
+        if (self.last_teleop_at) |received_at| {
+            const now = Io.Clock.Timestamp.now(io, .awake);
+            if (teleopExpired(received_at, now)) {
+                self.last_teleop_at = null;
+                return .{
+                    .translation = @splat(0),
+                    .orientation = .{ 0, 0, 0, 1 },
+                };
+            }
+        }
+        if (command == null) return null;
         return command;
     }
 
-    pub fn takeMissionCommand(self: *Telemetry) ?MissionCommand {
-        const command = self.mission_command;
-        self.mission_command = null;
-        return command;
+    fn sendCommandAck(self: *Telemetry, io: Io, sequence: u32, accepted: bool) void {
+        const status: CommandAckStatus = if (accepted) .accepted else .rejected;
+        self.sendTcp(io, .command_ack, sequence, status) catch |err| {
+            std.log.debug("TCP command acknowledgement failed: {s}", .{@errorName(err)});
+            self.closeClient(io);
+        };
+    }
+
+    fn processTcpMessage(
+        self: *Telemetry,
+        io: Io,
+        message: LogicalMessage,
+        base: *MissionConfig.MissionConfig,
+        print_stuff: bool,
+    ) bool {
+        switch (message.kind) {
+            .mission_command => {
+                self.mission_command = MissionCommand.decode(message.payload) catch |err| {
+                    if (print_stuff) std.log.debug("mission command rejected: {s}", .{@errorName(err)});
+                    self.sendCommandAck(io, message.sequence, false);
+                    return false;
+                };
+                self.sendCommandAck(io, message.sequence, true);
+            },
+            .live_config => {
+                const packet = LiveConfigPacket.decode(message.payload) catch |err| {
+                    if (print_stuff) std.log.debug("live config rejected: {s}", .{@errorName(err)});
+                    self.sendCommandAck(io, message.sequence, false);
+                    return false;
+                };
+                LiveConfigPacket.validate(&packet) catch |err| {
+                    std.log.warn("live config rejected: {s}", .{@errorName(err)});
+                    self.sendCommandAck(io, message.sequence, false);
+                    return false;
+                };
+                LiveConfigPacket.applyToRuntimeConfig(base, packet);
+                if (print_stuff) std.log.debug("applied live config on TCP control connection", .{});
+                self.sendCommandAck(io, message.sequence, true);
+                return true;
+            },
+            else => {
+                self.sendCommandAck(io, message.sequence, false);
+            },
+        }
+        return false;
+    }
+
+    fn processUdpMessage(self: *Telemetry, io: Io, message: LogicalMessage, print_stuff: bool) void {
+        if (message.kind != .teleop) return;
+        const parsed = SerialBinary.readFromBuffer(TeleopCommand, message.payload) catch |err| {
+            if (print_stuff) std.log.debug("teleop packet rejected: {s}", .{@errorName(err)});
+            return;
+        };
+        if (parsed.consumed != message.payload.len) {
+            if (print_stuff) std.log.debug("teleop packet has trailing bytes", .{});
+            return;
+        }
+        for (parsed.value.translation ++ parsed.value.orientation) |value| {
+            if (!std.math.isFinite(value)) {
+                if (print_stuff) std.log.debug("teleop packet contains non-finite values", .{});
+                return;
+            }
+        }
+        self.teleop_command = parsed.value;
+        self.last_teleop_at = Io.Clock.Timestamp.now(io, .awake);
+    }
+
+    fn pollTcp(
+        self: *Telemetry,
+        io: Io,
+        working: *MissionConfig.MissionConfig,
+        print_stuff: bool,
+    ) bool {
+        const incoming = self.server.accept(io) catch |err| switch (err) {
+            error.WouldBlock => null,
+            else => blk: {
+                if (print_stuff) std.log.warn("TCP control accept failed: {s}", .{@errorName(err)});
+                break :blk null;
+            },
+        };
+        if (incoming) |stream| {
+            self.closeClient(io);
+            var client = stream;
+            setSocketNonBlocking(&client.socket) catch {
+                client.close(io);
+                return false;
+            };
+            self.client = client;
+        }
+
+        const stream = &(self.client orelse return false);
+        var read_buf: [4096]u8 = undefined;
+        var applied = false;
+        var read_count: usize = 0;
+        var parsed_messages: usize = 0;
+        while (read_count < 16 and parsed_messages < 16) : (read_count += 1) {
+            var chunks: [1][]u8 = .{&read_buf};
+            const count = stream.read(io, &chunks) catch |err| switch (err) {
+                error.ConnectionTimedOut => break,
+                else => {
+                    if (print_stuff) std.log.debug("TCP control read failed: {s}", .{@errorName(err)});
+                    self.closeClient(io);
+                    break;
+                },
+            };
+            if (count == 0) {
+                self.closeClient(io);
+                break;
+            }
+            self.tcp.feed(read_buf[0..count]) catch |err| {
+                if (print_stuff) std.log.debug("TCP control buffer failed: {s}", .{@errorName(err)});
+                self.closeClient(io);
+                break;
+            };
+
+            var invalid = false;
+            while (parsed_messages < 16) {
+                const maybe_frame = self.tcp.peek() catch |err| {
+                    if (print_stuff) std.log.debug("TCP control frame rejected: {s}", .{@errorName(err)});
+                    invalid = true;
+                    break;
+                };
+                const frame = maybe_frame orelse break;
+                if (self.processTcpMessage(io, frame.message, working, print_stuff)) applied = true;
+                if (self.client == null) break;
+                self.tcp.consume(frame.consumed);
+                parsed_messages += 1;
+            }
+            if (invalid or self.client == null) break;
+        }
+        return applied;
+    }
+
+    fn pollUdp(self: *Telemetry, io: Io, print_stuff: bool) void {
+        const timeout: std.Io.Timeout = .{ .duration = .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(0),
+        } };
+        var recv_buf: [logical_message_max_len]u8 = undefined;
+        for (0..16) |_| {
+            const msg = self.udp.receiveTimeout(io, &recv_buf, timeout) catch |err| switch (err) {
+                error.Timeout => break,
+                else => {
+                    if (print_stuff) std.log.err("realtime UDP recv: {s}", .{@errorName(err)});
+                    break;
+                },
+            };
+            const message = decodeLogicalMessage(msg.data) catch |err| {
+                if (print_stuff) std.log.debug("realtime UDP packet rejected: {s}", .{@errorName(err)});
+                continue;
+            };
+            self.processUdpMessage(io, message, print_stuff);
+        }
     }
 
     pub fn pollLiveConfig(
@@ -1378,54 +1601,9 @@ pub const Telemetry = struct {
         print_stuff: bool,
         merged_out: *MissionConfig.MissionConfig,
     ) bool {
-        const timeout: std.Io.Timeout = .{ .duration = .{
-            .clock = .awake,
-            .raw = .fromNanoseconds(0),
-        } };
-        var recv_buf: [live_config_recv_buf_len]u8 = undefined;
-        var applied = false;
         var working = base;
-        while (true) {
-            const msg = self.control_socket.receiveTimeout(io, &recv_buf, timeout) catch |err| switch (err) {
-                error.Timeout => break,
-                else => {
-                    if (print_stuff) std.log.err("live config UDP recv: {s}", .{@errorName(err)});
-                    break;
-                },
-            };
-            if (msg.data.len >= mission_command_magic.len and
-                std.mem.eql(u8, msg.data[0..mission_command_magic.len], &mission_command_magic))
-            {
-                self.mission_command = MissionCommand.decode(msg.data) catch |err| {
-                    if (print_stuff) std.log.debug("mission command rejected: {s}", .{@errorName(err)});
-                    continue;
-                };
-                continue;
-            }
-            if (msg.data.len == 7 * @sizeOf(f32)) {
-                var values: [7]f32 = undefined;
-                for (0..values.len) |i| {
-                    const bits = std.mem.readInt(u32, msg.data[i * 4 ..][0..4], .little);
-                    values[i] = @bitCast(bits);
-                }
-                self.teleop_command = .{
-                    .translation = .{ values[0], values[1], values[2] },
-                    .orientation = .{ values[3], values[4], values[5], values[6] },
-                };
-                continue;
-            }
-            const packet = LiveConfigPacket.decode(msg.data) catch |err| {
-                if (print_stuff) std.log.debug("live config UDP decode: {s}", .{@errorName(err)});
-                continue;
-            };
-            LiveConfigPacket.validate(&packet) catch |err| {
-                std.log.warn("live config UDP rejected: {s}", .{@errorName(err)});
-                continue;
-            };
-            LiveConfigPacket.applyToRuntimeConfig(&working, packet);
-            if (print_stuff) std.log.debug("applied live config UDP on control port", .{});
-            applied = true;
-        }
+        self.pollUdp(io, print_stuff);
+        const applied = self.pollTcp(io, &working, print_stuff);
         if (applied) {
             self.refreshLiveConfigPacket(working);
             self.stdout_log_freq_div = working.log_freq_div;
@@ -1434,32 +1612,63 @@ pub const Telemetry = struct {
         return applied;
     }
 
+    pub fn takeMissionCommand(self: *Telemetry) ?MissionCommand {
+        const command = self.mission_command;
+        self.mission_command = null;
+        return command;
+    }
+
     /// Publish one runtime telemetry frame synchronously.
     pub fn publishTelemetry(
         self: *Telemetry,
         io: Io,
         frame: *const TelemetryFrame,
     ) void {
-        if (self.log_file == null) {
-            switch (self.publisher) {
-                .shared_memory => |*publisher| {
-                    publishTelemetryFrame(publisher.ring, frame);
-                    return;
-                },
-                else => {},
-            }
+        switch (self.publisher) {
+            .shared_memory => |*publisher| {
+                publishTelemetryFrame(publisher.ring, frame);
+                if (self.log_file == null) return;
+            },
+            else => {},
         }
+
         self.stdout_log_counter +%= 1;
         const stdout_enabled = self.stdout_log_freq_div != 0 and
             self.stdout_log_counter % self.stdout_log_freq_div == 0;
-        processTelemetry(
-            io,
-            &self.publisher,
-            self.log_file,
-            frame.*,
-            &self.encoded_buf,
-            &self.ascii_buf,
-            stdout_enabled,
-        );
+
+        if (self.log_file) |file| {
+            const encoded = encodeTelemetryFrame(&self.encoded_buf, frame.*) catch |err| {
+                std.log.err("telemetry encode failed: {s}", .{@errorName(err)});
+                return;
+            };
+            file.writeStreamingAll(io, encoded) catch |err| {
+                std.log.err("telemetry log write failed: {s}", .{@errorName(err)});
+            };
+        }
+
+        switch (self.publisher) {
+            .udp => {
+                var datagram: [logical_message_max_len]u8 = undefined;
+                const encoded = encodePacket(
+                    &datagram,
+                    .telemetry,
+                    self.telemetry_sequence,
+                    frame.*,
+                ) catch |err| {
+                    std.log.err("UDP telemetry encode failed: {s}", .{@errorName(err)});
+                    return;
+                };
+                self.telemetry_sequence +%= 1;
+                self.udp.send(io, &self.udp_destination, encoded) catch {};
+            },
+            .stdout => |*publisher| if (stdout_enabled) {
+                const encoded = encodeTelemetryFrameAscii(&self.ascii_buf, frame.*) catch |err| {
+                    std.log.err("telemetry ASCII encode failed: {s}", .{@errorName(err)});
+                    return;
+                };
+                publisher.publishEncoded(io, encoded);
+            },
+            .shared_memory => {},
+        }
     }
 };

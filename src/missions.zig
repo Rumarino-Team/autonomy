@@ -9,7 +9,7 @@ pub fn teleopMission(ctx: *MissionContext) !void {
     var orientation: math.Quaternionf = .{ 0, 0, 0, 1 };
 
     while (true) {
-        if (ctx.telemetry.takeTeleopCommand()) |command| {
+        if (ctx.telemetry.takeTeleopCommand(ctx.io)) |command| {
             const next_translation: math.Vector3f = command.translation;
             const next_orientation: math.Quaternionf = command.orientation;
             const translation_finite = std.math.isFinite(next_translation[0]) and

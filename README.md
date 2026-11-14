@@ -84,12 +84,3 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 zig build viewer -Dviewer-gstreamer
 ./zig-out/bin/viewer --video rtp://0.0.0.0:5612
 ```
-
-## Teleop
-
-Requires SDL2 development files and a graphical desktop session.
-
-```sh
-zig build teleop-sender
-./zig-out/bin/teleop_sender 8080
-```

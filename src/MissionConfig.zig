@@ -74,6 +74,7 @@ pub const MissionProfiles = struct {
 pub const MissionConfig = struct {
     // Startup/control connection. These values must match between the runtime
     // and viewer built from this module.
+    control_port: u16,
     teleop_port: u16,
     telemetry_transport: TelemetryTransport,
     telemetry_addr: FixedText(telemetry_addr_max),
@@ -115,6 +116,7 @@ pub const MissionConfig = struct {
     }
 
     pub const ValidateError = error{
+        InvalidPort,
         InvalidTamLen,
         InvalidQueueCapacity,
         InvalidInteractionCols,
@@ -122,6 +124,7 @@ pub const MissionConfig = struct {
     };
 
     pub fn validate(self: *const MissionConfig) ValidateError!void {
+        if (self.control_port == 0 or self.teleop_port == 0) return error.InvalidPort;
         if (self.tam_len == 0 or self.tam_len > thruster_count) return error.InvalidTamLen;
         if (self.queue_capacity == 0 or self.queue_capacity > queue_capacity_max) return error.InvalidQueueCapacity;
         if (self.ibvs.interaction_cols == 0 or self.ibvs.interaction_cols > max_ibvs_error_cols) return error.InvalidInteractionCols;
@@ -155,7 +158,8 @@ fn presetZeroInteraction() [math.interaction_output_len][max_ibvs_error_cols]f32
 
 fn presetBaseline() MissionConfig {
     return .{
-        .teleop_port = 8080,
+        .control_port = 8080,
+        .teleop_port = 8081,
         .camera_forward = .{ 0, 1, 0 },
         .rotation_limit = .{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) },
         .tam = presetZeroTam(),
@@ -364,4 +368,24 @@ fn assertPreset(comptime name: []const u8, comptime config: MissionConfig) void 
 comptime {
     assertPreset("stonefish_sim", mission_profiles.stonefish_sim);
     assertPreset("proteus_hwd", mission_profiles.proteus_hwd);
+}
+
+test "configured control and realtime ports must be nonzero" {
+    var config = mission_profiles.stonefish_sim;
+    try config.validate();
+    config.control_port = 0;
+    try std.testing.expectError(error.InvalidPort, config.validate());
+    config = mission_profiles.stonefish_sim;
+    config.teleop_port = 0;
+    try std.testing.expectError(error.InvalidPort, config.validate());
+}
+
+test "telemetry transport selection remains configuration-driven" {
+    var config = mission_profiles.stonefish_sim;
+    config.telemetry_transport = .udp;
+    try config.validate();
+    config.telemetry_transport = .shared_memory;
+    try config.validate();
+    config.telemetry_transport = .stdout;
+    try config.validate();
 }

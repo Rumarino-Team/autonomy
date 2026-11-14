@@ -29,25 +29,6 @@ pub fn build(b: *std.Build) !void {
         .file = b.path("auvs/trap_sim/auv.c"),
     });
     b.installArtifact(exe);
-    const teleop_sender = b.addExecutable(.{
-        .name = "teleop_sender",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .link_libcpp = true,
-        }),
-    });
-    teleop_sender.root_module.addCSourceFile(.{
-        .file = b.path("tools/teleop_sender/main.cpp"),
-        .flags = &.{ "-std=c++17", "-Wall", "-Wextra" },
-    });
-    teleop_sender.root_module.linkSystemLibrary("SDL2", .{ .use_pkg_config = .force });
-
-    const install_teleop_sender = b.addInstallArtifact(teleop_sender, .{});
-    const teleop_sender_step = b.step("teleop-sender", "Build the optional SDL2 keyboard teleop sender");
-    teleop_sender_step.dependOn(&install_teleop_sender.step);
-
     const mission_io = b.createModule(.{
         .root_source_file = b.path("src/MissionIO.zig"),
         .target = target,

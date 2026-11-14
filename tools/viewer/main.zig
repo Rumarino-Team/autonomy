@@ -81,33 +81,42 @@ fn pidSliderValue(index: usize, mouse_x: f32, layout: ui.Layout) f32 {
     return ratio * pid_slider_max[index / 6];
 }
 
-fn sendTuning(
+fn sendTcpPacket(
     io: Io,
-    socket: *Io.net.Socket,
-    destination: *const Io.net.IpAddress,
-    packet: MissionIO.LiveConfigPacket,
+    stream: *Io.net.Stream,
+    kind: MissionIO.LogicalMessageKind,
+    sequence: u32,
+    value: anytype,
 ) !void {
-    var buffer: [4096]u8 = undefined;
-    var writer: Io.Writer = .fixed(&buffer);
-    try MissionIO.SerialBinary.write(&writer, packet);
-    try socket.send(io, destination, writer.buffered());
+    var frame: [MissionIO.logical_message_max_len + 4]u8 = undefined;
+    const packet = try MissionIO.encodePacket(frame[4..], kind, sequence, value);
+    std.mem.writeInt(u32, frame[0..4], @intCast(packet.len), .little);
+    var writer_buffer: [1024]u8 = undefined;
+    var writer = Io.net.Stream.writer(stream.*, io, &writer_buffer);
+    try writer.interface.writeAll(frame[0 .. 4 + packet.len]);
+    try writer.interface.flush();
 }
 
-fn sendMissionCommand(
+fn sendTeleop(
     io: Io,
     socket: *Io.net.Socket,
     destination: *const Io.net.IpAddress,
-    command: MissionIO.MissionCommand,
+    sequence: u32,
+    command: MissionIO.TeleopCommand,
 ) !void {
-    var buffer: [64]u8 = undefined;
-    const packet = try MissionIO.encodeMissionCommand(&buffer, command);
-    try socket.send(io, destination, packet);
+    var datagram: [MissionIO.logical_message_max_len]u8 = undefined;
+    const encoded = try MissionIO.encodePacket(
+        &datagram,
+        .teleop,
+        sequence,
+        command,
+    );
+    try socket.send(io, destination, encoded);
 }
 
 fn emptyTelemetry() MissionIO.TelemetryFrame {
     var frame = std.mem.zeroes(MissionIO.TelemetryFrame);
     frame.magic = "AUV1".*;
-    frame.abi_version = MissionIO.telemetry_frame_abi_version;
     frame.camera_pose.quat[3] = 1;
     return frame;
 }
@@ -184,18 +193,6 @@ fn normalizeTranslation(translation: *[3]f32) void {
     }
 }
 
-fn encodeGoal(goal: [7]f32) [28]u8 {
-    var bytes: [28]u8 = undefined;
-    for (goal, 0..) |value, i| {
-        const bits: u32 = @bitCast(value);
-        bytes[i * 4 + 0] = @truncate(bits);
-        bytes[i * 4 + 1] = @truncate(bits >> 8);
-        bytes[i * 4 + 2] = @truncate(bits >> 16);
-        bytes[i * 4 + 3] = @truncate(bits >> 24);
-    }
-    return bytes;
-}
-
 fn drawFollowingGrid(sub: rl.Vector3) void {
     const center_x = @floor(sub.x);
     const center_z = @floor(sub.z);
@@ -216,7 +213,6 @@ fn drawFollowingGrid(sub: rl.Vector3) void {
 
 fn validFrame(frame: *const MissionIO.TelemetryFrame) bool {
     return std.mem.eql(u8, &frame.magic, "AUV1") and
-        frame.abi_version == MissionIO.telemetry_frame_abi_version and
         frame.objects_len <= frame.objects.len and frame.boxes_len <= frame.boxes.len and
         frame.thrusters_len <= frame.thrusters.len and frame.step_len <= frame.step.len and
         frame.goals_len <= frame.goals.len and frame.tam_len <= frame.tam.len;
@@ -235,35 +231,33 @@ pub fn main(init: std.process.Init) !void {
 
     var subscriber: ?MissionIO.TelemetrySubscriber = null;
     defer if (subscriber) |*value| value.deinit();
-    var udp_socket: ?Io.net.Socket = null;
-    defer if (udp_socket) |*socket| socket.close(init.io);
-    switch (compiled_config.telemetry_transport) {
-        .shared_memory => {},
-        .udp => {
-            const bind_addr = try Io.net.IpAddress.parseLiteral(telemetry_addr);
-            udp_socket = bind_addr.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch {
-                std.debug.print("can't listen on telemetry address {s}\n", .{telemetry_addr});
-                return error.UdpOpenFailed;
-            };
-        },
-        .stdout => {},
-    }
+    const realtime_bind = try Io.net.IpAddress.parseLiteral(telemetry_addr);
+    var realtime_socket = realtime_bind.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch {
+        std.debug.print("can't open realtime UDP socket at {s}\n", .{telemetry_addr});
+        return error.UdpOpenFailed;
+    };
+    defer realtime_socket.close(init.io);
 
     const teleop_dest = blk: {
         var address_buf: [48]u8 = undefined;
         const text = try std.fmt.bufPrint(&address_buf, "127.0.0.1:{d}", .{compiled_config.teleop_port});
         break :blk try Io.net.IpAddress.parseLiteral(text);
     };
+    const control_dest = blk: {
+        var address_buf: [48]u8 = undefined;
+        const text = try std.fmt.bufPrint(&address_buf, "127.0.0.1:{d}", .{compiled_config.control_port});
+        break :blk try Io.net.IpAddress.parseLiteral(text);
+    };
     var config_packet = MissionIO.LiveConfigPacket.fromRuntimeConfig(compiled_config);
-    const teleop_bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
-    var teleop_socket: ?Io.net.Socket = teleop_bind.bind(init.io, .{ .mode = .dgram, .protocol = .udp }) catch null;
-    defer if (teleop_socket) |*socket| socket.close(init.io);
-    if (teleop_socket == null)
-        std.debug.print("can't send control commands to 127.0.0.1:{d}\n", .{compiled_config.teleop_port})
-    else if (config.mission_control)
-        std.debug.print("mission commands -> 127.0.0.1:{d}\n", .{compiled_config.teleop_port})
-    else
-        std.debug.print("teleop command -> 127.0.0.1:{d}\n", .{compiled_config.teleop_port});
+    var tcp_stream: ?Io.net.Stream = null;
+    defer if (tcp_stream) |*stream| stream.close(init.io);
+    var tcp_decoder: MissionIO.TcpFrameDecoder = .{};
+    var tcp_sequence: u32 = 1;
+    var tcp_last_connect: f64 = -10;
+    std.debug.print(
+        "realtime UDP -> 127.0.0.1:{d}; TCP control -> 127.0.0.1:{d}\n",
+        .{ compiled_config.teleop_port, compiled_config.control_port },
+    );
 
     const read_video = !videoDisabled(config.video_source);
     rl.setConfigFlags(.{ .window_resizable = true });
@@ -310,6 +304,7 @@ pub fn main(init: std.process.Init) !void {
     var last_source_try: f64 = -10;
     var source_opened_at: f64 = -1;
     var last_teleop: f64 = -1;
+    var teleop_sequence: u32 = 1;
     var mission_target_initialized = false;
     var mission_kind: MissionIO.MissionCommandKind = .point;
     var mission_maneuver: MissionIO.MissionManeuver = .move;
@@ -330,17 +325,84 @@ pub fn main(init: std.process.Init) !void {
     var tune_error_logged = false;
     var mission_error_logged = false;
     var teleop_error_logged = false;
+    var tcp_error_logged = false;
     var pid_drag: ?usize = null;
     defer if (!mission_control) {
-        if (teleop_socket) |*socket| {
-            const neutral = encodeGoal(.{ 0, 0, 0, orientation[0], orientation[1], orientation[2], orientation[3] });
-            socket.send(init.io, &teleop_dest, &neutral) catch {};
-        }
+        const neutral = MissionIO.TeleopCommand{
+            .translation = .{ 0, 0, 0 },
+            .orientation = orientation,
+        };
+        sendTeleop(init.io, &realtime_socket, &teleop_dest, teleop_sequence, neutral) catch {};
     };
 
     while (!rl.windowShouldClose()) {
         telemetry = &udp_telemetry;
         const now = rl.getTime();
+        if (tcp_stream == null and now - tcp_last_connect >= 1) {
+            tcp_last_connect = now;
+            if (control_dest.connect(init.io, .{ .mode = .stream, .protocol = .tcp })) |stream| {
+                var connected = stream;
+                MissionIO.setSocketNonBlocking(&connected.socket) catch {
+                    connected.close(init.io);
+                    return error.SetNonBlockingFailed;
+                };
+                tcp_stream = connected;
+                tcp_decoder = .{};
+                tcp_error_logged = false;
+            } else |err| {
+                if (!tcp_error_logged) {
+                    std.debug.print("TCP control connection failed: {s}\n", .{@errorName(err)});
+                    tcp_error_logged = true;
+                }
+            }
+        }
+        if (tcp_stream) |*stream| {
+            var close_tcp = false;
+            var recv_buf: [4096]u8 = undefined;
+            var read_count: usize = 0;
+            var parsed_messages: usize = 0;
+            while (read_count < 16 and parsed_messages < 16) : (read_count += 1) {
+                var chunks: [1][]u8 = .{&recv_buf};
+                const count = stream.read(init.io, &chunks) catch |err| switch (err) {
+                    error.ConnectionTimedOut => break,
+                    else => {
+                        close_tcp = true;
+                        break;
+                    },
+                };
+                if (count == 0) {
+                    close_tcp = true;
+                    break;
+                }
+                tcp_decoder.feed(recv_buf[0..count]) catch {
+                    close_tcp = true;
+                    break;
+                };
+
+                while (parsed_messages < 16) {
+                    const frame = tcp_decoder.peek() catch {
+                        close_tcp = true;
+                        break;
+                    } orelse break;
+                    if (frame.message.kind == .command_ack) {
+                        const status = MissionIO.decodeCommandAck(frame.message.payload) catch .rejected;
+                        if (status == .accepted) {
+                            tcp_error_logged = false;
+                        } else {
+                            std.debug.print("TCP control command rejected (sequence {d})\n", .{frame.message.sequence});
+                        }
+                    }
+                    tcp_decoder.consume(frame.consumed);
+                    parsed_messages += 1;
+                }
+                if (close_tcp) break;
+            }
+            if (close_tcp) {
+                stream.close(init.io);
+                tcp_stream = null;
+                tcp_decoder = .{};
+            }
+        }
         const layout = ui.Layout.init(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()), read_video);
         if (rl.isKeyPressed(.equal) or rl.isKeyPressed(.kp_add)) font_percent = ui.adjustFontPercent(font_percent, 5);
         if (rl.isKeyPressed(.minus) or rl.isKeyPressed(.kp_subtract)) font_percent = ui.adjustFontPercent(font_percent, -5);
@@ -435,13 +497,15 @@ pub fn main(init: std.process.Init) !void {
                     .clock = .awake,
                     .raw = .fromNanoseconds(0),
                 } };
-                while (true) {
-                    const message = udp_socket.?.receiveTimeout(init.io, &packet, timeout) catch |err| switch (err) {
+                for (0..16) |_| {
+                    const datagram = realtime_socket.receiveTimeout(init.io, &packet, timeout) catch |err| switch (err) {
                         error.Timeout => break,
                         else => break,
                     };
+                    const message = MissionIO.decodeLogicalMessage(datagram.data) catch continue;
+                    if (message.kind != .telemetry) continue;
                     var snapshot: MissionIO.TelemetryFrame = undefined;
-                    MissionIO.decodeTelemetryFrame(message.data, &snapshot) catch continue;
+                    MissionIO.decodeTelemetryFrame(message.payload, &snapshot) catch continue;
                     udp_telemetry = snapshot;
                     last_timestamp = snapshot.timestamp;
                     last_packet = now;
@@ -477,13 +541,17 @@ pub fn main(init: std.process.Init) !void {
 
         if (rl.isKeyPressed(.t)) {
             // Release any held teleoperation translation before leaving teleop mode.
-            if (!mission_control) if (teleop_socket) |*socket| {
-                const neutral = encodeGoal(.{ 0, 0, 0, orientation[0], orientation[1], orientation[2], orientation[3] });
-                socket.send(init.io, &teleop_dest, &neutral) catch {
+            if (!mission_control) {
+                const neutral = MissionIO.TeleopCommand{
+                    .translation = .{ 0, 0, 0 },
+                    .orientation = orientation,
+                };
+                sendTeleop(init.io, &realtime_socket, &teleop_dest, teleop_sequence, neutral) catch {
                     teleop_error_logged = true;
                 };
+                teleop_sequence +%= 1;
                 translation = .{ 0, 0, 0 };
-            };
+            }
             mission_control = !mission_control;
             if (mission_control) mission_target_initialized = false;
             std.debug.print(
@@ -533,8 +601,8 @@ pub fn main(init: std.process.Init) !void {
             };
 
             const clicked_send = mouse_click and rl.checkCollisionPointRec(rl.getMousePosition(), layout.sendButton());
-            if (workspace == .mission and (rl.isKeyPressed(.enter) or clicked_send) and teleop_socket != null and (mission_kind != .point or (mission_target_initialized and last_packet >= 0 and now - last_packet <= 1))) {
-                const command: MissionIO.MissionCommand = switch (mission_kind) {
+            if (workspace == .mission and (rl.isKeyPressed(.enter) or clicked_send) and tcp_stream != null and (mission_kind != .point or (mission_target_initialized and last_packet >= 0 and now - last_packet <= 1))) {
+                var command: MissionIO.MissionCommand = switch (mission_kind) {
                     .point => .{
                         .kind = .point,
                         .maneuver = .move,
@@ -547,15 +615,24 @@ pub fn main(init: std.process.Init) !void {
                         .object_class = mission_object_class,
                     },
                 };
-                if (sendMissionCommand(init.io, &teleop_socket.?, &teleop_dest, command)) |_| {
-                    mission_error_logged = false;
-                    mission_sent = true;
-                } else |_| {
-                    if (!mission_error_logged) std.debug.print("mission command send failed\n", .{});
+                if (command.validate()) |_| {
+                    if (sendTcpPacket(init.io, &tcp_stream.?, .mission_command, tcp_sequence, command)) |_| {
+                        tcp_sequence +%= 1;
+                        mission_error_logged = false;
+                        mission_sent = true;
+                    } else |_| {
+                        if (!mission_error_logged) std.debug.print("mission command send failed\n", .{});
+                        mission_error_logged = true;
+                        if (tcp_stream) |*stream| stream.close(init.io);
+                        tcp_stream = null;
+                        tcp_decoder = .{};
+                    }
+                } else |err| {
+                    if (!mission_error_logged) std.debug.print("mission command validation failed: {s}\n", .{@errorName(err)});
                     mission_error_logged = true;
                 }
             }
-        } else if (!mission_control and teleop_socket != null and now - last_teleop >= teleop_period) {
+        } else if (!mission_control and now - last_teleop >= teleop_period) {
             last_teleop = now;
             translation = .{ 0, 0, 0 };
             if (focused and rl.isKeyDown(.d)) translation[0] += 1;
@@ -579,8 +656,12 @@ pub fn main(init: std.process.Init) !void {
                 orientation[0], orientation[1], orientation[2],
                 orientation[3],
             };
-            const goal_packet = encodeGoal(command);
-            if (teleop_socket.?.send(init.io, &teleop_dest, &goal_packet)) |_| {
+            const teleop_command = MissionIO.TeleopCommand{
+                .translation = .{ command[0], command[1], command[2] },
+                .orientation = .{ command[3], command[4], command[5], command[6] },
+            };
+            if (sendTeleop(init.io, &realtime_socket, &teleop_dest, teleop_sequence, teleop_command)) |_| {
+                teleop_sequence +%= 1;
                 teleop_error_logged = false;
             } else |_| {
                 if (!teleop_error_logged) std.debug.print("teleop send failed\n", .{});
@@ -630,13 +711,17 @@ pub fn main(init: std.process.Init) !void {
                 tune_changed = true;
             }
         }
-        if (tune_changed and teleop_socket != null) {
-            if (sendTuning(init.io, &teleop_socket.?, &teleop_dest, config_packet)) |_| {
+        if (tune_changed and tcp_stream != null) {
+            if (sendTcpPacket(init.io, &tcp_stream.?, .live_config, tcp_sequence, config_packet)) |_| {
+                tcp_sequence +%= 1;
                 tune_error_logged = false;
                 tune_sent = true;
             } else |_| {
                 if (!tune_error_logged) std.debug.print("live tuning send failed\n", .{});
                 tune_error_logged = true;
+                if (tcp_stream) |*stream| stream.close(init.io);
+                tcp_stream = null;
+                tcp_decoder = .{};
             }
         }
 
@@ -736,8 +821,8 @@ pub fn main(init: std.process.Init) !void {
             .video_h = video_h,
             .scene = scene,
             .mission_control = mission_control,
-            .socket_ok = teleop_socket != null,
-            .send_error = teleop_error_logged or mission_error_logged or tune_error_logged,
+            .socket_ok = tcp_stream != null,
+            .send_error = teleop_error_logged or mission_error_logged or tune_error_logged or tcp_error_logged,
             .translation = translation,
             .orientation = orientation,
             .mission_kind = mission_kind,

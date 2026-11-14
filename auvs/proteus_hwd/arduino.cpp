@@ -19,14 +19,13 @@ namespace {
 
 constexpr uint8_t kPacketMagic0 = 0xa5;
 constexpr uint8_t kPacketMagic1 = 0x5a;
-constexpr uint8_t kPacketVersion = 2;
 constexpr uint8_t kReadyPacketType = 0x80;
 constexpr uint8_t kErrorPacketType = 0xe0;
-constexpr size_t kReadyPacketSize = 6;
-constexpr size_t kErrorPacketSize = 8;
+constexpr size_t kReadyPacketSize = 5;
+constexpr size_t kErrorPacketSize = 7;
 constexpr size_t kThrusterCount = 6;
 constexpr size_t kFloat32Size = 4;
-constexpr size_t kCommandPacketMaxSize = 6 + kFloat32Size * kThrusterCount;
+constexpr size_t kCommandPacketMaxSize = 5 + kFloat32Size * kThrusterCount;
 constexpr size_t kCommandQueueCapacity = 32;
 constexpr auto kReadyTimeout = std::chrono::seconds(10);
 constexpr const char *kPort = "/tmp/autonomy-sim/arduino-auv";
@@ -38,7 +37,6 @@ static_assert(std::numeric_limits<float>::is_iec559);
 enum class ErrorCode : uint8_t {
   InvalidCrc = 1,
   InvalidValue = 2,
-  UnsupportedVersion = 3,
   InvalidCount = 4,
   CommandTimeout = 9,
 };
@@ -106,16 +104,10 @@ void consume_rx_byte(uint8_t value) {
   }
 
   rx_packet.push_back(value);
-  if (rx_packet.size() == 4) {
-    if (rx_packet[2] != kPacketVersion) {
-      std::fputs("[arduino] unsupported packet version\n", stderr);
-      rx_packet.clear();
-      rx_expected_size = 0;
-      return;
-    }
-    if (rx_packet[3] == kReadyPacketType)
+  if (rx_packet.size() == 3) {
+    if (rx_packet[2] == kReadyPacketType)
       rx_expected_size = kReadyPacketSize;
-    else if (rx_packet[3] == kErrorPacketType)
+    else if (rx_packet[2] == kErrorPacketType)
       rx_expected_size = kErrorPacketSize;
     else {
       std::fputs("[arduino] unknown packet type\n", stderr);
@@ -135,30 +127,26 @@ void consume_rx_byte(uint8_t value) {
       crc16_ccitt(rx_packet.data() + 2, rx_expected_size - 4);
   if (received_crc != calculated_crc) {
     std::fputs("[arduino] invalid packet CRC\n", stderr);
-  } else if (rx_packet[3] == kReadyPacketType) {
+  } else if (rx_packet[2] == kReadyPacketType) {
     ready_received.store(true, std::memory_order_release);
   } else {
-    switch (static_cast<ErrorCode>(rx_packet[4])) {
+    switch (static_cast<ErrorCode>(rx_packet[3])) {
     case ErrorCode::InvalidCrc:
       std::fputs("[arduino] rejected command with invalid CRC\n", stderr);
       break;
     case ErrorCode::InvalidValue:
       std::fprintf(stderr, "[arduino] invalid float at index %u\n",
-                   rx_packet[5]);
-      break;
-    case ErrorCode::UnsupportedVersion:
-      std::fprintf(stderr, "[arduino] unsupported command version %u\n",
-                   rx_packet[5]);
+                   rx_packet[4]);
       break;
     case ErrorCode::InvalidCount:
-      std::fprintf(stderr, "[arduino] invalid thrust count %u\n", rx_packet[5]);
+      std::fprintf(stderr, "[arduino] invalid thrust count %u\n", rx_packet[4]);
       break;
     case ErrorCode::CommandTimeout:
       std::fputs("[arduino] command timeout; thrusters neutralized\n", stderr);
       break;
     default:
-      std::fprintf(stderr, "[arduino] error %u (detail %u)\n", rx_packet[4],
-                   rx_packet[5]);
+      std::fprintf(stderr, "[arduino] error %u (detail %u)\n", rx_packet[3],
+                   rx_packet[4]);
       break;
     }
   }
@@ -335,15 +323,13 @@ void enqueue_serial_command_packet(const float *values, uint8_t values_len) {
 
   // Command packet layout (all multi-byte fields are little-endian):
   //   bytes 0..1                 magic: A5 5A
-  //   byte  2                    protocol version
-  //   byte  3                    number of thrust values (N)
-  //   bytes 4..(4 + 4*N - 1)     N IEEE-754 float32 thrust values
-  //   bytes (4 + 4*N)..(5 + 4*N) CRC-16 over version, count, and values
-  // Total size: 6 + 4*N bytes (30 bytes when N is 6).
+  //   byte  2                    number of thrust values (N)
+  //   bytes 3..(3 + 4*N - 1)     N IEEE-754 float32 thrust values
+  //   bytes (3 + 4*N)..(4 + 4*N) CRC-16 over count and values
+  // Total size: 5 + 4*N bytes (29 bytes when N is 6).
   CommandPacket packet;
   packet.bytes[packet.size++] = kPacketMagic0;
   packet.bytes[packet.size++] = kPacketMagic1;
-  packet.bytes[packet.size++] = kPacketVersion;
   packet.bytes[packet.size++] = count;
 
   // Add the IEEE-754 float32 values
