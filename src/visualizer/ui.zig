@@ -2,7 +2,7 @@ const std = @import("std");
 const rl = @import("raylib");
 const IO = @import("../MissionIO.zig");
 
-pub const Workspace = enum { runtime, settings, pid_tuner };
+pub const Workspace = enum { runtime, settings };
 pub const Status = enum { disabled, connecting, live, ready, stale, unavailable };
 pub const Rect = rl.Rectangle;
 const bg = color(3, 5, 4, 255);
@@ -98,18 +98,12 @@ pub const Layout = struct {
     gains: Rect,
     observed: Rect,
     update: Rect,
-    panel_a: Rect,
-    // panel_b: Rect,
-    panel_c: Rect,
     pub fn init(w: f32, h: f32, video_enabled: bool) Layout {
         const gap: f32 = if (w < 1200) 8 else 14;
         const margin: f32 = if (w < 1200) 12 else 20;
         const y: f32 = if (w < 1200) 60 else 70;
         const cw = w - 2 * margin;
         const ch = h - y - margin;
-        // const panel_width = (cw - gap) / 2;
-        const panel_upper_height = @floor((ch - gap) * 2 / 3);
-        const panel_lower_height = ch - gap - panel_upper_height;
         const lw = @floor((cw - 2 * gap) * 0.40);
         const mw = @floor((cw - 2 * gap) * 0.18);
         const rw = cw - 2 * gap - lw - mw;
@@ -134,9 +128,6 @@ pub const Layout = struct {
             .goals = empty,
             .observed = empty,
             .update = empty,
-            .panel_a = rect(margin, y, cw, panel_upper_height), // width: changed from "panel_width" for panel_b
-            // .panel_b = rect(margin + panel_width + gap, y, panel_width, panel_upper_height),
-            .panel_c = rect(margin, y + panel_upper_height + gap, cw, panel_lower_height),
         };
     }
     pub fn sceneContent(self: Layout, _: Workspace) Rect {
@@ -398,7 +389,7 @@ fn topbar(d: Data) void {
     box(l.top, sidebar);
     text(d.font, "A", 16, 13, 20, teal);
     text(d.font, "AUTONOMY VIEWER", 42, 14, 15, white);
-    const names = [_][:0]const u8{ "Runtime", "Settings", "PID Tuner" };
+    const names = [_][:0]const u8{ "Runtime", "Settings" };
     for (names, 0..) |name, i| button(d.font, l.navRect(i), name, @backingInt(d.workspace) == i);
     const sx = @max(@as(f32, 545), l.top.width - 470);
     pill(d.font, rect(sx, 14, 108, 28), "TLM", d.telemetry_status);
@@ -476,41 +467,22 @@ fn dashboard(d: Data) void {
         }
     }
 }
-fn pidTuner(d: Data) void {
-    panel(d.layout.panel_a);
-    // title(d.font, "PANEL A", d.layout.panel_a);
-    // panel(d.layout.panel_b);
-    // title(d.font, "PANEL B", d.layout.panel_b);
-    panel(d.layout.panel_c);
-    // title(d.font, "PANEL C", d.layout.panel_c);
-}
 pub fn draw(d: Data) void {
     font_scale = @as(f32, @floatFromInt(d.font_percent)) / 100.0;
     rl.clearBackground(bg);
     topbar(d);
     if (d.workspace == .runtime) dashboard(d);
-    if (d.workspace == .pid_tuner) pidTuner(d);
 }
 
 test "workspace layouts stay within supported window sizes" {
     for ([_][2]f32{ .{ 1000, 700 }, .{ 1280, 1000 }, .{ 1920, 1080 } }) |size| {
         const l = Layout.init(size[0], size[1], true);
-        const panels = [_]Rect{ l.video, l.scene, l.state, l.thrusters, l.controls, l.objects, l.goals, l.editor, l.gains, l.observed, l.update, l.sceneContent(.runtime), l.panel_a, l.panel_c }; //l.panel_b removed
+        const panels = [_]Rect{ l.video, l.scene, l.state, l.thrusters, l.controls, l.objects, l.goals, l.editor, l.gains, l.observed, l.update, l.sceneContent(.runtime) };
         for (panels) |p| {
             try std.testing.expect(p.width > 0 and p.height > 0);
             try std.testing.expect(p.x >= 0 and p.y >= 0);
             try std.testing.expect(p.x + p.width <= size[0] and p.y + p.height <= size[1]);
         }
-        const gap: f32 = if (size[0] < 1200) 8 else 14;
-        const usable_height = l.content.height - gap;
-        try std.testing.expectApproxEqAbs((l.content.width - gap) / 2, l.panel_a.width, 0.001);
-        // try std.testing.expectApproxEqAbs(l.panel_a.width, l.panel_b.width, 0.001);
-        try std.testing.expectApproxEqAbs(@floor(usable_height * 2 / 3), l.panel_a.height, 0.001);
-        // try std.testing.expectApproxEqAbs(l.panel_b.x - l.panel_a.x - l.panel_a.width, gap, 0.001);
-        try std.testing.expectApproxEqAbs(l.panel_c.y - l.panel_a.y - l.panel_a.height, gap, 0.001);
-        try std.testing.expectApproxEqAbs(l.panel_c.width, l.content.width, 0.001);
-        try std.testing.expectApproxEqAbs(usable_height - l.panel_a.height, l.panel_c.height, 0.001);
-        try std.testing.expectApproxEqAbs(l.panel_c.y + l.panel_c.height, l.content.y + l.content.height, 0.001);
         for (0..18) |i| {
             const r = l.pidRect(i);
             try std.testing.expect(r.x >= l.gains.x and r.y >= l.gains.y);
