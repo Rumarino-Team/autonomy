@@ -19,6 +19,24 @@ const red = color(242, 123, 120, 255);
 const axis_names = [_][:0]const u8{ "X", "Y", "Z", "ROLL", "PITCH", "YAW" };
 const groups = [_][:0]const u8{ "P", "I", "D" };
 const gain_max = [_]f32{ 10, 2, 10 };
+const error_plot_gap: f32 = 12;
+const top_grid_square_width: f32 = 28;
+const top_grid_square_height: f32 = 28;
+const bottom_grid_square_width: f32 = 28;
+const bottom_grid_square_height: f32 = 28;
+const plot_x_max: [:0]const u8 = "10";
+const top_plot_y_max: [:0]const u8 = "5";
+const bottom_plot_y_max: [:0]const u8 = "2π";
+const plot_window_ns: u64 = 10_000_000_000;
+const error_plot_names = [_][:0]const u8{
+    "(X) Error",    "(Y) Error",     "(Z) Error",
+    "(Roll) Error", "(Pitch) Error", "(Yaw) Error",
+};
+pub const error_sample_capacity: usize = 2048;
+pub const ErrorSample = struct {
+    timestamp_ns: u64,
+    values: [6]f32,
+};
 pub const min_font_percent: u8 = 80;
 pub const default_font_percent: u8 = 175;
 pub const max_font_percent: u8 = 200;
@@ -52,6 +70,103 @@ fn title(font: rl.Font, s: [:0]const u8, r: Rect) void {
 }
 fn line(x: f32, y: f32, w: f32) void {
     box(rect(x, y, w, 1), border);
+}
+fn errorPlotRect(bounds: Rect, index: usize) Rect {
+    const width = (bounds.width - 4 * error_plot_gap) / 3;
+    const height = (bounds.height - 3 * error_plot_gap) / 2;
+    const column: f32 = @floatFromInt(index % 3);
+    const row: f32 = @floatFromInt(index / 3);
+    return rect(
+        bounds.x + error_plot_gap + column * (width + error_plot_gap),
+        bounds.y + error_plot_gap + row * (height + error_plot_gap),
+        width,
+        height,
+    );
+}
+fn errorSampleAt(d: Data, index: usize) ErrorSample {
+    return d.error_samples[(d.error_sample_start + index) % d.error_samples.len];
+}
+fn errorPlot(d: Data, bounds: Rect, index: usize) void {
+    panel(bounds);
+    title(d.font, error_plot_names[index], bounds);
+
+    const grid = rect(bounds.x + 46, bounds.y + 38, bounds.width - 60, bounds.height - 76);
+    box(grid, bg);
+
+    const square_width = if (index < 3) top_grid_square_width else bottom_grid_square_width;
+    const square_height = if (index < 3) top_grid_square_height else bottom_grid_square_height;
+    const sample_count = @min(d.error_sample_count, d.error_samples.len);
+    const has_samples = sample_count > 0;
+    const latest_timestamp_ns = if (has_samples) errorSampleAt(d, sample_count - 1).timestamp_ns else 0;
+    const grid_interval_ns = @as(f64, @floatFromInt(plot_window_ns)) * square_width / grid.width;
+    const elapsed_ns: f64 = @floatFromInt(latest_timestamp_ns);
+    const grid_phase: f32 = if (has_samples)
+        @floatCast(@rem(elapsed_ns, grid_interval_ns) / grid_interval_ns * square_width)
+    else
+        0;
+    var x = grid.x + grid.width - grid_phase;
+    while (x >= grid.x) : (x -= square_width) {
+        box(rect(x, grid.y, 1, grid.height), border);
+    }
+    var y = grid.y + square_height;
+    while (y < grid.y + grid.height) : (y += square_height) {
+        box(rect(grid.x, y, grid.width, 1), border);
+    }
+    box(rect(grid.x, grid.y, 2, grid.height), muted);
+    box(rect(grid.x, grid.y + grid.height - 2, grid.width, 2), muted);
+    box(rect(grid.x, grid.y + grid.height / 2, grid.width, 1), muted);
+
+    if (has_samples) {
+        rl.beginScissorMode(@intFromFloat(grid.x), @intFromFloat(grid.y), @intFromFloat(grid.width), @intFromFloat(grid.height));
+        const y_limit: f32 = if (index < 3) 5 else 2 * std.math.pi;
+        var previous: ?rl.Vector2 = null;
+        var latest_point: ?rl.Vector2 = null;
+        for (0..sample_count) |sample_index| {
+            const sample = errorSampleAt(d, sample_index);
+            if (sample.timestamp_ns > latest_timestamp_ns) continue;
+            const age_ns = latest_timestamp_ns - sample.timestamp_ns;
+            if (age_ns > plot_window_ns) {
+                previous = null;
+                continue;
+            }
+            const age_fraction: f32 = @floatCast(@as(f64, @floatFromInt(age_ns)) / @as(f64, @floatFromInt(plot_window_ns)));
+            const value = std.math.clamp(sample.values[index], -y_limit, y_limit);
+            const point = rl.Vector2{
+                .x = grid.x + grid.width * (1 - age_fraction),
+                .y = grid.y + grid.height * (1 - (value + y_limit) / (2 * y_limit)),
+            };
+            if (previous) |start| rl.drawLineEx(start, point, 2, rl.Color.yellow);
+            previous = point;
+            latest_point = point;
+        }
+        if (latest_point) |point| rl.drawCircleV(point, 2, rl.Color.yellow);
+        rl.endScissorMode();
+    }
+
+    text(d.font, if (index < 3) top_plot_y_max else bottom_plot_y_max, grid.x + 4, grid.y + 3, 9, white);
+    text(d.font, "0", grid.x + 4, grid.y + grid.height / 2 - 7, 9, white);
+    text(d.font, if (index < 3) "-5" else "-2π", grid.x + 4, grid.y + grid.height - 15, 9, white);
+    text(d.font, "0", grid.x + 2, grid.y + grid.height + 2, 9, white);
+    text(d.font, plot_x_max, grid.x + grid.width - 22, grid.y + grid.height + 2, 9, white);
+
+    const error_unit: [:0]const u8 = if (index < 3) "e(t) (m)" else "e(t) (rads)";
+    const error_label_size = 10 * font_scale;
+    const error_label_spacing = 0.15 * font_scale;
+    const error_label_metrics = rl.measureTextEx(d.font, error_unit, error_label_size, error_label_spacing);
+    rl.drawTextPro(
+        d.font,
+        error_unit,
+        .{ .x = bounds.x + 10, .y = grid.y + grid.height / 2 + error_label_metrics.x / 2 },
+        .{ .x = 0, .y = 0 },
+        -90,
+        error_label_size,
+        error_label_spacing,
+        white,
+    );
+
+    const time_unit: [:0]const u8 = "t (s)";
+    const time_metrics = rl.measureTextEx(d.font, time_unit, error_label_size, error_label_spacing);
+    text(d.font, time_unit, grid.x + (grid.width - time_metrics.x) / 2, grid.y + grid.height + 19, 10, white);
 }
 fn statusText(s: Status) [:0]const u8 {
     return switch (s) {
@@ -209,6 +324,9 @@ pub const Data = struct {
     layout: Layout,
     frame: *const IO.TelemetryFrame,
     telemetry_status: Status,
+    error_samples: []const ErrorSample,
+    error_sample_start: usize,
+    error_sample_count: usize,
     video_status: Status,
     video: rl.Texture2D,
     video_w: i32,
@@ -478,6 +596,7 @@ fn dashboard(d: Data) void {
 }
 fn pidTuner(d: Data) void {
     panel(d.layout.panel_a);
+    for (0..error_plot_names.len) |index| errorPlot(d, errorPlotRect(d.layout.panel_a, index), index);
     // title(d.font, "PANEL A", d.layout.panel_a);
     // panel(d.layout.panel_b);
     // title(d.font, "PANEL B", d.layout.panel_b);
@@ -501,9 +620,24 @@ test "workspace layouts stay within supported window sizes" {
             try std.testing.expect(p.x >= 0 and p.y >= 0);
             try std.testing.expect(p.x + p.width <= size[0] and p.y + p.height <= size[1]);
         }
+        for (0..error_plot_names.len) |index| {
+            const plot = errorPlotRect(l.panel_a, index);
+            try std.testing.expect(plot.width > 0 and plot.height > 0);
+            try std.testing.expect(plot.x >= l.panel_a.x and plot.y >= l.panel_a.y);
+            try std.testing.expect(plot.x + plot.width <= l.panel_a.x + l.panel_a.width);
+            try std.testing.expect(plot.y + plot.height <= l.panel_a.y + l.panel_a.height);
+            if (index % 3 != 0) {
+                const previous = errorPlotRect(l.panel_a, index - 1);
+                try std.testing.expectApproxEqAbs(previous.x + previous.width + error_plot_gap, plot.x, 0.001);
+            }
+            if (index >= 3) {
+                const above = errorPlotRect(l.panel_a, index - 3);
+                try std.testing.expectApproxEqAbs(above.y + above.height + error_plot_gap, plot.y, 0.001);
+            }
+        }
         const gap: f32 = if (size[0] < 1200) 8 else 14;
         const usable_height = l.content.height - gap;
-        try std.testing.expectApproxEqAbs((l.content.width - gap) / 2, l.panel_a.width, 0.001);
+        try std.testing.expectApproxEqAbs(l.content.width, l.panel_a.width, 0.001);
         // try std.testing.expectApproxEqAbs(l.panel_a.width, l.panel_b.width, 0.001);
         try std.testing.expectApproxEqAbs(@floor(usable_height * 2 / 3), l.panel_a.height, 0.001);
         // try std.testing.expectApproxEqAbs(l.panel_b.x - l.panel_a.x - l.panel_a.width, gap, 0.001);

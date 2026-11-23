@@ -20,6 +20,7 @@ const tune_names = [_][:0]const u8{
     "kd_x", "kd_y", "kd_z", "kd_roll", "kd_pitch", "kd_yaw",
 };
 const pid_slider_max = [_]f32{ 10, 2, 10 };
+const ErrorSample = ui.ErrorSample;
 
 runtime_panel: RuntimePanel,
 config_packet: MissionIO.LiveConfigPacket,
@@ -57,6 +58,10 @@ last_tune_adjust: f64 = -1,
 pid_drag: ?usize = null,
 direct_thruster_drag: ?usize = null,
 last_thruster_adjust: f64 = -1,
+error_samples: [ui.error_sample_capacity]ErrorSample = undefined,
+error_sample_start: usize = 0,
+error_sample_count: usize = 0,
+last_error_timestamp_ns: ?u64 = null,
 
 pub const Status = ui.Status;
 
@@ -130,6 +135,7 @@ pub fn shouldClose() bool {
 pub fn acceptStatus(self: *Self, status: MissionIO.RuntimeStatus) void {
     const previous = self.runtime_panel.status;
     if (previous == null or previous.?.run_id != status.run_id or (previous.?.active and !status.active)) {
+        self.clearErrorSamples();
         self.translation = @splat(0);
         self.orientation = .{ 0, 0, 0, 1 };
         self.mission_target_initialized = false;
@@ -143,6 +149,43 @@ pub fn acceptStatus(self: *Self, status: MissionIO.RuntimeStatus) void {
         self.mission_control = status.desired.mission_id == .mission_control;
     }
     self.runtime_panel.acceptStatus(status, &self.config_packet);
+}
+
+fn clearErrorSamples(self: *Self) void {
+    self.error_sample_start = 0;
+    self.error_sample_count = 0;
+    self.last_error_timestamp_ns = null;
+}
+
+fn recordErrorSample(self: *Self, frame: *const MissionIO.TelemetryFrame) void {
+    if (self.last_error_timestamp_ns) |last_timestamp| {
+        if (frame.timestamp == last_timestamp) return;
+        if (frame.timestamp < last_timestamp) self.clearErrorSamples();
+    }
+
+    const values: [6]f32 = .{
+        frame.translation_error[0],
+        frame.translation_error[1],
+        frame.translation_error[2],
+        frame.attitude_error[0],
+        frame.attitude_error[1],
+        frame.attitude_error[2],
+    };
+    for (values) |value| {
+        if (!std.math.isFinite(value)) return;
+    }
+
+    const destination = if (self.error_sample_count < self.error_samples.len) blk: {
+        const index = (self.error_sample_start + self.error_sample_count) % self.error_samples.len;
+        self.error_sample_count += 1;
+        break :blk index;
+    } else blk: {
+        const index = self.error_sample_start;
+        self.error_sample_start = (self.error_sample_start + 1) % self.error_samples.len;
+        break :blk index;
+    };
+    self.error_samples[destination] = .{ .timestamp_ns = frame.timestamp, .values = values };
+    self.last_error_timestamp_ns = frame.timestamp;
 }
 
 pub fn runtimeStatus(self: *const Self) ?MissionIO.RuntimeStatus {
@@ -160,6 +203,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
     const empty = emptyTelemetry();
     const telemetry = input.frame orelse &empty;
     const telemetry_live = input.telemetry_status == .live;
+    if (telemetry_live and input.frame != null) self.recordErrorSample(telemetry);
     const running = if (self.runtime_panel.status) |value|
         self.runtime_panel.synchronized() and value.state == .running
     else
@@ -498,6 +542,9 @@ pub fn tick(self: *Self, input: Input) !Actions {
         .layout = layout,
         .frame = telemetry,
         .telemetry_status = input.telemetry_status,
+        .error_samples = self.error_samples[0..],
+        .error_sample_start = self.error_sample_start,
+        .error_sample_count = self.error_sample_count,
         .video_status = input.video.status,
         .video = input.video.texture,
         .video_w = input.video.width,
