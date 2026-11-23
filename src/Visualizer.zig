@@ -172,12 +172,13 @@ pub fn tick(self: *Self, input: Input) !Actions {
     if (rl.isKeyPressed(.zero)) self.font_percent = ui.default_font_percent;
     if (self.runtime_panel.editing == null and rl.isKeyPressed(.one)) self.workspace = .runtime;
     if (self.runtime_panel.editing == null and rl.isKeyPressed(.two)) self.workspace = .settings;
+    if (self.runtime_panel.editing == null and rl.isKeyPressed(.three)) self.workspace = .pid_tuner;
     const menu_was_open = self.dropdown_open;
     if (rl.isMouseButtonPressed(.left)) {
         const mouse = rl.getMousePosition();
         if (rl.checkCollisionPointRec(mouse, layout.fontButton(false))) self.font_percent = ui.adjustFontPercent(self.font_percent, -5);
         if (rl.checkCollisionPointRec(mouse, layout.fontButton(true))) self.font_percent = ui.adjustFontPercent(self.font_percent, 5);
-        for (0..2) |i| if (rl.checkCollisionPointRec(rl.getMousePosition(), layout.navRect(i))) {
+        for (0..3) |i| if (rl.checkCollisionPointRec(rl.getMousePosition(), layout.navRect(i))) {
             self.workspace = @fromBackingInt(@intCast(i));
             self.pid_drag = null;
             break;
