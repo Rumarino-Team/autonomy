@@ -8,6 +8,7 @@ test {
     _ = @import("application/Application.zig");
     _ = @import("AuvRobot.zig");
     _ = @import("simulator/ReflectionWriter.zig");
+    _ = @import("MissionIO.zig");
     _ = MissionContext;
     _ = missions;
 }

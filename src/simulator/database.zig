@@ -27,11 +27,6 @@ pub const BodySlot = struct {
     slot: u32,
 };
 
-pub const ScenePreset = struct {
-    name: []const u8,
-    slots: []u32,
-};
-
 /// `@embedFile` is byte-aligned. Catalog blobs are kept in an aligned image for row access.
 pub fn alignedEmbed(comptime file: anytype) []const u8 {
     const Storage = struct {
@@ -73,93 +68,13 @@ pub fn bodySlot(catalog: anytype, slot: u32) BodySlot {
     };
 }
 
-pub fn readRobotCatalog(bytes: []const u8) !RobotCatalog {
+pub fn readCatalog(comptime Catalog: type, bytes: []const u8) !Catalog {
+    const doc = try reflection.readColumnDocument(Catalog.Wire, bytes);
     return .{
         .backing = bytes,
-        .payload = try reflection.catalogPayloadOffset(RobotCatalog.Wire, bytes),
-        .wire = try reflection.read(RobotCatalog.Wire, bytes),
+        .payload = doc.payload,
+        .wire = doc.row,
     };
-}
-
-pub fn readSceneCatalog(bytes: []const u8) !SceneCatalog {
-    return .{
-        .backing = bytes,
-        .payload = try reflection.catalogPayloadOffset(SceneCatalog.Wire, bytes),
-        .wire = try reflection.read(SceneCatalog.Wire, bytes),
-    };
-}
-
-pub fn reencodeRobotCatalog(allocator: std.mem.Allocator, catalog: *const RobotCatalog) ![]align(@alignOf(u64)) u8 {
-    return reflection.write(allocator, RobotCatalog.Wire, .{
-        .strings = catalog.column("strings"),
-        .refs = catalog.column("refs"),
-        .entities = catalog.column("entities"),
-        .colliders = catalog.column("colliders"),
-        .thrusters = catalog.column("thrusters"),
-        .hulls = catalog.column("hulls"),
-        .sensors = catalog.column("sensors"),
-        .positions = catalog.column("positions"),
-        .indices = catalog.column("indices"),
-        .names = catalog.column("names"),
-    });
-}
-
-pub fn reencodeSceneCatalog(allocator: std.mem.Allocator, catalog: *const SceneCatalog) ![]align(@alignOf(u64)) u8 {
-    return reflection.write(allocator, SceneCatalog.Wire, .{
-        .strings = catalog.column("strings"),
-        .refs = catalog.column("refs"),
-        .entities = catalog.column("entities"),
-        .colliders = catalog.column("colliders"),
-        .positions = catalog.column("positions"),
-        .indices = catalog.column("indices"),
-        .names = catalog.column("names"),
-    });
-}
-
-fn copyCatalog(allocator: std.mem.Allocator, comptime Wire: type, backing: []const u8) ![]align(@alignOf(u64)) u8 {
-    if (!reflection.matchesDocument(Wire, backing)) return error.InvalidSchema;
-    const copy = try allocator.alignedAlloc(u8, .of(u64), backing.len);
-    @memcpy(copy, backing);
-    return copy;
-}
-
-pub fn saveRobotCatalog(allocator: std.mem.Allocator, catalog: *const RobotCatalog) ![]align(@alignOf(u64)) u8 {
-    return reencodeRobotCatalog(allocator, catalog);
-}
-
-pub fn saveSceneCatalog(allocator: std.mem.Allocator, catalog: *const SceneCatalog) ![]align(@alignOf(u64)) u8 {
-    return reencodeSceneCatalog(allocator, catalog);
-}
-
-pub fn save(allocator: std.mem.Allocator, catalog: anytype) ![]align(@alignOf(u64)) u8 {
-    const T = @TypeOf(catalog);
-    if (T == RobotCatalog) return saveRobotCatalog(allocator, &catalog);
-    if (T == *const RobotCatalog) return saveRobotCatalog(allocator, catalog);
-    if (T == SceneCatalog) return saveSceneCatalog(allocator, &catalog);
-    if (T == *const SceneCatalog) return saveSceneCatalog(allocator, catalog);
-    return reflection.write(allocator, T, catalog);
-}
-
-pub fn allocScenePresets(allocator: std.mem.Allocator, catalog: *const SceneCatalog) ![]ScenePreset {
-    const names = catalog.column("names");
-    const presets = try allocator.alloc(ScenePreset, names.len);
-    errdefer allocator.free(presets);
-    const strings = catalog.column("strings");
-    for (names, 0..) |name, i| {
-        const slots = try allocator.alloc(u32, name.entity_count);
-        errdefer allocator.free(slots);
-        for (0..name.entity_count) |j| slots[j] = name.entity_start + @as(u32, @intCast(j));
-        presets[i] = .{
-            .name = strings[name.name_offset..][0..name.name_len],
-            .slots = slots,
-        };
-    }
-    return presets;
-}
-
-pub fn deinitScenePresets(allocator: std.mem.Allocator, presets: []ScenePreset) void {
-    for (presets) |preset| allocator.free(preset.slots);
-    allocator.free(presets);
 }
 
 pub fn entity(slot: BodySlot) *const Entity {
@@ -203,14 +118,6 @@ pub fn boxMesh(hx: f64, hy: f64, hz: f64) struct { positions: [8]abi.Vec3f, tria
     return .{ .positions = positions, .triangles = triangles };
 }
 
-pub fn validateEntitySlots(catalog: *const SceneCatalog, slots: []const u32) !void {
-    const entities = catalog.column("entities");
-    for (slots, 0..) |id, i| {
-        if (id >= entities.len) return error.InvalidSlot;
-        for (slots[0..i]) |earlier| if (earlier == id) return error.InvalidSlot;
-    }
-}
-
 pub fn shapeFrom(slot: BodySlot, record: *const Collider) abi.Shape {
     return switch (record.shape) {
         0 => .box,
@@ -240,15 +147,10 @@ pub fn poseOf(pos: [3]f32, quat: [4]f32) abi.Pose {
 }
 
 pub fn validateRobot(catalog: *const RobotCatalog) !void {
-    try validateGeometry(
-        catalog.column("refs"),
-        catalog.column("strings"),
-        catalog.column("entities"),
-        catalog.column("colliders"),
-        catalog.column("positions"),
-        catalog.column("indices"),
-        catalog.column("names"),
-    );
+    try validateGeometry(catalog);
+    for (catalog.column("names")) |name| {
+        if (name.entity_count != 1) return error.InvalidDatabase;
+    }
     const refs = catalog.column("refs");
     const entities = catalog.column("entities");
     const positions = catalog.column("positions");
@@ -271,26 +173,15 @@ pub fn validateRobot(catalog: *const RobotCatalog) !void {
 }
 
 pub fn validateScene(catalog: *const SceneCatalog) !void {
-    try validateGeometry(
-        catalog.column("refs"),
-        catalog.column("strings"),
-        catalog.column("entities"),
-        catalog.column("colliders"),
-        catalog.column("positions"),
-        catalog.column("indices"),
-        catalog.column("names"),
-    );
+    return validateGeometry(catalog);
 }
 
-fn validateGeometry(
-    refs: []const u32,
-    strings: []const u8,
-    entities: []const Entity,
-    colliders: []const Collider,
-    positions: []const f32,
-    indices: []const u32,
-    names: []const Name,
-) !void {
+fn validateGeometry(catalog: anytype) !void {
+    const refs = catalog.column("refs");
+    const strings = catalog.column("strings");
+    const entities = catalog.column("entities");
+    const positions = catalog.column("positions");
+    const indices = catalog.column("indices");
     if (positions.len % 3 != 0 or indices.len % 3 != 0) return error.InvalidDatabase;
     const triangle_total: u64 = indices.len / 3;
     for (positions) |component| if (!std.math.isFinite(component)) return error.InvalidDatabase;
@@ -304,10 +195,9 @@ fn validateGeometry(
         try validateHead(refs, row.hull_children);
         try validateHead(refs, row.sensor_children);
     }
-    for (colliders, 0..) |collider, i| {
+    for (catalog.column("colliders")) |collider| {
         const parents = abi.headSlice(refs, collider.entity_parents);
         if (parents.len == 0 or parents[0] >= entities.len) return error.InvalidDatabase;
-        _ = i;
         if (collider.collisions > 1) return error.InvalidDatabase;
         switch (collider.shape) {
             0, 1, 2 => if (collider.vertex_count != 0 or collider.triangle_count != 0) return error.InvalidDatabase,
@@ -322,7 +212,7 @@ fn validateGeometry(
             else => return error.InvalidDatabase,
         }
     }
-    for (names) |name| {
+    for (catalog.column("names")) |name| {
         try bounds(strings.len, name.name_offset, name.name_len);
         if (name.name_len == 0 or name.entity_count == 0) return error.InvalidDatabase;
         if (@as(u64, name.entity_start) + name.entity_count > entities.len) return error.InvalidDatabase;
@@ -340,7 +230,7 @@ fn bounds(len: usize, offset: u32, size: u32) !void {
 
 test "embedded scene meshes use local triangle indices" {
     const scenes = alignedEmbed(@embedFile("scenes.bin"));
-    const catalog = try readSceneCatalog(scenes);
+    const catalog = try readCatalog(SceneCatalog, scenes);
     const colliders = catalog.column("colliders");
     const indices = catalog.column("indices");
     for (colliders) |c| {
@@ -353,7 +243,7 @@ test "embedded scene meshes use local triangle indices" {
 
 test "embedded robot meshes use local triangle indices" {
     const robots = alignedEmbed(@embedFile("robots.bin"));
-    const catalog = try readRobotCatalog(robots);
+    const catalog = try readCatalog(RobotCatalog, robots);
     const colliders = catalog.column("colliders");
     const indices = catalog.column("indices");
     for (colliders) |c| {
@@ -369,8 +259,8 @@ test "embedded catalogs match current AUTODNA schema" {
     const scenes = alignedEmbed(@embedFile("scenes.bin"));
     try std.testing.expect(reflection.matchesDocument(RobotCatalog.Wire, robots));
     try std.testing.expect(reflection.matchesDocument(SceneCatalog.Wire, scenes));
-    _ = try readRobotCatalog(robots);
-    _ = try readSceneCatalog(scenes);
+    _ = try readCatalog(RobotCatalog, robots);
+    _ = try readCatalog(SceneCatalog, scenes);
 }
 
 

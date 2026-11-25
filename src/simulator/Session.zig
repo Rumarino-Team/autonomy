@@ -17,11 +17,8 @@ pub const Session = @This();
 const frame_ticks = 8;
 
 io: std.Io,
-catalogs_owned: bool,
 robot_catalog: abi.RobotCatalog,
-robot_slots: []u32,
 scene_catalog: abi.SceneCatalog,
-scene_presets: []database.ScenePreset,
 scene: Scene,
 backend: MujocoBackend,
 sensors: Sensors,
@@ -48,11 +45,8 @@ pub fn init(self: *Session, allocator: std.mem.Allocator, io: std.Io, config: *c
     if (tam_len == 0 or tam_len > MissionConfig.thruster_count) return error.InvalidThrusterCount;
     self.* = .{
         .io = io,
-        .catalogs_owned = true,
         .robot_catalog = .{},
-        .robot_slots = undefined,
         .scene_catalog = .{},
-        .scene_presets = undefined,
         .scene = undefined,
         .backend = undefined,
         .sensors = undefined,
@@ -66,39 +60,41 @@ pub fn init(self: *Session, allocator: std.mem.Allocator, io: std.Io, config: *c
         .tam_len = tam_len,
         .started = undefined,
     };
-    self.robot_catalog = try database.readRobotCatalog(database.alignedEmbed(@embedFile("robots.bin")));
+    self.robot_catalog = try database.readCatalog(abi.RobotCatalog, database.alignedEmbed(@embedFile("robots.bin")));
     try database.validateRobot(&self.robot_catalog);
-    self.robot_slots = try allocator.alloc(u32, self.robot_catalog.column("names").len);
-    for (self.robot_catalog.column("names"), 0..) |name, i| {
-        if (name.entity_count != 1) return error.InvalidDatabase;
-        self.robot_slots[i] = name.entity_start;
-    }
-    self.scene_catalog = try database.readSceneCatalog(database.sceneCatalogBytes(config.runtime.mission_profile));
+    self.scene_catalog = try database.readCatalog(abi.SceneCatalog, database.sceneCatalogBytes(config.runtime.mission_profile));
     try database.validateScene(&self.scene_catalog);
-    self.scene_presets = try database.allocScenePresets(allocator, &self.scene_catalog);
-    const robot_index: usize = blk: {
-        for (self.robot_slots, 0..) |slot, i| {
-            if (std.mem.eql(u8, robot_name, database.rna.string(self.robot_catalog.column("strings"), self.robot_catalog.column("entities")[slot]))) break :blk i;
+
+    const robot_slot = find_robot: {
+        const entities = self.robot_catalog.column("entities");
+        const strings = self.robot_catalog.column("strings");
+        for (self.robot_catalog.column("names")) |name| {
+            const slot = name.entity_start;
+            if (std.mem.eql(u8, robot_name, database.rna.string(strings, entities[slot]))) break :find_robot slot;
         }
         return error.UnknownSimRobot;
     };
-    const robot_slot = self.robot_slots[robot_index];
     const robot = database.bodySlot(&self.robot_catalog, robot_slot);
     if (self.robot_catalog.column("entities")[robot.slot].thruster_children.count != tam_len) return error.InvalidThrusterCount;
     const selected_scene = if (std.mem.eql(u8, scene_name, "robot_only"))
         try Scene.init(allocator, &self.robot_catalog, robot, null, &.{}, .{}, &.{})
     else blk: {
-        const preset: *const database.ScenePreset = find_preset: {
-            for (self.scene_presets) |*p| if (std.mem.eql(u8, scene_name, p.name)) break :find_preset p;
+        const preset = find_preset: {
+            const strings = self.scene_catalog.column("strings");
+            for (self.scene_catalog.column("names")) |name| {
+                const preset_name = strings[name.name_offset..][0..name.name_len];
+                if (std.mem.eql(u8, scene_name, preset_name)) break :find_preset name;
+            }
             return error.UnknownSimScene;
         };
         const start: ?abi.Pose = if (std.mem.eql(u8, scene_name, "robosub_course"))
             .{ .pos = .{ 0, 2, 2 }, .quat = .{ 0, 0, 1, 0 } }
         else
             null;
-        try database.validateEntitySlots(&self.scene_catalog, preset.slots);
-        const extras = try allocator.alloc(database.BodySlot, preset.slots.len);
-        for (preset.slots, extras) |slot, *body| body.* = database.bodySlot(&self.scene_catalog, slot);
+        const extras = try allocator.alloc(database.BodySlot, preset.entity_count);
+        for (extras, 0..) |*body, i| {
+            body.* = database.bodySlot(&self.scene_catalog, preset.entity_start + @as(u32, @intCast(i)));
+        }
         break :blk try Scene.init(allocator, &self.robot_catalog, robot, start, extras, .{}, &.{});
     };
     self.scene = selected_scene;
@@ -282,17 +278,6 @@ pub fn snapshot(self: *const Session, allocator: std.mem.Allocator) ![]align(@al
     if (self.backend.contacts.items.len > abi.max_snapshot_contacts) return error.TooManyContacts;
     if (self.preset_robot.len > std.math.maxInt(u8) or self.preset_scene.len > std.math.maxInt(u8)) return error.NameTooLong;
 
-    const robot_bytes = if (self.catalogs_owned)
-        try database.save(allocator, self.robot_catalog)
-    else
-        try allocator.alignedAlloc(u8, .of(u64), 0);
-    defer allocator.free(robot_bytes);
-    const scene_bytes = if (self.catalogs_owned)
-        try database.save(allocator, self.scene_catalog)
-    else
-        try allocator.alignedAlloc(u8, .of(u64), 0);
-    defer allocator.free(scene_bytes);
-
     const strings_buf = try allocator.alloc(u8, self.preset_robot.len + self.preset_scene.len);
     defer allocator.free(strings_buf);
     @memcpy(strings_buf[0..self.preset_robot.len], self.preset_robot);
@@ -309,8 +294,8 @@ pub fn snapshot(self: *const Session, allocator: std.mem.Allocator) ![]align(@al
     return reflection.write(allocator, abi.SessionStateCatalog, .{
         .strings = strings_buf,
         .meta = @as([]const abi.SessionMeta, &.{meta}),
-        .robot_catalog = robot_bytes,
-        .scene_catalog = scene_bytes,
+        .robot_catalog = self.robot_catalog.backing,
+        .scene_catalog = self.scene_catalog.backing,
         .body_states = self.backend.states,
         .wrenches = self.wrenches,
         .fluid = self.fluid,
@@ -322,8 +307,9 @@ pub fn snapshot(self: *const Session, allocator: std.mem.Allocator) ![]align(@al
 }
 
 pub fn restoreSnapshot(self: *Session, bytes: []const u8) !void {
-    const snap = try reflection.read(abi.SessionStateCatalog, bytes);
-    const payload = try reflection.catalogPayloadOffset(abi.SessionStateCatalog, bytes);
+    const doc = try reflection.readColumnDocument(abi.SessionStateCatalog, bytes);
+    const snap = doc.row;
+    const payload = doc.payload;
     const metas = abi.spanAs(abi.SessionMeta, bytes, payload, snap.meta);
     if (metas.len != 1) return error.InvalidSession;
     const meta = metas[0];

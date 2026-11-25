@@ -1,5 +1,5 @@
 //! AUTODNA1 documents: the schema section records Zig row layout at build time; row bytes
-//! are a copy of those structs (not C `extern` ABI). Cross-build reads use layout match / remap.
+//! follow those structs. Reads require a matching schema fingerprint.
 const std = @import("std");
 const abi_mod = @import("abi.zig");
 
@@ -17,7 +17,7 @@ const type_rec_size: usize = 16;
 const field_rec_size: usize = 10;
 
 const TypeDesc = struct {
-    name: []const u8,
+    name_index: u16,
     size: u16,
     alignment: u8,
     elem_type: u16 = 0,
@@ -30,7 +30,7 @@ const TypeDesc = struct {
 
 const Layout = struct {
     const Field = struct {
-        name: []const u8,
+        name_index: u16,
         type_index: u16,
         offset: u16,
         size: u16,
@@ -87,7 +87,7 @@ fn compileLayoutIntern(ctx: *CompileLayoutCtx, comptime T: type) u16 {
 
     const type_info = @typeInfo(T);
     var desc: TypeDesc = .{
-        .name = schemaTypeName(T),
+        .name_index = undefined,
         .size = fitU16(@sizeOf(T), @typeName(T)),
         .alignment = fitU8(@alignOf(T), @typeName(T)),
     };
@@ -125,9 +125,8 @@ fn compileLayoutIntern(ctx: *CompileLayoutCtx, comptime T: type) u16 {
                 if (attrs.@"comptime") continue;
                 const field_type_index = compileLayoutIntern(ctx, FieldType);
                 if (ctx.field_len >= max_fields) @compileError("too many schema fields");
-                _ = compileLayoutInternName(ctx, field_name);
                 ctx.fields[ctx.field_len] = .{
-                    .name = field_name,
+                    .name_index = compileLayoutInternName(ctx, field_name),
                     .type_index = field_type_index,
                     .offset = fitU16(@offsetOf(T, field_name), field_name),
                     .size = fitU16(@sizeOf(FieldType), @typeName(FieldType)),
@@ -139,7 +138,7 @@ fn compileLayoutIntern(ctx: *CompileLayoutCtx, comptime T: type) u16 {
         },
         else => @compileError("unsupported schema type " ++ @typeName(T)),
     }
-    _ = compileLayoutInternName(ctx, desc.name);
+    desc.name_index = compileLayoutInternName(ctx, schemaTypeName(T));
     ctx.types[index] = desc;
     ctx.visiting[index] = false;
     return index;
@@ -161,17 +160,16 @@ fn compileLayout(comptime Root: type) Layout {
 
     var ctx: CompileLayoutCtx = .{};
     const root_name = schemaTypeName(Root);
-    _ = compileLayoutInternName(&ctx, root_name);
+    const root_name_index = compileLayoutInternName(&ctx, root_name);
 
     const field_start = ctx.field_len;
     inline for (info.field_names, info.field_types, info.field_attrs) |field_name, FieldType, attrs| {
         if (attrs.@"comptime") continue;
         if (@typeInfo(FieldType) == .pointer) @compileError("schema documents cannot contain slices: " ++ field_name);
-        if (ctx.field_len >= max_fields) @compileError("too many schema fields");
         const type_index = compileLayoutIntern(&ctx, FieldType);
-        _ = compileLayoutInternName(&ctx, field_name);
+        if (ctx.field_len >= max_fields) @compileError("too many schema fields");
         ctx.fields[ctx.field_len] = .{
-            .name = field_name,
+            .name_index = compileLayoutInternName(&ctx, field_name),
             .type_index = type_index,
             .offset = @offsetOf(Root, field_name),
             .size = fitU16(@sizeOf(FieldType), field_name),
@@ -185,7 +183,7 @@ fn compileLayout(comptime Root: type) Layout {
     ctx.type_len += 1;
     ctx.type_keys[index] = Root;
     ctx.types[index] = .{
-        .name = root_name,
+        .name_index = root_name_index,
         .size = fitU16(@sizeOf(Root), root_name),
         .alignment = fitU8(@alignOf(Root), root_name),
         .field_start = fitU16(field_start, root_name),
@@ -206,7 +204,7 @@ fn compileLayout(comptime Root: type) Layout {
 }
 
 fn validateAutodnaHeader(comptime Root: type, bytes: []const u8) !void {
-    const layout = comptime compileLayout(Root);
+    const layout = DocumentLayout(Root).layout;
     if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.InvalidSchema;
     const schema_len = std.mem.readInt(u32, bytes[magic.len..][0..4], .little);
     if (schema_len != layout.schema_len) return error.IncompatibleSchema;
@@ -227,13 +225,6 @@ fn fitU8(value: usize, label: []const u8) u8 {
     return @intCast(value);
 }
 
-fn nameIndex(comptime layout: Layout, name: []const u8) u16 {
-    for (layout.names[0..layout.name_len], 0..) |existing, i| {
-        if (std.mem.eql(u8, existing, name)) return @intCast(i);
-    }
-    unreachable;
-}
-
 fn schemaBytes(comptime layout: Layout) usize {
     var size: usize = 4;
     for (layout.names[0..layout.name_len]) |name| {
@@ -245,13 +236,28 @@ fn schemaBytes(comptime layout: Layout) usize {
     return size;
 }
 
+fn DocumentLayout(comptime Root: type) type {
+    return struct {
+        const layout = compileLayout(Root);
+        const schema_end = header_size + layout.schema_len;
+        const payload = std.mem.alignForward(usize, schema_end, @alignOf(Root));
+        const prefix = blk: {
+            @setEvalBranchQuota(1_000_000);
+            var bytes: [payload]u8 = @splat(0);
+            @memcpy(bytes[0..magic.len], magic);
+            std.mem.writeInt(u32, bytes[8..12], @intCast(layout.schema_len), .little);
+            std.mem.writeInt(u32, bytes[12..16], layout.root_type_index, .little);
+            writeSchemaSection(bytes[header_size..schema_end], layout);
+            break :blk bytes;
+        };
+    };
+}
+
 /// Fingerprint of the schema section `write` emits for a document struct.
 pub fn documentSchemaHash(comptime Root: type) u64 {
     @setEvalBranchQuota(1_000_000);
-    const layout = comptime compileLayout(Root);
-    var schema: [layout.schema_len]u8 = undefined;
-    writeSchemaSection(&schema, layout);
-    return std.hash.Wyhash.hash(0, &schema);
+    const D = DocumentLayout(Root);
+    return comptime std.hash.Wyhash.hash(0, D.prefix[header_size..D.schema_end]);
 }
 
 /// Wyhash of the DNA schema bytes in a finished AUTODNA blob (`header_size`..schema end), or null if not AUTODNA.
@@ -280,7 +286,7 @@ fn writeSchemaSection(dst: []u8, comptime layout: Layout) void {
     std.mem.writeInt(u32, dst[cursor..][0..4], @intCast(layout.type_len), .little);
     cursor += 4;
     for (layout.types[0..layout.type_len]) |desc| {
-        std.mem.writeInt(u16, dst[cursor..][0..2], nameIndex(layout, desc.name), .little);
+        std.mem.writeInt(u16, dst[cursor..][0..2], desc.name_index, .little);
         std.mem.writeInt(u16, dst[cursor + 2 ..][0..2], desc.size, .little);
         dst[cursor + 4] = desc.alignment;
         dst[cursor + 5] = 0; // reserved (v2: type class inferred from name and field/elem counts)
@@ -294,7 +300,7 @@ fn writeSchemaSection(dst: []u8, comptime layout: Layout) void {
     std.mem.writeInt(u32, dst[cursor..][0..4], @intCast(layout.field_len), .little);
     cursor += 4;
     for (layout.fields[0..layout.field_len]) |field| {
-        std.mem.writeInt(u16, dst[cursor..][0..2], nameIndex(layout, field.name), .little);
+        std.mem.writeInt(u16, dst[cursor..][0..2], field.name_index, .little);
         std.mem.writeInt(u16, dst[cursor + 2 ..][0..2], field.type_index, .little);
         std.mem.writeInt(u16, dst[cursor + 4 ..][0..2], field.offset, .little);
         std.mem.writeInt(u16, dst[cursor + 6 ..][0..2], field.size, .little);
@@ -318,20 +324,23 @@ fn isColumnRoot(comptime Root: type) bool {
 pub fn write(allocator: std.mem.Allocator, comptime Root: type, value: anytype) ![]align(@alignOf(u64)) u8 {
     if (comptime isColumnRoot(Root)) return writeColumns(allocator, Root, value);
     if (@TypeOf(value) != Root) @compileError("document value does not match " ++ @typeName(Root));
-    const layout = comptime compileLayout(Root);
+    const out = try allocator.alignedAlloc(u8, .of(u64), DocumentLayout(Root).payload + @sizeOf(Root));
+    _ = writeRowInto(out, value) catch unreachable;
+    return out;
+}
+
+/// Encode a fixed row into caller-owned storage. The document type is inferred from the row.
+pub fn writeRowInto(buf: []u8, value: anytype) error{NoSpaceLeft}![]u8 {
+    const Root = @TypeOf(value);
+    if (comptime isColumnRoot(Root)) @compileError("use write with column slices for " ++ @typeName(Root));
+    const payload = DocumentLayout(Root).payload;
+    const total = payload + @sizeOf(Root);
+    if (buf.len < total) return error.NoSpaceLeft;
+    const out = buf[0..total];
+    @memcpy(out[0..payload], &DocumentLayout(Root).prefix);
+    @memset(out[payload..], 0);
+
     const info = @typeInfo(Root).@"struct";
-    const root_desc = layout.types[layout.root_type_index];
-    const payload = std.mem.alignForward(usize, header_size + layout.schema_len, @max(@as(usize, 1), root_desc.alignment));
-
-    const total = payload + root_desc.size;
-    const out = try allocator.alignedAlloc(u8, .of(u64), total);
-    errdefer allocator.free(out);
-    @memset(out, 0);
-    @memcpy(out[0..magic.len], magic);
-    std.mem.writeInt(u32, out[magic.len..][0..4], @intCast(layout.schema_len), .little);
-    std.mem.writeInt(u32, out[12..][0..4], layout.root_type_index, .little);
-    writeSchemaSection(out[header_size..][0..layout.schema_len], layout);
-
     inline for (info.field_names, info.field_types, info.field_attrs) |field_name, FieldType, attrs| {
         if (attrs.@"comptime") continue;
         const field = @field(value, field_name);
@@ -342,19 +351,15 @@ pub fn write(allocator: std.mem.Allocator, comptime Root: type, value: anytype) 
 }
 
 pub fn read(comptime Root: type, bytes: []const u8) !Root {
-    const layout = comptime compileLayout(Root);
     try validateAutodnaHeader(Root, bytes);
-
-    const root = layout.types[layout.root_type_index];
-    const payload = std.mem.alignForward(usize, header_size + layout.schema_len, @max(@as(usize, 1), root.alignment));
-    if (payload + root.size > bytes.len) return error.InvalidSchema;
+    const payload = DocumentLayout(Root).payload;
+    if (payload + @sizeOf(Root) > bytes.len) return error.InvalidSchema;
 
     const info = @typeInfo(Root).@"struct";
     var out: Root = undefined;
     inline for (info.field_names, info.field_types, info.field_attrs) |field_name, FieldType, attrs| {
         if (attrs.@"comptime") continue;
         const at = payload + @offsetOf(Root, field_name);
-        if (at + @sizeOf(FieldType) > bytes.len) return error.InvalidSchema;
         @memcpy(std.mem.asBytes(&@field(out, field_name)), bytes[at..][0..@sizeOf(FieldType)]);
     }
     return out;
@@ -366,20 +371,20 @@ pub fn matchesDocument(comptime Root: type, bytes: []const u8) bool {
     return true;
 }
 
-pub fn catalogPayloadOffset(comptime Doc: type, bytes: []const u8) !usize {
-    const layout = comptime compileLayout(Doc);
-    try validateAutodnaHeader(Doc, bytes);
-    const root = layout.types[layout.root_type_index];
-    return std.mem.alignForward(usize, header_size + layout.schema_len, @max(@as(usize, 1), root.alignment));
+/// Decode the root spans and return the byte offset they are relative to.
+pub fn readColumnDocument(comptime Doc: type, bytes: []const u8) !struct { row: Doc, payload: usize } {
+    if (comptime !isColumnRoot(Doc)) @compileError("expected a column document: " ++ @typeName(Doc));
+    return .{
+        .row = try read(Doc, bytes),
+        .payload = DocumentLayout(Doc).payload,
+    };
 }
 
 fn writeColumns(allocator: std.mem.Allocator, comptime Doc: type, build: anytype) ![]align(@alignOf(u64)) u8 {
-    const layout = comptime compileLayout(Doc);
     const info = @typeInfo(Doc).@"struct";
-    const root_desc = layout.types[layout.root_type_index];
-    const payload = std.mem.alignForward(usize, header_size + layout.schema_len, @max(@as(usize, 1), root_desc.alignment));
+    const payload = DocumentLayout(Doc).payload;
 
-    var tail: usize = payload + root_desc.size;
+    var tail: usize = payload + @sizeOf(Doc);
     var col_off: [max_fields]u32 = undefined;
     var col_cnt: [max_fields]u32 = undefined;
     var col_n: usize = 0;
@@ -405,12 +410,8 @@ fn writeColumns(allocator: std.mem.Allocator, comptime Doc: type, build: anytype
     }
 
     const out = try allocator.alignedAlloc(u8, .of(u64), tail);
-    errdefer allocator.free(out);
-    @memset(out, 0);
-    @memcpy(out[0..magic.len], magic);
-    std.mem.writeInt(u32, out[magic.len..][0..4], @intCast(layout.schema_len), .little);
-    std.mem.writeInt(u32, out[12..][0..4], layout.root_type_index, .little);
-    writeSchemaSection(out[header_size..][0..layout.schema_len], layout);
+    @memcpy(out[0..payload], &DocumentLayout(Doc).prefix);
+    @memset(out[payload..], 0);
 
     col_n = 0;
     inline for (info.field_names, info.field_types) |field_name, FieldType| {
@@ -453,4 +454,3 @@ pub fn copyProject(comptime Src: type, comptime names: []const []const u8, src: 
     inline for (names) |name| @field(out, name) = @field(src, name);
     return out;
 }
-

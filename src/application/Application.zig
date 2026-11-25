@@ -158,8 +158,7 @@ pub fn Application(comptime Robot: type) type {
             if (actions.thrusters) |command| self.telemetry.acceptThrusters(self.io, &self.config, command.values[0..command.len]);
             if (actions.teleop) |command| {
                 var scratch: [1024]u8 align(8) = undefined;
-                var fallback = std.heap.FixedBufferAllocator.init(&scratch);
-                const bytes = reflection.write(fallback.allocator(), Wire.TeleopDoc, Wire.TeleopDoc{ .command = command }) catch null;
+                const bytes = reflection.writeRowInto(&scratch, Wire.TeleopDoc{ .command = command }) catch null;
                 if (bytes) |packet| self.telemetry.storeTeleopPacket(packet);
             }
             if (actions.mission) |command| self.telemetry.acceptMission(command) catch |err| self.telemetry.report(err);
@@ -252,9 +251,10 @@ pub fn Application(comptime Robot: type) type {
                 try gatherSensors(self, &initial_frame);
                 try pollCommands(self);
                 if (config.runtime.serial_port.len != 0) {
-                    try openSerial(self, config.runtime.serial_port.slice() catch return error.InvalidPath);
+                    const path = config.runtime.serial_port.sentinelSlice() catch return error.InvalidPath;
+                    try openSerial(self, path);
                     try waitForReadyOnBackend(self);
-                    std.log.info("READY on {s} at 115200 baud", .{config.runtime.serial_port.slice() catch "?"});
+                    std.log.info("READY on {s} at 115200 baud", .{path});
                 }
             }
 

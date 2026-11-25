@@ -343,7 +343,7 @@ pub fn missionCommandFromRow(row: MissionCommandRow) MissionCommand {
     };
 }
 
-pub fn encodeControl(buf: []align(8) u8, value: anytype) ![]const u8 {
+pub fn encodeControl(buf: []u8, value: anytype) ![]const u8 {
     const V = @TypeOf(value);
     const wrapped = if (V == LiveConfigPacket)
         LiveConfigDoc{ .revision = value.revision, .config = value.config }
@@ -357,11 +357,10 @@ pub fn encodeControl(buf: []align(8) u8, value: anytype) ![]const u8 {
         break :blk MissionCommandDoc{ .command = missionCommandToRow(cmd) };
     } else
         value;
-    var fallback = std.heap.FixedBufferAllocator.init(buf);
-    return reflection.write(fallback.allocator(), @TypeOf(wrapped), wrapped) catch error.NoSpaceLeft;
+    return reflection.writeRowInto(buf, wrapped);
 }
 
-pub fn encodeTelemetryFrame(buf: []align(8) u8, frame: anytype) ![]const u8 {
+pub fn encodeTelemetryFrame(buf: []u8, frame: anytype) ![]const u8 {
     return encodeControl(buf, frame);
 }
 
@@ -762,9 +761,8 @@ pub const Telemetry = struct {
     fn reply(self: *Telemetry, io: Io, current: *const MissionConfig.MissionConfig, destination: *const Io.net.IpAddress, config_reply_revision: u64, config_rejected: bool) void {
         const socket = self.control_socket orelse return;
         var buffer: [8192]u8 align(8) = undefined;
-        var fallback = std.heap.FixedBufferAllocator.init(&buffer);
         const status_row = self.status(current, config_reply_revision, config_rejected);
-        const bytes = reflection.write(fallback.allocator(), RuntimeStatusDoc, RuntimeStatusDoc{ .status = status_row }) catch return;
+        const bytes = reflection.writeRowInto(&buffer, RuntimeStatusDoc{ .status = status_row }) catch return;
         socket.send(io, destination, bytes) catch {};
     }
 
@@ -903,20 +901,15 @@ test "telemetry sender round trip" {
     try std.testing.expectError(error.UnsupportedAbiVersion, decodeTelemetryFrame(Sample, bad));
 }
 
-test "telemetry accepts equivalent row layouts from another build" {
+test "telemetry rejects a different schema with the same row layout" {
     const SenderRow = struct { depth: f64, flag: bool };
     const ViewerRow = struct { depth: f64, flag: bool };
+    const SenderDoc = struct { row: SenderRow };
     const ViewerDoc = struct { row: ViewerRow };
-    var storage: [4096]u8 align(8) = undefined;
-    const encoded = try encodeTelemetryFrame(&storage, .{ .row = SenderRow{ .depth = 2.5, .flag = true } });
+    var storage: [4096]u8 = undefined;
+    const encoded = try encodeTelemetryFrame(&storage, SenderDoc{ .row = .{ .depth = 2.5, .flag = true } });
     try std.testing.expect(reflection.dnaSectionHash(encoded) != comptime reflection.documentSchemaHash(ViewerDoc));
-    const decoded = try decodeTelemetryFrame(ViewerDoc, encoded);
-    try std.testing.expectEqual(@as(f64, 2.5), decoded.row.depth);
-    try std.testing.expect(decoded.row.flag);
-
-    const ChangedRow = struct { temperature: f64, flag: bool };
-    const ChangedDoc = struct { row: ChangedRow };
-    try std.testing.expectError(error.UnsupportedAbiVersion, decodeTelemetryFrame(ChangedDoc, encoded));
+    try std.testing.expectError(error.UnsupportedAbiVersion, decodeTelemetryFrame(ViewerDoc, encoded));
 }
 
 test "lifecycle requests deduplicate and the latest request wins" {
