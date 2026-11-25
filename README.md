@@ -17,7 +17,7 @@ zig build -Dzed -Dzed-prefix=/usr/local/zed -Dcuda-prefix=/usr/local/cuda
 ./zig-out/bin/src_3
 ```
 
-Use the **Proteus** profile, serial port, and `libauv_proteus_hwd.so` paths from the viewer (UDP control **8080**, telemetry **5600**). Set **telemetry** on the Jetson to your ground-station IP `:5600` when the viewer is not on the same host.
+Use the **Proteus** profile, serial port, and `libauv_proteus_hwd.so` paths from the viewer (UDP control **8080**, telemetry **5600**). Control UDP uses **AUTODNA v6** documents (`write` / `read`): one root row of fixed fields. Catalog and snapshot columns are `ColumnSpan` indexes into one data arena. **Same-build only**: schema Wyhash via `matchesDocument`. Live config and runtime status are plain `LiveConfigDoc` / `RuntimeStatusDoc` rows (full `MissionConfig` in status). Rebuild the viewer against this tree. Set **telemetry** on the Jetson to your ground-station IP `:5600` when the viewer is not on the same host.
 
 **On a ground station** (telemetry )
 

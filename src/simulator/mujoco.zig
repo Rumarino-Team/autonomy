@@ -1,7 +1,6 @@
 //! MuJoCo backend owns the engine handles and borrows its scene.
 const std = @import("std");
 const mj = @import("mujoco_c");
-const types = @import("types.zig");
 const abi = @import("abi.zig");
 const Scene = @import("Scene.zig");
 const database = @import("database.zig");
@@ -172,9 +171,10 @@ pub fn init(allocator: std.mem.Allocator, scene: *const Scene) !MujocoBackend {
             const placeholder = @max(e.inertia[0], e.inertia[1], e.inertia[2]);
             xyz(&body.*.inertia, .{ placeholder, placeholder, placeholder });
         }
-        const collider_count = database.rna.owned(slot.colliders, slot.slot);
+        const collider_head = slot.entities[slot.slot].collider_children;
+        const collider_count: usize = @intCast(collider_head.count);
         for (0..collider_count) |k| {
-            const c = database.rna.ownedAt(slot.colliders, slot.slot, k);
+            const c = abi.childAt(database.Collider, slot.colliders, slot.refs, collider_head, k);
             if (c.restitution != 0) return error.UnsupportedRestitution;
             const geom = mj.mjs_addGeom(body, null);
             if (geom == null) return error.OutOfMemory;
@@ -204,6 +204,8 @@ pub fn init(allocator: std.mem.Allocator, scene: *const Scene) !MujocoBackend {
                 }
                 mj.mjs_setFloat(mesh.*.uservert, positions.ptr, @intCast(positions.len));
                 mj.mjs_setInt(mesh.*.userface, triangles.ptr, @intCast(triangles.len));
+                // Flat scene meshes (markers, signs) have no volume; MuJoCo rejects them otherwise.
+                if (database.motionFrom(e.motion) != .dynamic) mesh.*.inertia = mj.mjMESH_INERTIA_SHELL;
                 geom.*.type = mj.mjGEOM_MESH;
             } else {
                 geom.*.type = if (shape == .box) mj.mjGEOM_BOX else if (shape == .sphere) mj.mjGEOM_SPHERE else mj.mjGEOM_CYLINDER;
@@ -223,7 +225,8 @@ pub fn init(allocator: std.mem.Allocator, scene: *const Scene) !MujocoBackend {
         if (id < 0) return error.MuJoCoBodyMissing;
         self.body_ids[i] = id;
         if (database.motionFrom(e.motion) == .dynamic) xyz(m.body_inertia + 3 * @as(usize, @intCast(id)), S.fromAbi3(e.inertia));
-        const collider_count = database.rna.owned(slot.colliders, slot.slot);
+        const collider_head = slot.entities[slot.slot].collider_children;
+        const collider_count: usize = @intCast(collider_head.count);
         for (0..collider_count) |k| {
             const geom_id = mj.mj_name2id(m, mj.mjOBJ_GEOM, (try namePrint(&name_buffer, "g{d}_{d}", .{ i, k })).ptr);
             if (geom_id < 0) return error.MuJoCoGeomMissing;
@@ -248,13 +251,13 @@ pub fn init(allocator: std.mem.Allocator, scene: *const Scene) !MujocoBackend {
 fn namePrint(buffer: []u8, comptime format: []const u8, args: anytype) ![:0]u8 {
     return std.mem.printSentinel(buffer, format, args, 0);
 }
-fn xyz(out: [*c]f64, vector: types.Vec3) void {
+fn xyz(out: [*c]f64, vector: abi.Vec3) void {
     for (0..3) |i| out[i] = vector[i];
 }
-fn xyzAbi(out: [*c]f64, vector: abi.Vec3) void {
+fn xyzAbi(out: [*c]f64, vector: abi.Vec3f) void {
     for (0..3) |i| out[i] = @floatCast(vector[i]);
 }
-fn transform(pos: [*c]f64, quat: [*c]f64, pose: types.Pose) void {
+fn transform(pos: [*c]f64, quat: [*c]f64, pose: abi.Pose) void {
     xyz(pos, pose.pos);
     quat[0] = pose.quat[3];
     quat[1] = pose.quat[0];

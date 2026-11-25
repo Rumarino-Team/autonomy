@@ -1,9 +1,9 @@
 const std = @import("std");
-const types = @import("types");
+const types = @import("abi");
 
 pub const mesh_magic: [4]u8 = "SMM1".*;
 
-pub fn encode(allocator: std.mem.Allocator, positions: []const types.Vec3, triangles: []const types.Triangle) ![]u8 {
+pub fn encode(allocator: std.mem.Allocator, positions: []const abi.Vec3, triangles: []const abi.Triangle) ![]u8 {
     const vert_count: u32 = @intCast(positions.len);
     const tri_count: u32 = @intCast(triangles.len);
     const vert_bytes = vert_count * 3 * @sizeOf(f32);

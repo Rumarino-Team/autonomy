@@ -6,6 +6,105 @@ const Auv = @import("Auv.zig");
 const MissionConfig = @import("MissionConfig.zig");
 const reflection = @import("simulator/ReflectionWriter.zig");
 
+pub const LiveConfigPacket = struct {
+    revision: u64 = 0,
+    config: MissionConfig.MissionConfig,
+
+    pub fn fromRuntimeConfig(config: *const MissionConfig.MissionConfig) LiveConfigPacket {
+        return .{ .config = config.* };
+    }
+
+    pub fn validate(self: *const LiveConfigPacket) !void {
+        try self.config.validate();
+    }
+};
+
+pub const LiveConfigDoc = struct {
+    revision: u64,
+    config: MissionConfig.MissionConfig,
+};
+pub const live_config_schema_hash = reflection.documentSchemaHash(LiveConfigDoc);
+
+pub const RuntimeState = enum(u8) { idle, starting, running, stopping };
+pub const RuntimeResult = enum(u8) { none, completed, stopped, failed };
+pub const RuntimeAction = enum(u8) { query, start, stop, restart };
+
+pub const RuntimeRequestRow = struct {
+    client_id: u64,
+    request_id: u64,
+    action: RuntimeAction,
+};
+pub const RuntimeRequest = RuntimeRequestRow;
+pub const RuntimeRequestDoc = struct { request: RuntimeRequestRow };
+
+pub const RuntimeStatusRow = struct {
+    state: RuntimeState,
+    result: RuntimeResult,
+    revision: u64,
+    accepted_client_id: u64,
+    accepted_request_id: u64,
+    config_reply_revision: u64,
+    config_rejected: bool,
+    active: bool,
+    desired: MissionConfig.MissionConfig,
+    active_config: MissionConfig.MissionConfig,
+    last_error: MissionConfig.FixedText(256),
+    run_id: u64,
+};
+pub const RuntimeStatus = RuntimeStatusRow;
+pub const RuntimeStatusDoc = struct { status: RuntimeStatusRow };
+
+pub const MissionCommandKind = enum(u8) { point, object };
+pub const MissionManeuver = enum(u8) { move, pass, circle };
+
+pub const MissionCommandRow = struct {
+    kind: MissionCommandKind,
+    maneuver: MissionManeuver,
+    position: [3]f32,
+    look_direction: [3]f32,
+    object_class: u8 = 0,
+
+    pub fn validate(self: *MissionCommandRow) !void {
+        if (self.kind == .point and self.maneuver != .move) return error.InvalidPointManeuver;
+        for (self.position) |c| if (!std.math.isFinite(c)) return error.NonFinite;
+        for (self.look_direction) |c| if (!std.math.isFinite(c)) return error.NonFinite;
+        if (self.kind == .point) {
+            var dir: math.Vector3f = .{ self.look_direction[0], self.look_direction[1], self.look_direction[2] };
+            const length = math.length3f(dir);
+            if (!std.math.isFinite(length) or length <= 1e-6) return error.InvalidLookDirection;
+            dir /= @as(math.Vector3f, @splat(length));
+            self.look_direction = .{ @floatCast(dir[0]), @floatCast(dir[1]), @floatCast(dir[2]) };
+        }
+    }
+};
+pub const MissionCommandDoc = struct { command: MissionCommandRow };
+
+pub fn matchesControlDocument(comptime Doc: type, bytes: []const u8) bool {
+    return reflection.matchesDocument(Doc, bytes);
+}
+
+pub fn decodeLiveConfig(bytes: []const u8) !LiveConfigPacket {
+    const doc = try reflection.read(LiveConfigDoc, bytes);
+    try doc.config.validate();
+    return .{ .revision = doc.revision, .config = doc.config };
+}
+
+pub fn decodeRuntimeRequest(bytes: []const u8) !RuntimeRequest {
+    return (try reflection.read(RuntimeRequestDoc, bytes)).request;
+}
+
+pub fn decodeRuntimeStatus(bytes: []const u8) !RuntimeStatus {
+    const doc = try reflection.read(RuntimeStatusDoc, bytes);
+    try doc.status.desired.validate();
+    return doc.status;
+}
+
+pub fn decodeMissionCommand(bytes: []const u8) !MissionCommandRow {
+    var row = (try reflection.read(MissionCommandDoc, bytes)).command;
+    try row.validate();
+    return row;
+}
+
 /// The compiled profile definitions shared by the runtime and viewer.
 pub const CompiledConfig = MissionConfig;
 pub const Math = math;
@@ -80,110 +179,6 @@ fn load(path: [*:0]const u16) ?std.os.windows.HMODULE {
     return LoadLibraryExW(full[0..n :0].ptr, null, dll_load_dir | dll_default_dirs);
 }
 
-pub const SerialBinary = struct {
-    // Little-endian field order. Slices use a u8 length followed by their items.
-    // Struct fields omit C layout padding.
-    pub fn write(w: *Io.Writer, value: anytype) !void {
-        const T = @TypeOf(value);
-        switch (@typeInfo(T)) {
-            .int => {
-                var buf: [@sizeOf(T)]u8 = undefined;
-                std.mem.writeInt(T, &buf, value, .little);
-                try w.writeAll(&buf);
-            },
-            .float => try write(w, @as(u32, @bitCast(@as(f32, @floatCast(value))))),
-            .bool => try write(w, @as(u8, @intFromBool(value))),
-            .@"enum" => |info| try write(w, @as(info.tag_type, @backingInt(value))),
-            .array => |info| {
-                if (info.child == u8) {
-                    try w.writeAll(&value);
-                } else {
-                    for (value) |item| try write(w, item);
-                }
-            },
-            .vector => |info| {
-                const array: [info.len]info.child = value;
-                try write(w, array);
-            },
-            .pointer => |info| {
-                if (info.size != .slice) @compileError("only slices can be written");
-                if (value.len > std.math.maxInt(u8)) return error.TooLong;
-                try write(w, @as(u8, @intCast(value.len)));
-                if (info.child == u8) {
-                    try w.writeAll(value);
-                } else {
-                    for (value) |item| try write(w, item);
-                }
-            },
-            .@"struct" => |info| inline for (info.field_names) |name| {
-                try write(w, @field(value, name));
-            },
-            else => @compileError("unsupported serial type " ++ @typeName(T)),
-        }
-    }
-
-    pub fn read(r: *Io.Reader, comptime T: type) !T {
-        switch (@typeInfo(T)) {
-            .int => {
-                var buf: [@sizeOf(T)]u8 = undefined;
-                try r.readSliceAll(&buf);
-                return std.mem.readInt(T, &buf, .little);
-            },
-            .float => {
-                const bits = try read(r, u32);
-                const narrow = @as(f32, @bitCast(bits));
-                if (T == f32) return narrow;
-                if (T == f64) return @as(f64, narrow);
-                @compileError("unsupported float type " ++ @typeName(T));
-            },
-            .bool => return try read(r, u8) != 0,
-            .@"enum" => |info| {
-                const raw = try read(r, info.tag_type);
-                return std.enums.fromInt(T, raw) orelse return error.InvalidEnum;
-            },
-            .array => |info| {
-                if (info.child == u8) {
-                    var out: T = undefined;
-                    try r.readSliceAll(&out);
-                    return out;
-                }
-                var out: T = undefined;
-                for (&out) |*item| item.* = try read(r, info.child);
-                return out;
-            },
-            .vector => |info| {
-                var array: [info.len]info.child = undefined;
-                inline for (0..info.len) |i| array[i] = try read(r, info.child);
-                return @bitCast(array);
-            },
-            .pointer => |info| {
-                if (info.size != .slice) @compileError("only slices can be read");
-                const len: u8 = try read(r, u8);
-                if (info.child == u8) {
-                    var buf: [256]u8 = undefined;
-                    try r.readSliceAll(buf[0..len]);
-                    return buf[0..len];
-                }
-                @compileError("only u8 slices can be read from pointer");
-            },
-            .@"struct" => |info| {
-                var out: T = undefined;
-                inline for (info.field_names, info.field_types) |name, field_type| {
-                    @field(out, name) = try read(r, field_type);
-                }
-                return out;
-            },
-            else => @compileError("unsupported serial type " ++ @typeName(T)),
-        }
-    }
-
-    pub fn readFromBuffer(comptime T: type, buf: []const u8) !struct { value: T, consumed: usize } {
-        var stream: Io.Reader = .fixed(buf);
-        const value = try read(&stream, T);
-        return .{ .value = value, .consumed = stream.seek };
-    }
-};
-
 pub const MissionDiynLoader = struct {
     auv_path: []const u8,
     dynlib: DynLib,
@@ -221,421 +216,12 @@ pub const MissionDiynLoader = struct {
     }
 };
 
-/// f32 control fields on the live-config wire; runtime `MissionConfig` stores f64.
-pub const OdometryPidWire = struct {
-    rotation_gate: f32,
-    kp: [6]f32,
-    ki: [6]f32,
-    kd: [6]f32,
-};
-
-pub const IbvsWire = struct {
-    center_deadband: f32,
-    target_height: f32,
-    interaction_cols: u8,
-    _pad: [3]u8 = .{ 0, 0, 0 },
-    interaction: [math.interaction_output_len][MissionConfig.max_ibvs_error_cols]f32,
-};
-
-fn widen3(v: [3]f32) math.Vector3f {
-    return .{ v[0], v[1], v[2] };
-}
-
-fn narrow3(v: math.Vector3f) [3]f32 {
-    return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) };
-}
-
-fn widen6(v: [6]f32) math.Vector6f {
-    return .{ v[0], v[1], v[2], v[3], v[4], v[5] };
-}
-
-fn narrow6(v: math.Vector6f) [6]f32 {
-    return .{
-        @floatCast(v[0]),
-        @floatCast(v[1]),
-        @floatCast(v[2]),
-        @floatCast(v[3]),
-        @floatCast(v[4]),
-        @floatCast(v[5]),
-    };
-}
-
-fn odometryFromWire(wire: OdometryPidWire) MissionConfig.OdometryPid {
-    return .{
-        .rotation_gate = wire.rotation_gate,
-        .kp = widen6(wire.kp),
-        .ki = widen6(wire.ki),
-        .kd = widen6(wire.kd),
-    };
-}
-
-fn odometryToWire(odometry: MissionConfig.OdometryPid) OdometryPidWire {
-    return .{
-        .rotation_gate = @floatCast(odometry.rotation_gate),
-        .kp = narrow6(odometry.kp),
-        .ki = narrow6(odometry.ki),
-        .kd = narrow6(odometry.kd),
-    };
-}
-
-fn ibvsFromWire(wire: IbvsWire) MissionConfig.Ibvs {
-    var interaction: [math.interaction_output_len][MissionConfig.max_ibvs_error_cols]f64 = @splat(@splat(0));
-    for (&interaction, &wire.interaction) |*row, source| {
-        inline for (0..MissionConfig.max_ibvs_error_cols) |i| row[i] = source[i];
-    }
-    return .{
-        .center_deadband = wire.center_deadband,
-        .target_height = wire.target_height,
-        .interaction_cols = wire.interaction_cols,
-        .interaction = interaction,
-    };
-}
-
-fn ibvsToWire(ibvs: MissionConfig.Ibvs) IbvsWire {
-    var interaction: [math.interaction_output_len][MissionConfig.max_ibvs_error_cols]f32 = @splat(@splat(0));
-    for (&interaction, &ibvs.interaction) |*row, source| {
-        inline for (0..MissionConfig.max_ibvs_error_cols) |i| row[i] = @floatCast(source[i]);
-    }
-    return .{
-        .center_deadband = @floatCast(ibvs.center_deadband),
-        .target_height = @floatCast(ibvs.target_height),
-        .interaction_cols = ibvs.interaction_cols,
-        .interaction = interaction,
-    };
-}
-
-/// Editable runtime configuration used by the viewer and the control protocol.
-pub const LiveConfigPacket = struct {
-    magic: [4]u8 = magic_value,
-    wire_version: u16 = wire_version_value,
-    camera_forward: [3]f32,
-    rotation_limit: [3]f32,
-    tam: [MissionConfig.thruster_count][MissionConfig.tam_cols]f32,
-    tam_len: u8,
-    odometry: OdometryPidWire,
-    ibvs: IbvsWire,
-    goal_dist_threshold: f32,
-    thrustor_saturate: f32,
-    log_freq_div: u16,
-    queue_capacity: u16,
-    print_stuff: bool,
-    clear_print_stuff: bool,
-    telemetry_transport: TelemetryTransport,
-    telemetry_addr: MissionConfig.FixedText(MissionConfig.telemetry_addr_max),
-    telemetry_log_path: MissionConfig.FixedText(MissionConfig.telemetry_log_path_max),
-
-    mission_id: MissionConfig.MissionId,
-    mission_profile: MissionConfig.MissionProfileId,
-    sensor_source: MissionConfig.SensorSource,
-    sensor_library: MissionConfig.FixedText(MissionConfig.path_max),
-    serial_port: MissionConfig.FixedText(MissionConfig.path_max),
-    sim_robot: MissionConfig.FixedText(MissionConfig.name_max),
-    sim_scene: MissionConfig.FixedText(MissionConfig.name_max),
-    sim_realtime: bool,
-
-    revision: u64 = 0,
-
-    const wire_version_value: u16 = 7;
-    const magic_value: [4]u8 = "MCF1".*;
-
-    const DecodeError = error{
-        BufferTooShort,
-        BadMagic,
-        UnsupportedWireVersion,
-        InvalidEnum,
-        TooLong,
-    };
-
-    const ValidateError = error{
-        InvalidTamLen,
-        InvalidQueueCapacity,
-        InvalidInteractionCols,
-        InvalidTextLength,
-        NonFinite,
-    };
-
-    pub fn decode(buf: []const u8) DecodeError!LiveConfigPacket {
-        if (buf.len < 4 + 2) return error.BufferTooShort;
-        if (!std.mem.eql(u8, buf[0..4], &magic_value)) return error.BadMagic;
-        const version = std.mem.readInt(u16, buf[4..6], .little);
-        if (version != wire_version_value) return error.UnsupportedWireVersion;
-
-        const parsed = SerialBinary.readFromBuffer(LiveConfigPacket, buf) catch return error.BufferTooShort;
-        if (parsed.consumed != buf.len) return error.TooLong;
-        if (!std.mem.eql(u8, &parsed.value.magic, &magic_value)) return error.BadMagic;
-        if (parsed.value.wire_version != wire_version_value) return error.UnsupportedWireVersion;
-        return parsed.value;
-    }
-
-    fn requireFinite(v: f32) ValidateError!void {
-        if (!std.math.isFinite(v)) return error.NonFinite;
-    }
-
-    fn validateTam(
-        tam: *const [MissionConfig.thruster_count][MissionConfig.tam_cols]f32,
-        tam_len: u8,
-    ) ValidateError!void {
-        for (tam, 0..) |row, i| {
-            if (i >= tam_len) break;
-            for (row) |v| try requireFinite(v);
-        }
-    }
-
-    fn validateOdometry(odometry: *const OdometryPidWire) ValidateError!void {
-        try requireFinite(odometry.rotation_gate);
-        for (odometry.kp) |v| try requireFinite(v);
-        for (odometry.ki) |v| try requireFinite(v);
-        for (odometry.kd) |v| try requireFinite(v);
-    }
-
-    fn validateIbvs(ibvs: *const IbvsWire) ValidateError!void {
-        if (ibvs.interaction_cols == 0 or ibvs.interaction_cols > MissionConfig.max_ibvs_error_cols)
-            return error.InvalidInteractionCols;
-        try requireFinite(ibvs.center_deadband);
-        try requireFinite(ibvs.target_height);
-        for (&ibvs.interaction) |row| {
-            for (row[0..ibvs.interaction_cols]) |v| try requireFinite(v);
-        }
-    }
-
-    pub fn validate(packet: *const LiveConfigPacket) !void {
-        if (!std.mem.eql(u8, &packet.magic, &magic_value)) return error.BadMagic;
-        if (packet.wire_version != wire_version_value) return error.UnsupportedWireVersion;
-        if (packet.tam_len == 0 or packet.tam_len > MissionConfig.thruster_count)
-            return error.InvalidTamLen;
-        if (packet.queue_capacity == 0 or packet.queue_capacity > MissionConfig.queue_capacity_max)
-            return error.InvalidQueueCapacity;
-        var forward_energy: f32 = 0;
-        for (packet.camera_forward) |value| {
-            try requireFinite(value);
-            forward_energy += value * value;
-        }
-        if (!std.math.isFinite(forward_energy) or forward_energy <= 1e-12) return error.NonFinite;
-        for (packet.rotation_limit) |value| if (std.math.isNan(value) or value < 0) return error.NonFinite;
-        try validateTam(&packet.tam, packet.tam_len);
-        try validateOdometry(&packet.odometry);
-        try validateIbvs(&packet.ibvs);
-        try requireFinite(packet.goal_dist_threshold);
-        try requireFinite(packet.thrustor_saturate);
-        switch (packet.telemetry_transport) {
-            .udp => {
-                const address = try packet.telemetry_addr.slice();
-                if (address.len == 0) return error.InvalidTextLength;
-            },
-            .stdout, .disabled => {},
-        }
-        _ = try packet.telemetry_log_path.slice();
-        var config = MissionConfig.compiledProfile(packet.mission_profile).*;
-        packet.applyToRuntimeConfig(&config);
-        try config.validate();
-    }
-
-    pub fn fromRuntimeConfig(config: *const MissionConfig.MissionConfig) LiveConfigPacket {
-        var tam_wire: [MissionConfig.thruster_count][MissionConfig.tam_cols]f32 = @splat(@splat(0));
-        for (0..config.tam_len) |i| {
-            inline for (0..MissionConfig.tam_cols) |j| tam_wire[i][j] = @floatCast(config.tam[i][j]);
-        }
-        return .{
-            .magic = magic_value,
-            .wire_version = wire_version_value,
-            .mission_id = config.mission_id,
-            .mission_profile = config.mission_profile,
-            .sensor_source = config.sensor_source,
-            .sensor_library = config.sensor_library,
-            .serial_port = config.serial_port,
-            .sim_robot = config.sim_robot,
-            .sim_scene = config.sim_scene,
-            .sim_realtime = config.sim_realtime,
-            .camera_forward = narrow3(config.camera_forward),
-            .rotation_limit = narrow3(config.rotation_limit),
-            .tam = tam_wire,
-            .tam_len = config.tam_len,
-            .odometry = odometryToWire(config.odometry),
-            .ibvs = ibvsToWire(config.ibvs),
-            .goal_dist_threshold = @floatCast(config.goal_dist_threshold),
-            .thrustor_saturate = @floatCast(config.thrustor_saturate),
-            .log_freq_div = config.log_freq_div,
-            .queue_capacity = config.queue_capacity,
-            .print_stuff = config.print_stuff,
-            .clear_print_stuff = config.clear_print_stuff,
-            .telemetry_transport = config.telemetry_transport,
-            .telemetry_addr = config.telemetry_addr,
-            .telemetry_log_path = config.telemetry_log_path,
-        };
-    }
-
-    pub fn applyToRuntimeConfig(packet: LiveConfigPacket, dst: *MissionConfig.MissionConfig) void {
-        const teleop_port = dst.teleop_port;
-
-        dst.mission_id = packet.mission_id;
-        dst.mission_profile = packet.mission_profile;
-        dst.sensor_source = packet.sensor_source;
-        dst.sensor_library = packet.sensor_library;
-        dst.serial_port = packet.serial_port;
-        dst.sim_robot = packet.sim_robot;
-        dst.sim_scene = packet.sim_scene;
-        dst.sim_realtime = packet.sim_realtime;
-        dst.camera_forward = widen3(packet.camera_forward);
-        dst.rotation_limit = widen3(packet.rotation_limit);
-        var tam: [MissionConfig.thruster_count]math.Vector6f = @splat(@splat(0));
-        for (0..packet.tam_len) |i| {
-            inline for (0..MissionConfig.tam_cols) |j| tam[i][j] = packet.tam[i][j];
-        }
-        dst.tam = tam;
-        dst.tam_len = packet.tam_len;
-        dst.odometry = odometryFromWire(packet.odometry);
-        dst.ibvs = ibvsFromWire(packet.ibvs);
-        dst.goal_dist_threshold = packet.goal_dist_threshold;
-        dst.thrustor_saturate = packet.thrustor_saturate;
-        dst.log_freq_div = packet.log_freq_div;
-        dst.queue_capacity = packet.queue_capacity;
-        dst.print_stuff = packet.print_stuff;
-        dst.clear_print_stuff = packet.clear_print_stuff;
-        dst.telemetry_transport = packet.telemetry_transport;
-        dst.telemetry_addr = packet.telemetry_addr;
-        dst.telemetry_log_path = packet.telemetry_log_path;
-
-        dst.teleop_port = teleop_port;
-    }
-};
-
 pub const Goal = struct {
     position: math.Vector3f,
     look_at: math.Vector3f,
 };
 
-/// Runtime telemetry data produced by the mission loop for publication.
 pub const telemetry_step_max = 64;
-pub const telemetry_frame_abi_version: u32 = 2;
-
-pub const TelemetryPose = extern struct {
-    pos: [3]f32,
-    quat: [4]f32,
-};
-
-pub const TelemetryObject = extern struct {
-    pose: TelemetryPose,
-    size: [3]f32,
-    id: u32,
-    cls: u8,
-    _pad: [3]u8,
-};
-
-pub fn telemetryVec3(v: math.Vector3f) [3]f32 {
-    return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) };
-}
-
-pub fn telemetryQuat(v: math.Quaternionf) [4]f32 {
-    return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]), @floatCast(v[3]) };
-}
-
-pub fn telemetryPose(p: math.Pose) TelemetryPose {
-    return .{ .pos = telemetryVec3(p.pos), .quat = telemetryQuat(p.quat) };
-}
-
-pub fn telemetryVec6(v: math.Vector6f) [6]f32 {
-    return .{
-        @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]),
-        @floatCast(v[3]), @floatCast(v[4]), @floatCast(v[5]),
-    };
-}
-
-pub fn telemetryFloat(v: f64) f32 {
-    return @floatCast(v);
-}
-
-pub const TelemetryPoint2u = extern struct {
-    x: u32,
-    y: u32,
-};
-
-pub const TelemetryObject2d = extern struct {
-    top_left: TelemetryPoint2u,
-    bottom_right: TelemetryPoint2u,
-    id: u32,
-    cls: u8,
-    _pad: [3]u8,
-};
-
-pub const TelemetryAxisOk = extern struct {
-    x: bool,
-    y: bool,
-    z: bool,
-    _pad: u8,
-};
-
-pub const TelemetryGoal = extern struct {
-    position: [3]f32,
-    look_at: [3]f32,
-};
-
-/// Canonical fixed-layout runtime telemetry shared with the viewer.
-/// All variable-length data is stored inline with explicit lengths so the same
-/// type can be used for direct display, UDP, and logs.
-pub const TelemetryFrame = extern struct {
-    magic: [4]u8,
-    abi_version: u32,
-    timestamp: u64,
-    camera_pose: TelemetryPose,
-    position_ok: TelemetryAxisOk,
-    attitude_ok: TelemetryAxisOk,
-    depth_ok: bool,
-    _pad0: u8,
-    _pad1: u16,
-    depth: f32,
-    objects_len: u16,
-    boxes_len: u16,
-    thrusters_len: u8,
-    step_len: u8,
-    goals_len: u16,
-    objects: [Auv.Frame.max_objects]TelemetryObject,
-    boxes: [Auv.Frame.max_objects]TelemetryObject2d,
-    thrusters: [MissionConfig.thruster_count]f32,
-    step: [telemetry_step_max]u8,
-    force_error: [3]f32,
-    goals: [MissionConfig.queue_capacity_max]TelemetryGoal,
-    clear_screen: bool,
-    _debug_pad: [7]u8,
-    cycle_us: u64,
-    has_dt: bool,
-    _dt_pad: [3]u8,
-    dt: f32,
-    kp: [6]f32,
-    ki: [6]f32,
-    kd: [6]f32,
-    tam: [MissionConfig.thruster_count][6]f32,
-    tam_len: u8,
-    _tam_pad: [7]u8,
-    control_pose: [6]f32,
-    translation_error: [3]f32,
-    target_orientation: [4]f32,
-    target_quaternion: [4]f32,
-    attitude_error: [3]f32,
-    rotation_limit: [3]f32,
-    input: [6]f32,
-};
-
-comptime {
-    // LiveConfigPacket is serialized field-by-field by SerialBinary. Keep
-    // these anchors in order when changing the control wire schema.
-    const live_fields = @typeInfo(LiveConfigPacket).@"struct".field_names;
-    if (live_fields.len != 26 or
-        !std.mem.eql(u8, live_fields[2], "camera_forward") or
-        !std.mem.eql(u8, live_fields[14], "telemetry_transport") or
-        !std.mem.eql(u8, live_fields[16], "telemetry_log_path"))
-        @compileError("live config packet control fields changed order");
-    // Preserve the existing telemetry frame layout for runtime and viewer.
-    if (@offsetOf(TelemetryFrame, "timestamp") != 8)
-        @compileError("telemetry timestamp ABI drift");
-    if (@offsetOf(TelemetryFrame, "objects") <= @offsetOf(TelemetryFrame, "goals_len"))
-        @compileError("telemetry payload ABI drift");
-    if (@offsetOf(TelemetryFrame, "cycle_us") <= @offsetOf(TelemetryFrame, "clear_screen") or
-        @offsetOf(TelemetryFrame, "input") <= @offsetOf(TelemetryFrame, "rotation_limit"))
-        @compileError("telemetry diagnostics ABI drift");
-}
-
-/// Fingerprint of `TelemetryFrame`. A datagram is this hash plus the raw `extern` image.
-pub const telemetry_schema_hash: u64 = reflection.schemaHash(TelemetryFrame);
 
 const outbound_buf_len = 64 * 1024;
 
@@ -699,7 +285,7 @@ pub const TelemetryPublisher = union(TelemetryTransport) {
     disabled: void,
 
     fn init(io: Io, config: MissionConfig.MissionConfig) !TelemetryPublisher {
-        return switch (config.telemetry_transport) {
+        return switch (config.runtime.telemetry_transport) {
             .udp => .{ .udp = try .init(io, config) },
             .stdout => .{ .stdout = try .init(io) },
             .disabled => .disabled,
@@ -729,39 +315,64 @@ pub const TelemetryPublisher = union(TelemetryTransport) {
     }
 };
 
-pub fn encodeTelemetryFrame(buf: []u8, frame: TelemetryFrame) ![]const u8 {
-    const image = std.mem.asBytes(&frame);
-    if (buf.len < 8 + image.len) return error.NoSpaceLeft;
-    std.mem.writeInt(u64, buf[0..8], telemetry_schema_hash, .little);
-    @memcpy(buf[8..][0..image.len], image);
-    return buf[0 .. 8 + image.len];
-}
-
-/// A matching hash and an aligned payload are a pointer into `buf`.
-pub fn telemetryFrameView(buf: []const u8) error{ EndOfStream, UnsupportedAbiVersion, MisalignedTelemetry }!*const TelemetryFrame {
-    if (buf.len < 8 + @sizeOf(TelemetryFrame)) return error.EndOfStream;
-    if (std.mem.readInt(u64, buf[0..8], .little) != telemetry_schema_hash) return error.UnsupportedAbiVersion;
-    const payload = buf[8..][0..@sizeOf(TelemetryFrame)];
-    if (@intFromPtr(payload.ptr) % @alignOf(TelemetryFrame) != 0) return error.MisalignedTelemetry;
-    const aligned: []align(@alignOf(TelemetryFrame)) const u8 = @alignCast(payload);
-    return std.mem.bytesAsValue(TelemetryFrame, aligned);
-}
-
-fn roundDisplayFloat(value: f32) f32 {
-    return @round(value * 100000.0) / 100000.0;
-}
-
-fn roundDisplayArray(comptime len: usize, value: [len]f32) [len]f32 {
-    var rounded: [len]f32 = undefined;
-    for (value, &rounded) |source, *dest| dest.* = roundDisplayFloat(source);
-    return rounded;
-}
-
-fn roundDisplayPose(value: TelemetryPose) TelemetryPose {
+pub fn missionCommandToRow(command: MissionCommand) MissionCommandRow {
     return .{
-        .pos = roundDisplayArray(3, value.pos),
-        .quat = roundDisplayArray(4, value.quat),
+        .kind = command.kind,
+        .maneuver = command.maneuver,
+        .position = .{
+            @floatCast(command.position[0]),
+            @floatCast(command.position[1]),
+            @floatCast(command.position[2]),
+        },
+        .look_direction = .{
+            @floatCast(command.look_direction[0]),
+            @floatCast(command.look_direction[1]),
+            @floatCast(command.look_direction[2]),
+        },
+        .object_class = command.object_class,
     };
+}
+
+pub fn missionCommandFromRow(row: MissionCommandRow) MissionCommand {
+    return .{
+        .kind = row.kind,
+        .maneuver = row.maneuver,
+        .position = .{ row.position[0], row.position[1], row.position[2] },
+        .look_direction = .{ row.look_direction[0], row.look_direction[1], row.look_direction[2] },
+        .object_class = row.object_class,
+    };
+}
+
+pub fn encodeControl(buf: []align(8) u8, value: anytype) ![]const u8 {
+    const V = @TypeOf(value);
+    const wrapped = if (V == LiveConfigPacket)
+        LiveConfigDoc{ .revision = value.revision, .config = value.config }
+    else if (V == RuntimeRequest)
+        RuntimeRequestDoc{ .request = value }
+    else if (V == RuntimeStatus)
+        RuntimeStatusDoc{ .status = value }
+    else if (V == MissionCommand) blk: {
+        var cmd = value;
+        try cmd.validate();
+        break :blk MissionCommandDoc{ .command = missionCommandToRow(cmd) };
+    } else
+        value;
+    var fallback = std.heap.FixedBufferAllocator.init(buf);
+    return reflection.write(fallback.allocator(), @TypeOf(wrapped), wrapped) catch error.NoSpaceLeft;
+}
+
+pub fn encodeTelemetryFrame(buf: []align(8) u8, frame: anytype) ![]const u8 {
+    return encodeControl(buf, frame);
+}
+
+pub fn decodeTelemetryFrame(comptime Doc: type, buf: []const u8) !Doc {
+    return reflection.read(Doc, buf) catch error.UnsupportedAbiVersion;
+}
+
+fn roundDisplayFloat(value: anytype) @TypeOf(value) {
+    const T = @TypeOf(value);
+    const scale: T = 100000.0;
+    return @round(value * scale) / scale;
 }
 
 fn writeAsciiFloatList(writer: *Io.Writer, values: anytype) !void {
@@ -773,137 +384,95 @@ fn writeAsciiFloatList(writer: *Io.Writer, values: anytype) !void {
     try writer.writeAll("]");
 }
 
-fn writeAsciiIntList(writer: *Io.Writer, values: anytype) !void {
-    try writer.writeAll("[");
-    for (values, 0..) |value, i| {
-        if (i != 0) try writer.writeAll(",");
-        try writer.print("{}", .{value});
+fn writeProjected(writer: *Io.Writer, comptime prefix: []const u8, value: anytype) !void {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .int, .bool => try writer.print("{s}={}\n", .{ prefix, value }),
+        .float => try writer.print("{s}={d:.5}\n", .{ prefix, roundDisplayFloat(value) }),
+        .array => |arr| {
+            if (arr.child == u8) {
+                try writer.print("{s}={s}\n", .{ prefix, std.mem.sliceTo(&value, 0) });
+                return;
+            }
+            if (arr.child == f32 or arr.child == f64) {
+                try writer.print("{s}=", .{prefix});
+                try writeAsciiFloatList(writer, value);
+                try writer.writeAll("\n");
+                return;
+            }
+            if (arr.len > 8) {
+                try writer.print("{s}.len={d}\n", .{ prefix, arr.len });
+                for (value) |item| {
+                    try writeBare(writer, item);
+                    try writer.writeAll("\n");
+                }
+                return;
+            }
+            inline for (0..arr.len) |i| {
+                try writeProjected(writer, prefix ++ std.fmt.comptimePrint("[{}]", .{i}), value[i]);
+            }
+        },
+        .@"struct" => {
+            inline for (@typeInfo(T).@"struct".field_names) |name| {
+                try writeProjected(writer, prefix ++ "." ++ name, @field(value, name));
+            }
+        },
+        .pointer => |ptr| {
+            if (ptr.size != .slice) {
+                try writer.print("{s}=?\n", .{prefix});
+                return;
+            }
+            if (ptr.child == u8) {
+                try writer.print("{s}={s}\n", .{ prefix, value });
+                return;
+            }
+            try writer.print("{s}.len={}\n", .{ prefix, value.len });
+            for (value) |item| {
+                try writeBare(writer, item);
+                try writer.writeAll("\n");
+            }
+        },
+        else => try writer.print("{s}=?\n", .{prefix}),
     }
-    try writer.writeAll("]");
 }
 
-pub fn encodeTelemetryFrameAscii(buf: []u8, frame: TelemetryFrame) ![]const u8 {
-    var objects: [Auv.Frame.max_objects]struct {
-        pose: TelemetryPose,
-        size: [3]f32,
-        id: u32,
-        cls: u8,
-    } = undefined;
-    for (frame.objects[0..frame.objects_len], objects[0..frame.objects_len]) |source, *dest| {
-        dest.* = .{
-            .pose = roundDisplayPose(source.pose),
-            .size = roundDisplayArray(3, source.size),
-            .id = source.id,
-            .cls = source.cls,
-        };
+fn writeBare(writer: *Io.Writer, value: anytype) !void {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .int, .bool => try writer.print("{}", .{value}),
+        .float => try writer.print("{d:.5}", .{roundDisplayFloat(value)}),
+        .array => |arr| {
+            if (arr.child == f32 or arr.child == f64) {
+                try writeAsciiFloatList(writer, value);
+                return;
+            }
+            try writer.writeAll("[");
+            inline for (0..arr.len) |i| {
+                if (i != 0) try writer.writeAll(",");
+                try writeBare(writer, value[i]);
+            }
+            try writer.writeAll("]");
+        },
+        .@"struct" => |info| {
+            try writer.writeAll("{");
+            inline for (info.field_names, 0..) |name, i| {
+                if (i != 0) try writer.writeAll(" ");
+                try writer.print("{s}=", .{name});
+                try writeBare(writer, @field(value, name));
+            }
+            try writer.writeAll("}");
+        },
+        else => try writer.writeAll("?"),
     }
+}
 
+pub fn encodeTelemetryFrameAscii(buf: []u8, frame: anytype) ![]const u8 {
     var writer: Io.Writer = .fixed(buf);
     try writer.writeAll("FRAME_BEGIN\n");
-    try writer.print("magic={s}\nabi_version={}\ntimestamp={}\n", .{
-        frame.magic[0..],
-        frame.abi_version,
-        frame.timestamp,
-    });
-    try writer.writeAll("camera_pose.pos=");
-    try writeAsciiFloatList(&writer, frame.camera_pose.pos);
-    try writer.writeAll("\ncamera_pose.quat=");
-    try writeAsciiFloatList(&writer, frame.camera_pose.quat);
-    try writer.print("\nposition_ok={},{},{}\nattitude_ok={},{},{}\n", .{
-        frame.position_ok.x,
-        frame.position_ok.y,
-        frame.position_ok.z,
-        frame.attitude_ok.x,
-        frame.attitude_ok.y,
-        frame.attitude_ok.z,
-    });
-    try writer.print("depth_ok={}\ndepth={d:.5}\n", .{
-        frame.depth_ok,
-        roundDisplayFloat(frame.depth),
-    });
-    try writer.print("objects_len={}\n", .{frame.objects_len});
-    for (objects[0..frame.objects_len], 0..) |object, i| {
-        try writer.print("object[{}].pose.pos=", .{i});
-        try writeAsciiFloatList(&writer, object.pose.pos);
-        try writer.print("\nobject[{}].pose.quat=", .{i});
-        try writeAsciiFloatList(&writer, object.pose.quat);
-        try writer.print("\nobject[{}].size=", .{i});
-        try writeAsciiFloatList(&writer, object.size);
-        try writer.print("\nobject[{}].id={}\nobject[{}].cls={}\n", .{
-            i,
-            object.id,
-            i,
-            object.cls,
-        });
+    inline for (@typeInfo(@TypeOf(frame)).@"struct".field_names) |name| {
+        try writeProjected(&writer, name, @field(frame, name));
     }
-    try writer.print("boxes_len={}\n", .{frame.boxes_len});
-    for (frame.boxes[0..frame.boxes_len], 0..) |box, i| {
-        try writer.print("box[{}].top_left=[{},{}]\nbox[{}].bottom_right=[{},{}]\nbox[{}].id={}\nbox[{}].cls={}\n", .{
-            i,
-            box.top_left.x,
-            box.top_left.y,
-            i,
-            box.bottom_right.x,
-            box.bottom_right.y,
-            i,
-            box.id,
-            i,
-            box.cls,
-        });
-    }
-    try writer.print("thrusters_len={}\nthrusters=", .{frame.thrusters_len});
-    try writeAsciiFloatList(&writer, frame.thrusters[0..frame.thrusters_len]);
-    try writer.print("\nstep_len={}\nstep_bytes=", .{frame.step_len});
-    try writeAsciiIntList(&writer, frame.step[0..frame.step_len]);
-    try writer.writeAll("\nforce_error=");
-    try writeAsciiFloatList(&writer, frame.force_error);
-    try writer.print("\ngoals_len={}\n", .{frame.goals_len});
-    for (frame.goals[0..frame.goals_len], 0..) |goal, i| {
-        try writer.print("goal[{}].position=", .{i});
-        try writeAsciiFloatList(&writer, goal.position);
-        try writer.print("\ngoal[{}].look_at=", .{i});
-        try writeAsciiFloatList(&writer, goal.look_at);
-        try writer.writeAll("\n");
-    }
-    try writer.print(
-        "clear_screen={}\ncycle_us={}\nhas_dt={}\ndt={d:.5}\n",
-        .{ frame.clear_screen, frame.cycle_us, frame.has_dt, roundDisplayFloat(frame.dt) },
-    );
-    try writer.writeAll("kp=");
-    try writeAsciiFloatList(&writer, frame.kp);
-    try writer.writeAll("\nki=");
-    try writeAsciiFloatList(&writer, frame.ki);
-    try writer.writeAll("\nkd=");
-    try writeAsciiFloatList(&writer, frame.kd);
-    try writer.print("\ntam_len={}\n", .{frame.tam_len});
-    for (frame.tam[0..frame.tam_len], 0..) |row, i| {
-        try writer.print("tam[{}]=", .{i});
-        try writeAsciiFloatList(&writer, row);
-        try writer.writeAll("\n");
-    }
-    try writer.writeAll("control_pose=");
-    try writeAsciiFloatList(&writer, frame.control_pose);
-    try writer.writeAll("\ntranslation_error=");
-    try writeAsciiFloatList(&writer, frame.translation_error);
-    try writer.writeAll("\ntarget_orientation=");
-    try writeAsciiFloatList(&writer, frame.target_orientation);
-    try writer.writeAll("\ntarget_quaternion=");
-    try writeAsciiFloatList(&writer, frame.target_quaternion);
-    try writer.writeAll("\nattitude_error=");
-    try writeAsciiFloatList(&writer, frame.attitude_error);
-    try writer.writeAll("\nrotation_limit=");
-    try writeAsciiFloatList(&writer, frame.rotation_limit);
-    try writer.writeAll("\ninput=");
-    try writeAsciiFloatList(&writer, frame.input);
-    try writer.writeAll("\nFRAME_END\n");
-    return writer.buffered();
-}
-
-pub fn encodeMissionCommand(buf: []u8, command: MissionCommand) ![]const u8 {
-    var writer: Io.Writer = .fixed(buf);
-    var packet = command;
-    try packet.validate();
-    try SerialBinary.write(&writer, packet);
+    try writer.writeAll("FRAME_END\n");
     return writer.buffered();
 }
 
@@ -911,8 +480,8 @@ fn processTelemetry(
     io: Io,
     publisher: *TelemetryPublisher,
     log_file: ?Io.File,
-    frame: TelemetryFrame,
-    encoded_buf: *[outbound_buf_len]u8,
+    frame: anytype,
+    encoded_buf: *align(8) [outbound_buf_len]u8,
     ascii_buf: *[outbound_buf_len]u8,
     stdout_enabled: bool,
 ) void {
@@ -939,131 +508,19 @@ fn processTelemetry(
     }
 }
 
-/// Decode the fixed telemetry frame used for UDP and logs.
-pub fn decodeTelemetryFrame(buf: []const u8, frame: *TelemetryFrame) !void {
-    if (telemetryFrameView(buf)) |view| {
-        frame.* = view.*;
-    } else |err| switch (err) {
-        error.MisalignedTelemetry => @memcpy(std.mem.asBytes(frame), buf[8..][0..@sizeOf(TelemetryFrame)]),
-        else => return err,
-    }
-    if (!std.mem.eql(u8, &frame.magic, "AUV1")) return error.BadMagic;
-    if (frame.abi_version != telemetry_frame_abi_version) return error.UnsupportedAbiVersion;
-    if (frame.objects_len > frame.objects.len or frame.boxes_len > frame.boxes.len or
-        frame.thrusters_len > frame.thrusters.len or frame.step_len > frame.step.len or
-        frame.goals_len > frame.goals.len or frame.tam_len > frame.tam.len)
-        return error.InvalidTelemetryLengths;
-}
-
-/// Direct command sent over the control socket; values use the active TAM order.
-pub const ThrusterCommand = struct {
-    magic: [4]u8 = "AUT1".*,
-    run_id: u64,
-    client_id: u64,
-    sequence: u64,
-    count: u8,
-    values: [MissionConfig.thruster_count]f32,
-};
-
-pub const TeleopCommand = struct {
-    translation: [3]f32,
-    orientation: [4]f32,
-};
-
-pub const MissionCommandKind = enum(u8) {
-    point,
-    object,
-};
-pub fn teleopCommand(translation: math.Vector3f, orientation: math.Quaternionf) TeleopCommand {
-    return .{
-        .translation = .{
-            @floatCast(translation[0]),
-            @floatCast(translation[1]),
-            @floatCast(translation[2]),
-        },
-        .orientation = .{
-            @floatCast(orientation[0]),
-            @floatCast(orientation[1]),
-            @floatCast(orientation[2]),
-            @floatCast(orientation[3]),
-        },
-    };
-}
-
-pub fn teleopTranslation(command: TeleopCommand) math.Vector3f {
-    return .{ command.translation[0], command.translation[1], command.translation[2] };
-}
-
-pub fn teleopOrientation(command: TeleopCommand) math.Quaternionf {
-    return .{ command.orientation[0], command.orientation[1], command.orientation[2], command.orientation[3] };
-}
-
-
-pub const MissionManeuver = enum(u8) {
-    move,
-    pass,
-    circle,
-};
-
 pub const MissionCommand = struct {
-    magic: [4]u8 = mission_command_magic,
-    wire_version: u16 = mission_command_wire_version,
     kind: MissionCommandKind,
     maneuver: MissionManeuver,
     position: math.Vector3f = @splat(0),
     look_direction: math.Vector3f = .{ 0, 0, 1 },
     object_class: u8 = 0,
 
-    pub const DecodeError = error{
-        BufferTooShort,
-        InvalidLength,
-        BadMagic,
-        UnsupportedWireVersion,
-        InvalidEnum,
-        NonFinite,
-        InvalidLookDirection,
-        InvalidPointManeuver,
-    };
-
-    pub fn decode(buf: []const u8) DecodeError!MissionCommand {
-        if (buf.len < 6) return error.BufferTooShort;
-        if (!std.mem.eql(u8, buf[0..4], &mission_command_magic)) return error.BadMagic;
-        if (std.mem.readInt(u16, buf[4..6], .little) != mission_command_wire_version)
-            return error.UnsupportedWireVersion;
-
-        const parsed = SerialBinary.readFromBuffer(MissionCommand, buf) catch |err| switch (err) {
-            error.InvalidEnum => return error.InvalidEnum,
-            else => return error.BufferTooShort,
-        };
-        if (parsed.consumed != buf.len) return error.InvalidLength;
-
-        var command = parsed.value;
-        try command.validate();
-        return command;
-    }
-
-    pub fn validate(self: *MissionCommand) DecodeError!void {
-        if (!std.mem.eql(u8, &self.magic, &mission_command_magic)) return error.BadMagic;
-        if (self.wire_version != mission_command_wire_version) return error.UnsupportedWireVersion;
-        if (self.kind == .point and self.maneuver != .move)
-            return error.InvalidPointManeuver;
-
-        inline for (0..3) |i| {
-            if (!std.math.isFinite(self.position[i])) return error.NonFinite;
-            if (!std.math.isFinite(self.look_direction[i])) return error.NonFinite;
-        }
-
-        if (self.kind == .point) {
-            const length = math.length3f(self.look_direction);
-            if (!std.math.isFinite(length) or length <= 1e-6)
-                return error.InvalidLookDirection;
-            self.look_direction /= @as(math.Vector3f, @splat(length));
-        }
+    pub fn validate(self: *MissionCommand) !void {
+        var row = missionCommandToRow(self.*);
+        try row.validate();
+        self.look_direction = .{ row.look_direction[0], row.look_direction[1], row.look_direction[2] };
     }
 };
-
-const mission_command_magic: [4]u8 = "AUM1".*;
-const mission_command_wire_version: u16 = 1;
 
 pub const Telemetry = struct {
     state: RuntimeState = .idle,
@@ -1072,9 +529,15 @@ pub const Telemetry = struct {
     last_error: MissionConfig.FixedText(256) = .{},
     telemetry_error: MissionConfig.FixedText(256) = .{},
     run_id: u64 = 0,
-    direct_command: ?ThrusterCommand = null,
+    direct_values: [MissionConfig.thruster_count]f32 = @splat(0),
+    direct_len: u8 = 0,
     direct_last_received: ?Io.Clock.Timestamp = null,
-    teleop_command: ?TeleopCommand = null,
+    teleop_packet: [1024]u8 = undefined,
+    teleop_packet_len: usize = 0,
+    dna_queue: [8][1024]u8 = undefined,
+    dna_len: [8]u16 = @splat(0),
+    dna_count: u8 = 0,
+    dna_read: u8 = 0,
     mission_command: ?MissionCommand = null,
     pending_lifecycle: ?error{ MissionRestart, MissionStopped } = null,
     accepted_client_id: u64 = 0,
@@ -1084,13 +547,13 @@ pub const Telemetry = struct {
 
     publisher: TelemetryPublisher,
     log_file: ?Io.File,
-    encoded_buf: [outbound_buf_len]u8 = undefined,
+    encoded_buf: [outbound_buf_len]u8 align(8) = undefined,
     ascii_buf: [outbound_buf_len]u8 = undefined,
     stdout_log_counter: u64 = 0,
     stdout_log_freq_div: u16,
     control_socket: ?Io.net.Socket = null,
 
-    initial_config_packet: LiveConfigPacket = undefined,
+    initial_config: MissionConfig.MissionConfig = undefined,
 
     pub fn init(io: Io, config: MissionConfig.MissionConfig, enable_udp_control: bool) !Telemetry {
         var publisher = try TelemetryPublisher.init(io, config);
@@ -1098,11 +561,11 @@ pub const Telemetry = struct {
 
         const control_socket: ?Io.net.Socket = if (enable_udp_control) blk: {
             var control_addr_buf: [48]u8 = undefined;
-            const control_addr_text = try std.fmt.bufPrint(&control_addr_buf, "0.0.0.0:{d}", .{config.teleop_port});
+            const control_addr_text = try std.fmt.bufPrint(&control_addr_buf, "0.0.0.0:{d}", .{config.runtime.teleop_port});
             const control_bind = try Io.net.IpAddress.parseLiteral(control_addr_text);
             break :blk control_bind.bind(io, .{ .mode = .dgram, .protocol = .udp }) catch |err| switch (err) {
                 error.AddressInUse => {
-                    std.log.err("control UDP port {d} is already in use", .{config.teleop_port});
+                    std.log.err("control UDP port {d} is already in use", .{config.runtime.teleop_port});
                     return error.AddressInUse;
                 },
                 else => return err,
@@ -1121,7 +584,7 @@ pub const Telemetry = struct {
             .log_file = log_file,
             .stdout_log_freq_div = config.log_freq_div,
             .control_socket = control_socket,
-            .initial_config_packet = LiveConfigPacket.fromRuntimeConfig(&config),
+            .initial_config = config,
         };
         return telemetry;
     }
@@ -1135,12 +598,13 @@ pub const Telemetry = struct {
 
     /// Replace outputs transactionally; the listener never changes ownership.
     pub fn reconfigure(self: *Telemetry, io: Io, config: MissionConfig.MissionConfig) !void {
-        const previous = self.initial_config_packet;
-        const publisher_changed = config.telemetry_transport != previous.telemetry_transport or
-            (config.telemetry_transport == .udp and !MissionConfig.textEqual(config.telemetry_addr, previous.telemetry_addr));
+        const previous = self.initial_config;
+        const publisher_changed = config.runtime.telemetry_transport != previous.runtime.telemetry_transport or
+            (config.runtime.telemetry_transport == .udp and
+                !MissionConfig.textEqual(config.runtime.telemetry_addr, previous.runtime.telemetry_addr));
         var replacement: ?TelemetryPublisher = if (publisher_changed) try TelemetryPublisher.init(io, config) else null;
         errdefer if (replacement) |*publisher| publisher.deinit(io);
-        const log_changed = !MissionConfig.textEqual(config.telemetry_log_path, previous.telemetry_log_path);
+        const log_changed = !MissionConfig.textEqual(config.runtime.telemetry_log_path, previous.runtime.telemetry_log_path);
         const log_file: ?Io.File = if (log_changed) blk: {
             if (try config.telemetryLogPath()) |path| break :blk try Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
             break :blk null;
@@ -1154,7 +618,7 @@ pub const Telemetry = struct {
             self.log_file = log_file;
         }
         self.stdout_log_freq_div = config.log_freq_div;
-        self.initial_config_packet = LiveConfigPacket.fromRuntimeConfig(&config);
+        self.initial_config = config;
     }
 
     pub fn report(self: *Telemetry, err: anyerror) void {
@@ -1164,16 +628,46 @@ pub const Telemetry = struct {
     }
 
     pub fn clearCommands(self: *Telemetry) void {
-        self.direct_command = null;
+        self.direct_len = 0;
         self.direct_last_received = null;
-        self.teleop_command = null;
+        self.teleop_packet_len = 0;
+        self.dna_count = 0;
         self.mission_command = null;
     }
 
-    pub fn takeTeleopCommand(self: *Telemetry) ?TeleopCommand {
-        const command = self.teleop_command;
-        self.teleop_command = null;
-        return command;
+    pub fn storeDnaPacket(self: *Telemetry, bytes: []const u8) void {
+        if (bytes.len == 0 or bytes.len > self.dna_queue[0].len) return;
+        if (self.dna_count == self.dna_queue.len) {
+            self.dna_read = (self.dna_read + 1) % @as(u8, @intCast(self.dna_queue.len));
+            self.dna_count -= 1;
+        }
+        const slot = (self.dna_read + self.dna_count) % @as(u8, @intCast(self.dna_queue.len));
+        @memcpy(self.dna_queue[slot][0..bytes.len], bytes);
+        self.dna_len[slot] = @intCast(bytes.len);
+        self.dna_count += 1;
+    }
+
+    pub fn takeDnaPacket(self: *Telemetry) ?[]const u8 {
+        if (self.dna_count == 0) return null;
+        const slot = self.dna_read;
+        const len = self.dna_len[slot];
+        self.dna_read = (self.dna_read + 1) % @as(u8, @intCast(self.dna_queue.len));
+        self.dna_count -= 1;
+        return self.dna_queue[slot][0..len];
+    }
+
+    pub fn takeTeleopPacket(self: *Telemetry) ?[]const u8 {
+        if (self.teleop_packet_len == 0) return null;
+        const packet = self.teleop_packet[0..self.teleop_packet_len];
+        self.teleop_packet_len = 0;
+        return packet;
+    }
+
+    pub fn storeTeleopPacket(self: *Telemetry, bytes: []const u8) void {
+        if (self.state != .running or self.pending_lifecycle != null) return;
+        if (bytes.len > self.teleop_packet.len) return;
+        @memcpy(self.teleop_packet[0..bytes.len], bytes);
+        self.teleop_packet_len = bytes.len;
     }
 
     pub fn takeMissionCommand(self: *Telemetry) ?MissionCommand {
@@ -1184,16 +678,13 @@ pub const Telemetry = struct {
 
     pub fn applyConfig(self: *Telemetry, io: Io, current: *MissionConfig.MissionConfig, packet: LiveConfigPacket) !void {
         try packet.validate();
-        if (packet.sensor_source != current.sensor_source) return error.SensorSourceIsCompiled;
         if (packet.revision != self.revision) {
-            // A repeated accepted packet is an acknowledgment retry, not a new edit.
-            var current_packet = LiveConfigPacket.fromRuntimeConfig(current);
-            current_packet.revision = packet.revision;
-            if (std.meta.eql(packet, current_packet)) return;
+            var ack = LiveConfigPacket.fromRuntimeConfig(current);
+            ack.revision = packet.revision;
+            if (std.meta.eql(ack.config, packet.config) and ack.revision == packet.revision) return;
             return error.StaleConfig;
         }
-        var next = current.*;
-        packet.applyToRuntimeConfig(&next);
+        const next = packet.config;
         const restart = !MissionConfig.MissionConfig.operationallyEqual(current, &next);
         // Open replacement telemetry resources before committing the new config.
         try self.reconfigure(io, next);
@@ -1248,14 +739,10 @@ pub const Telemetry = struct {
     }
 
     pub fn status(self: *const Telemetry, current: *const MissionConfig.MissionConfig, config_reply_revision: u64, config_rejected: bool) RuntimeStatus {
-        var desired = LiveConfigPacket.fromRuntimeConfig(current);
-        desired.revision = self.revision;
-        var active = LiveConfigPacket.fromRuntimeConfig(current);
-        // Publication resources belong to the application and can differ from the
-        // desired defaults after a failed startup publisher open.
-        active.telemetry_transport = self.initial_config_packet.telemetry_transport;
-        active.telemetry_addr = self.initial_config_packet.telemetry_addr;
-        active.telemetry_log_path = self.initial_config_packet.telemetry_log_path;
+        var active_value = current.*;
+        active_value.runtime.telemetry_transport = self.initial_config.runtime.telemetry_transport;
+        active_value.runtime.telemetry_addr = self.initial_config.runtime.telemetry_addr;
+        active_value.runtime.telemetry_log_path = self.initial_config.runtime.telemetry_log_path;
         return .{
             .run_id = self.run_id,
             .state = if (self.pending_lifecycle != null and self.state != .idle) .stopping else self.state,
@@ -1266,38 +753,31 @@ pub const Telemetry = struct {
             .config_reply_revision = config_reply_revision,
             .config_rejected = config_rejected,
             .active = self.state != .idle,
-            .desired = desired,
-            .active_config = active,
+            .desired = current.*,
+            .active_config = active_value,
             .last_error = if (self.last_error.len != 0) self.last_error else self.telemetry_error,
         };
     }
 
     fn reply(self: *Telemetry, io: Io, current: *const MissionConfig.MissionConfig, destination: *const Io.net.IpAddress, config_reply_revision: u64, config_rejected: bool) void {
         const socket = self.control_socket orelse return;
-        var buffer: [8192]u8 = undefined;
-        var writer: Io.Writer = .fixed(&buffer);
-        SerialBinary.write(&writer, self.status(current, config_reply_revision, config_rejected)) catch return;
-        socket.send(io, destination, writer.buffered()) catch {};
+        var buffer: [8192]u8 align(8) = undefined;
+        var fallback = std.heap.FixedBufferAllocator.init(&buffer);
+        const status_row = self.status(current, config_reply_revision, config_rejected);
+        const bytes = reflection.write(fallback.allocator(), RuntimeStatusDoc, RuntimeStatusDoc{ .status = status_row }) catch return;
+        socket.send(io, destination, bytes) catch {};
     }
 
-    pub fn acceptThrusters(self: *Telemetry, io: Io, current: *const MissionConfig.MissionConfig, command: ThrusterCommand) void {
+    pub fn acceptThrusters(self: *Telemetry, io: Io, current: *const MissionConfig.MissionConfig, values: []const f32) void {
         if (self.state != .running or self.pending_lifecycle != null or
-            current.mission_id != .thruster_control or command.run_id != self.run_id or
-            command.client_id == 0 or command.sequence == 0 or command.count != current.tam_len or
-            command.count > command.values.len) return;
-        for (command.values[0..command.count]) |value| {
+            current.mission_id != .thruster_control or values.len != current.tam_len or
+            values.len > self.direct_values.len) return;
+        for (values) |value| {
             if (!std.math.isFinite(value) or value < -1 or value > 1) return;
         }
-        if (self.direct_command) |previous| {
-            if (command.client_id != previous.client_id or command.sequence < previous.sequence) return;
-            if (command.sequence == previous.sequence and !std.mem.eql(f32, &command.values, &previous.values)) return;
-        }
-        self.direct_command = command;
+        @memcpy(self.direct_values[0..values.len], values);
+        self.direct_len = @intCast(values.len);
         self.direct_last_received = .now(io, .awake);
-    }
-
-    pub fn acceptTeleop(self: *Telemetry, command: TeleopCommand) void {
-        if (self.state == .running and self.pending_lifecycle == null) self.teleop_command = command;
     }
 
     pub fn acceptMission(self: *Telemetry, input: MissionCommand) !void {
@@ -1333,15 +813,15 @@ pub const Telemetry = struct {
                 };
                 var config_reply_revision: u64 = 0;
                 var config_rejected = false;
-                if (message.data.len >= 4 and std.mem.eql(u8, message.data[0..4], "ACR1")) {
-                    const decoded = SerialBinary.readFromBuffer(RuntimeRequest, message.data) catch |err| {
+                if (reflection.matchesDocument(RuntimeRequestDoc, message.data)) {
+                    const request = decodeRuntimeRequest(message.data) catch |err| {
                         self.report(err);
                         self.reply(io, current, &message.from, 0, false);
                         continue;
                     };
-                    if (decoded.consumed != message.data.len) self.report(error.InvalidLength) else self.acceptRequest(decoded.value);
-                } else if (message.data.len >= 4 and std.mem.eql(u8, message.data[0..4], "MCF1")) {
-                    const packet = LiveConfigPacket.decode(message.data) catch |err| {
+                    self.acceptRequest(request);
+                } else if (reflection.matchesDocument(LiveConfigDoc, message.data)) {
+                    const packet = decodeLiveConfig(message.data) catch |err| {
                         self.report(err);
                         self.reply(io, current, &message.from, 0, false);
                         continue;
@@ -1351,21 +831,19 @@ pub const Telemetry = struct {
                         self.report(err);
                         config_rejected = true;
                     };
-                } else if (message.data.len >= 4 and std.mem.eql(u8, message.data[0..4], "AUT1")) {
-                    const decoded = SerialBinary.readFromBuffer(ThrusterCommand, message.data) catch continue;
-                    if (decoded.consumed == message.data.len) self.acceptThrusters(io, current, decoded.value);
-                    continue;
-                } else if (message.data.len == 28) {
-                    const decoded = SerialBinary.readFromBuffer(TeleopCommand, message.data) catch continue;
-                    self.acceptTeleop(decoded.value);
-                    continue;
-                } else {
-                    const command = MissionCommand.decode(message.data) catch |err| {
+                } else if (reflection.matchesDocument(MissionCommandDoc, message.data)) {
+                    const row = decodeMissionCommand(message.data) catch |err| {
                         self.report(err);
                         self.reply(io, current, &message.from, 0, false);
                         continue;
                     };
-                    self.queueMission(command);
+                    self.queueMission(missionCommandFromRow(row));
+                    continue;
+                } else if (reflection.dnaSectionHash(message.data) != null) {
+                    self.storeDnaPacket(message.data);
+                    continue;
+                } else {
+                    self.report(error.InvalidSchema);
                     continue;
                 }
                 self.reply(io, current, &message.from, config_reply_revision, config_rejected);
@@ -1383,7 +861,7 @@ pub const Telemetry = struct {
     pub fn publishTelemetry(
         self: *Telemetry,
         io: Io,
-        frame: *const TelemetryFrame,
+        frame: anytype,
     ) void {
         if (self.publisher == .disabled and self.log_file == null) return;
         self.stdout_log_counter +%= 1;
@@ -1401,31 +879,6 @@ pub const Telemetry = struct {
     }
 };
 
-// Control replies use the control socket, including when no sensor is available.
-pub const RuntimeState = enum(u8) { idle, starting, running, stopping };
-pub const RuntimeResult = enum(u8) { none, completed, stopped, failed };
-pub const RuntimeAction = enum(u8) { query, start, stop, restart };
-pub const RuntimeRequest = struct {
-    magic: [4]u8 = "ACR1".*,
-    client_id: u64,
-    request_id: u64,
-    action: RuntimeAction,
-};
-pub const RuntimeStatus = struct {
-    magic: [4]u8 = "ACS1".*,
-    state: RuntimeState,
-    result: RuntimeResult,
-    revision: u64,
-    accepted_client_id: u64,
-    accepted_request_id: u64,
-    config_reply_revision: u64,
-    config_rejected: bool,
-    active: bool,
-    desired: LiveConfigPacket,
-    active_config: LiveConfigPacket,
-    last_error: MissionConfig.FixedText(256),
-    run_id: u64,
-};
 
 pub fn setText(destination: anytype, message: []const u8) void {
     destination.* = .{};
@@ -1434,43 +887,36 @@ pub fn setText(destination: anytype, message: []const u8) void {
     destination.len = @intCast(len);
 }
 
-test "telemetry hash plus raw frame round trip" {
-    var frame = std.mem.zeroes(TelemetryFrame);
-    frame.magic = "AUV1".*;
-    frame.abi_version = telemetry_frame_abi_version;
-    frame.depth = 1.25;
-    frame.thrusters_len = 6;
-    frame.thrusters[0] = 0.5;
-    const packet_len = 8 + @sizeOf(TelemetryFrame);
-    const storage = try std.testing.allocator.alignedAlloc(u8, .of(TelemetryFrame), packet_len);
-    defer std.testing.allocator.free(storage);
-    const encoded = try encodeTelemetryFrame(storage, frame);
-    const view = try telemetryFrameView(encoded);
-    const start = @intFromPtr(encoded.ptr);
-    try std.testing.expect(@intFromPtr(view) >= start and @intFromPtr(view) < start + encoded.len);
-    try std.testing.expectEqual(frame.depth, view.depth);
-
-    var decoded: TelemetryFrame = undefined;
-    try decodeTelemetryFrame(encoded, &decoded);
-    try std.testing.expectEqual(frame.depth, decoded.depth);
-    try std.testing.expectEqual(frame.thrusters[0], decoded.thrusters[0]);
-    try std.testing.expectEqual(frame.thrusters_len, decoded.thrusters_len);
-    try std.testing.expectEqual(@as(usize, 16), @offsetOf(TelemetryFrame, "camera_pose"));
-    try std.testing.expectEqual(@as(usize, 64), @offsetOf(TelemetryFrame, "thrusters_len"));
-    try std.testing.expectEqual(@as(usize, 9284), @offsetOf(TelemetryFrame, "thrusters"));
-
-    const raw = try std.testing.allocator.alignedAlloc(u8, .of(TelemetryFrame), packet_len + 1);
-    defer std.testing.allocator.free(raw);
-    const misaligned = raw[1..][0..encoded.len];
-    @memcpy(misaligned, encoded);
-    try std.testing.expectError(error.MisalignedTelemetry, telemetryFrameView(misaligned));
-    try decodeTelemetryFrame(misaligned, &decoded);
-    try std.testing.expectEqual(frame.depth, decoded.depth);
-
+test "telemetry sender round trip" {
+    const Row = struct { depth: f64, flag: bool };
+    const Sample = struct { row: Row };
+    const frame = Sample{ .row = .{ .depth = 1.25, .flag = true } };
+    var storage: [4096]u8 align(8) = undefined;
+    const encoded = try encodeTelemetryFrame(&storage, frame);
+    try std.testing.expectEqual(comptime reflection.documentSchemaHash(Sample), reflection.dnaSectionHash(encoded).?);
+    const decoded = try decodeTelemetryFrame(Sample, encoded);
+    try std.testing.expectEqual(frame.row.depth, decoded.row.depth);
+    try std.testing.expect(decoded.row.flag);
     var bad = try std.testing.allocator.dupe(u8, encoded);
     defer std.testing.allocator.free(bad);
     bad[0] ^= 0xff;
-    try std.testing.expectError(error.UnsupportedAbiVersion, decodeTelemetryFrame(bad, &decoded));
+    try std.testing.expectError(error.UnsupportedAbiVersion, decodeTelemetryFrame(Sample, bad));
+}
+
+test "telemetry accepts equivalent row layouts from another build" {
+    const SenderRow = struct { depth: f64, flag: bool };
+    const ViewerRow = struct { depth: f64, flag: bool };
+    const ViewerDoc = struct { row: ViewerRow };
+    var storage: [4096]u8 align(8) = undefined;
+    const encoded = try encodeTelemetryFrame(&storage, .{ .row = SenderRow{ .depth = 2.5, .flag = true } });
+    try std.testing.expect(reflection.dnaSectionHash(encoded) != comptime reflection.documentSchemaHash(ViewerDoc));
+    const decoded = try decodeTelemetryFrame(ViewerDoc, encoded);
+    try std.testing.expectEqual(@as(f64, 2.5), decoded.row.depth);
+    try std.testing.expect(decoded.row.flag);
+
+    const ChangedRow = struct { temperature: f64, flag: bool };
+    const ChangedDoc = struct { row: ChangedRow };
+    try std.testing.expectError(error.UnsupportedAbiVersion, decodeTelemetryFrame(ChangedDoc, encoded));
 }
 
 test "lifecycle requests deduplicate and the latest request wins" {
@@ -1491,7 +937,7 @@ test "lifecycle requests deduplicate and the latest request wins" {
 test "direct control works without UDP and clears commands on restart" {
     const io = std.testing.io;
     var config = MissionConfig.startup_config;
-    config.telemetry_transport = .disabled;
+    config.runtime.telemetry_transport = .disabled;
     var telemetry: Telemetry = try .init(io, config, false);
     defer telemetry.deinit(io);
     try std.testing.expect(telemetry.control_socket == null);
@@ -1502,10 +948,10 @@ test "direct control works without UDP and clears commands on restart" {
 
     var edit = LiveConfigPacket.fromRuntimeConfig(&config);
     edit.revision = telemetry.revision;
-    edit.mission_id = .teleop;
+    edit.config.mission_id = .teleop;
     try telemetry.applyConfig(io, &config, edit);
-    telemetry.acceptTeleop(.{ .translation = .{ 1, 0, 0 }, .orientation = .{ 0, 0, 0, 1 } });
-    try std.testing.expect(telemetry.takeTeleopCommand() == null);
+    telemetry.storeTeleopPacket("not-a-frame");
+    try std.testing.expect(telemetry.takeTeleopPacket() == null);
     try std.testing.expectError(error.MissionRestart, telemetry.pollControl(io, &config));
     try std.testing.expectEqual(MissionConfig.MissionId.teleop, config.mission_id);
 }

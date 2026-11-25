@@ -3,6 +3,8 @@ const rl = @import("raylib");
 const ui = @import("visualizer/ui.zig");
 const RuntimePanel = @import("visualizer/runtime_panel.zig");
 pub const MissionIO = @import("MissionIO.zig");
+pub const Wire = @import("AuvRobot.zig").Wire;
+pub const AuvWire = Wire;
 const MissionConfig = MissionIO.CompiledConfig;
 const math = MissionIO.Math;
 const Self = @This();
@@ -75,7 +77,7 @@ pub const SceneDraw = struct {
 
 pub const Input = struct {
     status: ?MissionIO.RuntimeStatus = null,
-    frame: ?*const MissionIO.TelemetryFrame = null,
+    frame: ?*const AuvWire.TelemetryDoc = null,
     telemetry_status: Status = .connecting,
     video: Video = .{},
     send_error: bool = false,
@@ -85,9 +87,9 @@ pub const Input = struct {
 pub const Actions = struct {
     config: ?MissionIO.LiveConfigPacket = null,
     lifecycle: ?MissionIO.RuntimeRequest = null,
-    thrusters: ?MissionIO.ThrusterCommand = null,
+    thrusters: ?AuvWire.ThrusterDoc = null,
     mission: ?MissionIO.MissionCommand = null,
-    teleop: ?MissionIO.TeleopCommand = null,
+    teleop: ?AuvWire.TeleopWire = null,
 };
 
 pub fn init(config: *const MissionConfig.MissionConfig, client_id: u64, mission_control: bool, embedded: bool) !Self {
@@ -149,9 +151,16 @@ pub fn runtimeStatus(self: *const Self) ?MissionIO.RuntimeStatus {
     return self.runtime_panel.status;
 }
 
-pub fn neutral(self: *const Self) ?MissionIO.TeleopCommand {
+pub fn neutral(self: *const Self) ?AuvWire.TeleopWire {
     if (self.mission_control) return null;
-    return MissionIO.teleopCommand(@splat(0), self.orientation);
+    return teleopWire(@splat(0), self.orientation);
+}
+
+fn teleopWire(translation: math.Vector3f, orientation: math.Quaternionf) AuvWire.TeleopWire {
+    return .{
+        .teleop_translation = translation,
+        .target_orientation = orientation,
+    };
 }
 
 pub fn tick(self: *Self, input: Input) !Actions {
@@ -195,7 +204,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
                 self.dropdown_open = true;
             } else if (rl.checkCollisionPointRec(mouse, layout.activateRect()) and self.runtime_panel.synchronized()) {
                 var request = self.config_packet;
-                request.mission_id = self.chosen_mission;
+                request.config.mission_id = self.chosen_mission;
                 self.runtime_panel.queueConfig(request);
             }
         }
@@ -211,7 +220,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
         self.scene_h = next_h;
     }
     const list_capacity = ui.Layout.listCapacity(layout.objects);
-    const object_max = @as(usize, telemetry.objects_len) -| list_capacity;
+    const object_max = @as(usize, telemetry.robot.seen_objects_len) -| list_capacity;
     const goal_max = @as(usize, telemetry.goals_len) -| list_capacity;
     self.object_scroll = @min(self.object_scroll, object_max);
     self.goal_scroll = @min(self.goal_scroll, goal_max);
@@ -230,12 +239,12 @@ pub fn tick(self: *Self, input: Input) !Actions {
     if (self.workspace == .runtime and rl.isKeyPressed(.t)) {
         // Release any held teleoperation translation before leaving teleop mode.
         if (!self.mission_control) {
-            actions.teleop = MissionIO.teleopCommand(@splat(0), self.orientation);
+            actions.teleop = teleopWire(@splat(0), self.orientation);
             self.translation = @splat(0);
         }
         self.mission_control = !self.mission_control;
         if (self.runtime_panel.synchronized()) {
-            self.config_packet.mission_id = if (self.mission_control) .mission_control else .teleop;
+            self.config_packet.config.mission_id = if (self.mission_control) .mission_control else .teleop;
             self.runtime_panel.queueConfig(self.config_packet);
         }
         if (self.mission_control) self.mission_target_initialized = false;
@@ -252,7 +261,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
     }
 
     if (self.mission_control and !self.mission_target_initialized and telemetry_live) {
-        self.mission_position = widen3(telemetry.camera_pose.pos) + @as(math.Vector3f, .{ 0, 2, 0 });
+        self.mission_position = telemetry.sensors.camera_pose.pos + @as(math.Vector3f, .{ 0, 2, 0 });
         self.mission_target_initialized = true;
     }
 
@@ -322,7 +331,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
         if (focused and rl.isKeyDown(.k)) self.orientation = math.quaternionMul(self.orientation, axisAngle(.{ 0, 1, 0 }, -teleop_step));
         normalizeQuaternion(&self.orientation);
 
-        actions.teleop = MissionIO.teleopCommand(self.translation, self.orientation);
+        actions.teleop = teleopWire(self.translation, self.orientation);
     }
 
     if (!self.mission_control and focused) {
@@ -336,7 +345,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
 
     var tune_changed = false;
     if (focused and self.runtime_panel.synchronized() and rl.isMouseButtonPressed(.left) and rl.checkCollisionPointRec(rl.getMousePosition(), layout.resetPidRect())) {
-        for (0..tune_names.len) |i| tuningValue(&self.config_packet, i).* = 0;
+        for (0..tune_names.len) |i| tuningValueAt(&self.config_packet, i / 6, i % 6).* = 0;
         tune_changed = true;
     }
     if (focused and rl.isMouseButtonPressed(.left)) {
@@ -353,7 +362,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
     if (self.pid_drag) |index| {
         if (now - self.last_tune_adjust >= tune_period) {
             const value = pidSliderValue(index, rl.getMousePosition().x, layout);
-            const target = tuningValue(&self.config_packet, index);
+            const target = tuningValueAt(&self.config_packet, index / 6, index % 6);
             if (@abs(target.* - value) > 1e-5) {
                 target.* = value;
                 self.last_tune_adjust = now;
@@ -366,7 +375,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
         if (rl.isKeyDown(.z)) delta -= tune_step;
         if (rl.isKeyDown(.x)) delta += tune_step;
         if (delta != 0) {
-            tuningValue(&self.config_packet, self.tune_selection).* += delta;
+            tuningValueAt(&self.config_packet, self.tune_selection / 6, self.tune_selection % 6).* += delta;
             self.last_tune_adjust = now;
             tune_changed = true;
         }
@@ -381,9 +390,9 @@ pub fn tick(self: *Self, input: Input) !Actions {
     else
         self.chosen_mission) == .thruster_control;
     const direct_thruster_count: usize = if (self.runtime_panel.status) |status|
-        if (status.active) status.active_config.tam_len else self.config_packet.tam_len
+        if (status.active) status.active_config.tam_len else self.config_packet.config.tam_len
     else
-        self.config_packet.tam_len;
+        self.config_packet.config.tam_len;
     if (direct_thrusters and running and focused) {
         if (rl.isMouseButtonPressed(.left)) {
             const mouse = rl.getMousePosition();
@@ -429,7 +438,9 @@ pub fn tick(self: *Self, input: Input) !Actions {
         self.orbit_dist = @max(1.5, self.orbit_dist - rl.getMouseWheelMove());
     }
 
-    const sub = toRay(telemetry.camera_pose.pos);
+    const pose_pos = f32From3(telemetry.sensors.camera_pose.pos);
+    const pose_quat = f32From4(telemetry.sensors.camera_pose.quat);
+    const sub = toRay(pose_pos);
     const camera = rl.Camera3D{
         .position = .{
             .x = sub.x + self.orbit_dist * @cos(self.orbit_pitch) * @sin(self.orbit_yaw),
@@ -448,41 +459,42 @@ pub fn tick(self: *Self, input: Input) !Actions {
     drawFollowingGrid(sub);
     if (input.scene_draw) |hook| hook.draw(hook.ctx);
     rl.drawLine3D(sub, .{ .x = sub.x, .y = 0, .z = sub.z }, rl.fade(rl.Color.sky_blue, 0.45));
-    drawBox(telemetry.camera_pose.pos, telemetry.camera_pose.quat, .{ 0.35, 0.8, 0.22 }, rl.Color.sky_blue);
+    drawBox(pose_pos, pose_quat, .{ 0.35, 0.8, 0.22 }, rl.Color.sky_blue);
 
-    const nose = math.quaternionRotate(widenQuat(telemetry.camera_pose.quat), .{ 0, 1, 0 });
-    rl.drawLine3D(sub, toRay(add3(telemetry.camera_pose.pos, narrow3(nose))), rl.Color.orange);
+    const nose = math.quaternionRotate(widenQuat(pose_quat), .{ 0, 1, 0 });
+    rl.drawLine3D(sub, toRay(add3(pose_pos, narrow3(nose))), rl.Color.orange);
     const command_forward = math.quaternionRotate(self.orientation, .{ 0, 2, 0 });
-    drawArrow(telemetry.camera_pose.pos, narrow3(command_forward), 0.02, rl.Color.green);
+    drawArrow(pose_pos, narrow3(command_forward), 0.02, rl.Color.green);
     const command_move = math.quaternionRotate(self.orientation, self.translation);
     if (math.dot3f(command_move, command_move) > 1e-6)
-        drawArrow(telemetry.camera_pose.pos, scaled3(narrow3(command_move), 1.2), 0.045, rl.Color.magenta);
+        drawArrow(pose_pos, scaled3(narrow3(command_move), 1.2), 0.045, rl.Color.magenta);
     if (self.mission_control and self.mission_target_initialized) {
         rl.drawSphere(toRay(narrow3(self.mission_position)), 0.18, rl.Color.yellow);
         drawArrow(narrow3(self.mission_position), narrow3(self.mission_look_direction), 0.035, rl.Color.yellow);
     }
-    const force_error = math.quaternionRotate(widenQuat(telemetry.camera_pose.quat), widen3(telemetry.force_error));
+    const force_error = math.quaternionRotate(widenQuat(pose_quat), telemetry.robot.force_error);
     if (math.dot3f(force_error, force_error) > 1e-6)
-        drawArrow(telemetry.camera_pose.pos, narrow3(force_error), 0.03, rl.Color.yellow);
+        drawArrow(pose_pos, narrow3(force_error), 0.03, rl.Color.yellow);
 
     if (input.scene_draw == null) {
-        for (telemetry.objects[0..telemetry.objects_len], 0..) |object, i| {
-            if (i == 0) rl.drawLine3D(sub, toRay(object.pose.pos), rl.fade(rl.Color.ray_white, 0.45));
-            var size = object.size;
-            for (&size) |*axis| if (axis.* < 0.05) {
-                axis.* = 0.3;
-            };
-            drawBox(object.pose.pos, object.pose.quat, size, objectColor(object.cls));
+        for (telemetry.robot.seen_objects[0..telemetry.robot.seen_objects_len], 0..) |object, i| {
+            const pos = f32From3(object.bbox.pose.pos);
+            if (i == 0) rl.drawLine3D(sub, toRay(pos), rl.fade(rl.Color.ray_white, 0.45));
+            var size: [3]f32 = f32From3(object.bbox.size);
+            for (&size) |*axis| {
+                if (axis.* < 0.05) axis.* = 0.3;
+            }
+            drawBox(pos, f32From4(object.bbox.pose.quat), size, objectColor(object.cls));
         }
-    } else for (telemetry.objects[0..telemetry.objects_len], 0..) |object, i| {
-        if (i == 0) rl.drawLine3D(sub, toRay(object.pose.pos), rl.fade(rl.Color.ray_white, 0.45));
+    } else for (telemetry.robot.seen_objects[0..telemetry.robot.seen_objects_len], 0..) |object, i| {
+        if (i == 0) rl.drawLine3D(sub, toRay(f32From3(object.bbox.pose.pos)), rl.fade(rl.Color.ray_white, 0.45));
     }
     for (telemetry.goals[0..telemetry.goals_len], 0..) |goal, i| {
-        const at = toRay(goal.position);
-        const look = toRay(goal.look_at);
+        const at = toRay(f32From3(goal.position));
+        const look = toRay(f32From3(goal.look_at));
         const color = if (i == 0) rl.Color.white else rl.Color.lime;
         if (i + 1 < telemetry.goals_len)
-            rl.drawLine3D(at, toRay(telemetry.goals[i + 1].position), rl.Color.lime);
+            rl.drawLine3D(at, toRay(f32From3(telemetry.goals[i + 1].position)), rl.Color.lime);
         rl.drawLine3D(at, look, rl.fade(color, 0.65));
         rl.drawSphere(at, if (i == 0) 0.18 else 0.1, color);
     }
@@ -537,15 +549,17 @@ pub fn tick(self: *Self, input: Input) !Actions {
     return actions;
 }
 
-fn tuningValue(packet: *MissionIO.LiveConfigPacket, index: usize) *f32 {
-    const group = index / 6;
-    const axis = index % 6;
+fn pidGainSlice(pid: *MissionConfig.OdometryPid, group: usize) *[6]f64 {
     return switch (group) {
-        0 => &packet.odometry.kp[axis],
-        1 => &packet.odometry.ki[axis],
-        2 => &packet.odometry.kd[axis],
+        0 => @ptrCast(&pid.kp),
+        1 => @ptrCast(&pid.ki),
+        2 => @ptrCast(&pid.kd),
         else => unreachable,
     };
+}
+
+fn tuningValueAt(packet: *MissionIO.LiveConfigPacket, group: usize, axis: usize) *f64 {
+    return &pidGainSlice(&packet.config.odometry, group)[axis];
 }
 
 fn pidSliderValue(index: usize, mouse_x: f32, layout: ui.Layout) f32 {
@@ -554,12 +568,16 @@ fn pidSliderValue(index: usize, mouse_x: f32, layout: ui.Layout) f32 {
     return ratio * pid_slider_max[index / 6];
 }
 
-fn emptyTelemetry() MissionIO.TelemetryFrame {
-    var frame = std.mem.zeroes(MissionIO.TelemetryFrame);
-    frame.magic = "AUV1".*;
-    frame.abi_version = MissionIO.telemetry_frame_abi_version;
-    frame.camera_pose.quat[3] = 1;
-    return frame;
+fn emptyTelemetry() AuvWire.TelemetryDoc {
+    return AuvWire.emptyTelemetry();
+}
+
+fn f32From3(v: anytype) [3]f32 {
+    return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) };
+}
+
+fn f32From4(v: anytype) [4]f32 {
+    return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]), @floatCast(v[3]) };
 }
 
 fn toRay(v: [3]f32) rl.Vector3 {

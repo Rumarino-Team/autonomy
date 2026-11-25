@@ -1,6 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
 const IO = @import("../MissionIO.zig");
+const Wire = @import("../AuvRobot.zig").Wire;
 
 pub const Workspace = enum { runtime, settings };
 pub const Status = enum { disabled, connecting, live, ready, stale, unavailable };
@@ -198,7 +199,7 @@ pub const Data = struct {
     font_percent: u8,
     workspace: Workspace,
     layout: Layout,
-    frame: *const IO.TelemetryFrame,
+    frame: *const Wire.TelemetryDoc,
     telemetry_status: Status,
     video_status: Status,
     video: rl.Texture2D,
@@ -231,19 +232,33 @@ pub const Data = struct {
     direct_thruster_values: []const f32,
     direct_thruster_drag: ?usize,
 };
-fn gain(d: Data, i: usize) f32 {
-    return switch (i / 6) {
-        0 => d.config.odometry.kp[i % 6],
-        1 => d.config.odometry.ki[i % 6],
-        else => d.config.odometry.kd[i % 6],
+fn configGainAt(config: *const IO.LiveConfigPacket, group: usize, axis: usize) f64 {
+    const pid = &config.config.odometry;
+    const slice: *const [6]f64 = switch (group) {
+        0 => @ptrCast(&pid.kp),
+        1 => @ptrCast(&pid.ki),
+        2 => @ptrCast(&pid.kd),
+        else => unreachable,
     };
+    return slice[axis];
 }
-fn observedGain(d: Data, i: usize) f32 {
-    return switch (i / 6) {
-        0 => d.frame.kp[i % 6],
-        1 => d.frame.ki[i % 6],
-        else => d.frame.kd[i % 6],
+
+fn gain(d: Data, i: usize) f32 {
+    return @floatCast(configGainAt(d.config, i / 6, i % 6));
+}
+fn frameGainAt(frame: *const Wire.TelemetryDoc, group: usize, axis: usize) f64 {
+    const row = &frame.odometry;
+    const slice: [6]f64 = switch (group) {
+        0 => row.kp,
+        1 => row.ki,
+        2 => row.kd,
+        else => unreachable,
     };
+    return slice[axis];
+}
+
+fn observedGain(d: Data, i: usize) f32 {
+    return @floatCast(frameGainAt(d.frame, i / 6, i % 6));
 }
 fn runtimeName(mission_id: IO.CompiledConfig.MissionId) [:0]const u8 {
     return switch (mission_id) {
@@ -293,7 +308,7 @@ fn videoPanel(d: Data, p: Rect) void {
     const scale = @min(r.width / vw, r.height / vh);
     const dest = rect(r.x + (r.width - vw * scale) / 2, r.y + (r.height - vh * scale) / 2, vw * scale, vh * scale);
     rl.drawTexturePro(d.video, rect(0, 0, vw, vh), dest, .{ .x = 0, .y = 0 }, 0, rl.Color.white);
-    if (d.telemetry_status == .live) for (d.frame.boxes[0..d.frame.boxes_len]) |b| {
+    if (d.telemetry_status == .live) for (d.frame.robot.seen_objects2d[0..d.frame.robot.seen_objects2d_len]) |b| {
         if (b.bottom_right.x < b.top_left.x or b.bottom_right.y < b.top_left.y) continue;
         const x0 = @min(@as(f32, @floatFromInt(b.top_left.x)), vw);
         const y0 = @min(@as(f32, @floatFromInt(b.top_left.y)), vh);
@@ -332,20 +347,22 @@ fn statePanel(d: Data, p: Rect) void {
         return;
     }
     var buf: [IO.telemetry_step_max + 1]u8 = undefined;
-    const n = @min(@as(usize, d.frame.step_len), d.frame.step.len);
+    const n = @min(d.frame.step_len, buf.len - 1);
     @memcpy(buf[0..n], d.frame.step[0..n]);
     buf[n] = 0;
     text(d.font, "DEPTH", p.x + 10, p.y + 36, 10, muted);
-    text(d.font, if (d.frame.depth_ok) rl.textFormat("%.2f m", .{@as(f64, d.frame.depth)}) else "--", p.x + 10, p.y + 51, 18, white);
+    text(d.font, if (d.frame.sensors.pressure_depth_ok) rl.textFormat("%.2f m", .{d.frame.sensors.pressure_depth}) else "--", p.x + 10, p.y + 51, 18, white);
     text(d.font, "MISSION STEP", p.x + 10, p.y + 76, 10, muted);
     text(d.font, if (n > 0) buf[0..n :0] else "--", p.x + 10, p.y + 91, 11, white);
     text(d.font, "POSITION X / Y / Z (m)", p.x + 10, p.y + 116, 10, muted);
-    text(d.font, rl.textFormat("%.2f  %.2f  %.2f", .{ @as(f64, d.frame.camera_pose.pos[0]), @as(f64, d.frame.camera_pose.pos[1]), @as(f64, d.frame.camera_pose.pos[2]) }), p.x + 10, p.y + 132, 11, white);
-    const angles = IO.Math.quaternionToEuler(d.frame.camera_pose.quat) * @as(@TypeOf(d.frame.camera_pose.pos), @splat(180.0 / std.math.pi));
+    text(d.font, rl.textFormat("%.2f  %.2f  %.2f", .{ d.frame.sensors.camera_pose.pos[0], d.frame.sensors.camera_pose.pos[1], d.frame.sensors.camera_pose.pos[2] }), p.x + 10, p.y + 132, 11, white);
+    const quat_arr = d.frame.sensors.camera_pose.quat;
+    const quat: IO.Math.Quaternionf = .{ quat_arr[0], quat_arr[1], quat_arr[2], quat_arr[3] };
+    const angles = IO.Math.quaternionToEuler(quat) * @as(IO.Math.Vector3f, @splat(180.0 / std.math.pi));
     text(d.font, "ROLL / PITCH / YAW (deg)", p.x + 10, p.y + 157, 10, muted);
     text(d.font, rl.textFormat("%.1f  %.1f  %.1f", .{ @as(f64, angles[0]), @as(f64, angles[1]), @as(f64, angles[2]) }), p.x + 10, p.y + 173, 11, white);
     const pose_y: f32 = 198;
-    if (p.height > pose_y + 14) text(d.font, if (d.frame.position_ok.x and d.frame.position_ok.y and d.frame.position_ok.z and d.frame.attitude_ok.x and d.frame.attitude_ok.y and d.frame.attitude_ok.z) "Pose valid" else "Pose validity incomplete", p.x + 10, p.y + pose_y, 10, teal);
+    if (p.height > pose_y + 14) text(d.font, if (d.frame.sensors.position_ok.x and d.frame.sensors.position_ok.y and d.frame.sensors.position_ok.z and d.frame.sensors.attitude_ok.x and d.frame.sensors.attitude_ok.y and d.frame.sensors.attitude_ok.z) "Pose valid" else "Pose validity incomplete", p.x + 10, p.y + pose_y, 10, teal);
     const thrusters_top = p.y + 222;
     if (p.height > thrusters_top - p.y + 24) {
         line(p.x + 10, thrusters_top - 10, p.width - 20);
@@ -411,7 +428,7 @@ fn dashboard(d: Data) void {
     button(d.font, l.dropdownRect(), runtimeName(d.chosen_mission), false);
     text(d.font, "v", l.dropdownRect().x + l.dropdownRect().width - 18, l.dropdownRect().y + 8, 12, muted);
     button(d.font, l.activateRect(), "Activate", true);
-    text(d.font, if (d.telemetry_status != .live) "Confirmed: unavailable" else rl.textFormat("Confirmed: %s", .{runtimeName((d.active_mission orelse d.config.mission_id)).ptr}), p.x + 12, p.y + 77, 11, if (d.telemetry_status == .live and !d.runtime_switch_pending) teal else amber);
+    text(d.font, if (d.telemetry_status != .live) "Confirmed: unavailable" else rl.textFormat("Confirmed: %s", .{runtimeName((d.active_mission orelse d.config.config.mission_id)).ptr}), p.x + 12, p.y + 77, 11, if (d.telemetry_status == .live and !d.runtime_switch_pending) teal else amber);
     if (d.runtime_switch_pending) text(d.font, "Request sent; awaiting telemetry", p.x + 12, p.y + 94, 10, amber);
     if (d.mission_control) {
         button(d.font, l.missionButton(0), "Point P", d.mission_kind == .point);
@@ -426,7 +443,7 @@ fn dashboard(d: Data) void {
         } else {
             drawDirectThrusterSliders(d, p);
         }
-    } else if ((d.active_mission orelse d.config.mission_id) == .teleop) {
+    } else if ((d.active_mission orelse d.config.config.mission_id) == .teleop) {
         text(d.font, "TELEOPERATION", p.x + 12, p.y + 116, 11, teal);
         text(d.font, "W / S forward / back     A / D left / right", p.x + 12, p.y + 137, 11, white);
         text(d.font, "R / F down / up           Arrows yaw / pitch", p.x + 12, p.y + 158, 11, white);
@@ -453,8 +470,8 @@ fn dashboard(d: Data) void {
         box(rect(r.x, r.y + r.height - 2, r.width * if (d.telemetry_status == .live) std.math.clamp(gain(d, i) / gain_max[i / 6], 0, 1) else 0, 2), teal);
     }
     if (d.telemetry_status == .live) {
-        text(d.font, rl.textFormat("Position error (m): %+.2f  %+.2f  %+.2f", .{ @as(f64, d.frame.translation_error[0]), @as(f64, d.frame.translation_error[1]), @as(f64, d.frame.translation_error[2]) }), g.x + 12, g.y + g.height - 90, 10, muted);
-        text(d.font, rl.textFormat("Attitude error: %+.2f  %+.2f  %+.2f", .{ @as(f64, d.frame.attitude_error[0]), @as(f64, d.frame.attitude_error[1]), @as(f64, d.frame.attitude_error[2]) }), g.x + 12, g.y + g.height - 72, 10, muted);
+        text(d.font, rl.textFormat("Position error (m): %+.2f  %+.2f  %+.2f", .{ d.frame.robot.translation_error[0], d.frame.robot.translation_error[1], d.frame.robot.translation_error[2] }), g.x + 12, g.y + g.height - 90, 10, muted);
+        text(d.font, rl.textFormat("Attitude error: %+.2f  %+.2f  %+.2f", .{ d.frame.robot.attitude_error[0], d.frame.robot.attitude_error[1], d.frame.robot.attitude_error[2] }), g.x + 12, g.y + g.height - 72, 10, muted);
     }
     const footer_y = g.y + g.height - 46;
     text(d.font, if (d.telemetry_status == .live) rl.textFormat("Selected %s / %s   Requested %.2f", .{ groups[d.tune_selection / 6].ptr, axis_names[d.tune_selection % 6].ptr, @as(f64, gain(d, d.tune_selection)) }) else "Requested gains unavailable", g.x + 12, footer_y, 10, white);

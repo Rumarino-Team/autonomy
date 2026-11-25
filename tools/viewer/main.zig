@@ -2,6 +2,7 @@ const std = @import("std");
 const rl = @import("raylib");
 const Visualizer = @import("Visualizer");
 const MissionIO = Visualizer.MissionIO;
+const AuvWire = Visualizer.AuvWire;
 const MissionConfig = MissionIO.CompiledConfig;
 const Io = std.Io;
 
@@ -60,20 +61,26 @@ const TelemetryInput = struct {
     socket: ?Io.net.Socket = null,
     transport: MissionConfig.TelemetryTransport = .disabled,
     addr: MissionConfig.FixedText(MissionConfig.telemetry_addr_max) = .{},
-    frame: MissionIO.TelemetryFrame = undefined,
+    frame: AuvWire.TelemetryDoc = AuvWire.emptyTelemetry(),
+    arena: std.heap.ArenaAllocator = undefined,
+    arena_ready: bool = false,
     last_packet: f64 = -1,
     last_bind: f64 = -10,
 
     fn deinit(self: *TelemetryInput, io: Io) void {
+        if (self.arena_ready) {
+            self.arena.deinit();
+            self.arena_ready = false;
+        }
         if (self.socket) |socket| socket.close(io);
         self.socket = null;
     }
 
     fn update(self: *TelemetryInput, io: Io, config: *const MissionIO.LiveConfigPacket, now: f64) Visualizer.Status {
-        if (self.transport != config.telemetry_transport or !MissionConfig.textEqual(self.addr, config.telemetry_addr)) {
+        if (self.transport != config.config.runtime.telemetry_transport or !MissionConfig.textEqual(self.addr, config.config.runtime.telemetry_addr)) {
             self.deinit(io);
-            self.transport = config.telemetry_transport;
-            self.addr = config.telemetry_addr;
+            self.transport = config.config.runtime.telemetry_transport;
+            self.addr = config.config.runtime.telemetry_addr;
             self.last_packet = -1;
             self.last_bind = -10;
         }
@@ -84,11 +91,16 @@ const TelemetryInput = struct {
             self.socket = address.bind(io, .{ .mode = .dgram, .protocol = .udp }) catch return .unavailable;
         }
         const socket = self.socket orelse return .unavailable;
+        if (!self.arena_ready) {
+            self.arena = .init(std.heap.page_allocator);
+            self.arena_ready = true;
+        }
+        _ = self.arena.reset(.retain_capacity);
         var buffer: [64 * 1024]u8 = undefined;
         for (0..64) |_| {
             const message = socket.receiveTimeout(io, &buffer, nonblocking) catch break;
-            var frame: MissionIO.TelemetryFrame = undefined;
-            MissionIO.decodeTelemetryFrame(message.data, &frame) catch continue;
+            const bytes = self.arena.allocator().dupe(u8, message.data) catch continue;
+            const frame = MissionIO.decodeTelemetryFrame(AuvWire.TelemetryDoc, bytes) catch continue;
             self.frame = frame;
             self.last_packet = now;
         }
@@ -150,25 +162,22 @@ const VideoCapture = struct {
 };
 
 fn send(io: Io, socket: Io.net.Socket, destination: *const Io.net.IpAddress, value: anytype) !void {
-    var buffer: [4096]u8 = undefined;
-    var writer: Io.Writer = .fixed(&buffer);
-    if (@TypeOf(value) == MissionIO.MissionCommand) {
-        const packet = try MissionIO.encodeMissionCommand(&buffer, value);
-        try socket.send(io, destination, packet);
-    } else {
-        try MissionIO.SerialBinary.write(&writer, value);
-        try socket.send(io, destination, writer.buffered());
-    }
+    var buffer: [4096]u8 align(8) = undefined;
+    const packet = if (@TypeOf(value) == AuvWire.TeleopWire)
+        try MissionIO.encodeControl(&buffer, AuvWire.TeleopDoc{ .command = value })
+    else
+        try MissionIO.encodeControl(&buffer, value);
+    try socket.send(io, destination, packet);
 }
 
 fn pollStatus(io: Io, socket: Io.net.Socket, viewer: *Visualizer) void {
     var buffer: [8192]u8 = undefined;
     for (0..32) |_| {
         const message = socket.receiveTimeout(io, &buffer, nonblocking) catch break;
-        const parsed = MissionIO.SerialBinary.readFromBuffer(MissionIO.RuntimeStatus, message.data) catch continue;
-        if (parsed.consumed != message.data.len or !std.mem.eql(u8, &parsed.value.magic, "ACS1")) continue;
-        parsed.value.desired.validate() catch continue;
-        viewer.acceptStatus(parsed.value);
+        if (!MissionIO.matchesControlDocument(MissionIO.RuntimeStatusDoc, message.data)) continue;
+        const status = MissionIO.decodeRuntimeStatus(message.data) catch continue;
+        status.desired.validate() catch continue;
+        viewer.acceptStatus(status);
     }
 }
 
@@ -180,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
     };
     const startup = MissionConfig.startup_config;
     var address_buf: [128]u8 = undefined;
-    const destination = try Io.net.IpAddress.parseLiteral(try std.fmt.bufPrint(&address_buf, "{s}:{d}", .{ config.teleop_host, startup.teleop_port }));
+    const destination = try Io.net.IpAddress.parseLiteral(try std.fmt.bufPrint(&address_buf, "{s}:{d}", .{ config.teleop_host, startup.runtime.teleop_port }));
     const bind: Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
     const socket = try bind.bind(init.io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(init.io);
@@ -203,8 +212,11 @@ pub fn main(init: std.process.Init) !void {
     while (!Visualizer.shouldClose()) {
         const now = rl.getTime();
         pollStatus(init.io, socket, &viewer);
-        const active = if (viewer.runtimeStatus()) |status| status.active_config else initial_config;
-        const frame_status = input.update(init.io, &active, now);
+        const active_packet = if (viewer.runtimeStatus()) |status|
+            MissionIO.LiveConfigPacket{ .revision = status.revision, .config = status.active_config }
+        else
+            initial_config;
+        const frame_status = input.update(init.io, &active_packet, now);
         const actions = try viewer.tick(.{
             .frame = if (input.last_packet >= 0) &input.frame else null,
             .telemetry_status = frame_status,

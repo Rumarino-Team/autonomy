@@ -1,20 +1,19 @@
 const Scene = @This();
 const std = @import("std");
-const types = @import("types.zig");
 const math = @import("support.zig");
 const database = @import("database.zig");
 const abi = @import("abi.zig");
 
 allocator: std.mem.Allocator,
-settings: types.Settings,
+settings: abi.Settings,
 robot_catalog: *const abi.RobotCatalog,
 objects: []const database.BodySlot,
-robot_spawn_pose: ?types.Pose = null,
+robot_spawn_pose: ?abi.Pose = null,
 thruster_len: u8,
 sensor_len: u8,
-routing: types.Routing,
-faults: []const types.Fault,
-forces: []const types.Force = &.{ .gravity, .hydrodynamics, .thrusters },
+routing: abi.Routing,
+faults: []const abi.Fault,
+forces: []const abi.Force = &.{ .gravity, .hydrodynamics, .thrusters },
 
 pub fn robot(self: *const Scene) database.BodySlot {
     return self.objects[0];
@@ -24,23 +23,24 @@ pub fn init(
     allocator: std.mem.Allocator,
     robot_catalog: *const abi.RobotCatalog,
     robot_slot: database.BodySlot,
-    start: ?types.Pose,
+    start: ?abi.Pose,
     additional: []const database.BodySlot,
-    settings: types.Settings,
-    faults: []const types.Fault,
+    settings: abi.Settings,
+    faults: []const abi.Fault,
 ) !Scene {
     if (additional.len >= 4096) return error.SceneCapacity;
-    const thruster_count = database.rna.owned(robot_catalog.thrusters, robot_slot.slot);
-    const hull_count = database.rna.owned(robot_catalog.hulls, robot_slot.slot);
-    const sensor_count = database.rna.owned(robot_catalog.sensors, robot_slot.slot);
-    if (thruster_count > types.thruster_count or hull_count > types.max_hulls or sensor_count > 64)
+    const entity = &robot_catalog.column("entities")[robot_slot.slot];
+    const thruster_count: usize = @intCast(entity.thruster_children.count);
+    const hull_count: usize = @intCast(entity.hull_children.count);
+    const sensor_count: usize = @intCast(entity.sensor_children.count);
+    if (thruster_count > abi.thruster_count or hull_count > abi.max_hulls or sensor_count > 64)
         return error.SceneCapacity;
 
     const objects = try allocator.alloc(database.BodySlot, additional.len + 1);
     errdefer allocator.free(objects);
     objects[0] = robot_slot;
     @memcpy(objects[1..], additional);
-    const owned_faults = try allocator.dupe(types.Fault, faults);
+    const owned_faults = try allocator.dupe(abi.Fault, faults);
     errdefer allocator.free(owned_faults);
     if (thruster_count > std.math.maxInt(u8)) return error.SceneCapacity;
     var scene: Scene = .{
@@ -70,13 +70,13 @@ pub fn deinit(self: *Scene) void {
     self.* = undefined;
 }
 
-pub fn initialPose(self: *const Scene, index: usize) types.Pose {
+pub fn initialPose(self: *const Scene, index: usize) abi.Pose {
     const o = self.objects[index];
     const override = if (index == 0) self.robot_spawn_pose else null;
     return database.entityInitialPose(o, override);
 }
 
-pub fn centerOfMass(self: *const Scene, index: usize) types.Pose {
+pub fn centerOfMass(self: *const Scene, index: usize) abi.Pose {
     const o = self.objects[index];
     return database.entityCenterOfMass(o);
 }
@@ -103,22 +103,27 @@ fn validate(self: *Scene) !void {
         try math.validPose(self.initialPose(i));
         try math.validPose(database.entityCenterOfMass(object));
         for (self.objects[0..i]) |other| if (e.id == database.entity(other).id) return error.DuplicateBodyId;
-        const collider_count = database.rna.owned(object.colliders, object.slot);
+        const collider_head = object.entities[object.slot].collider_children;
+        const collider_count: usize = @intCast(collider_head.count);
         if (collider_count == 0 or collider_count > 1024) return error.InvalidColliders;
-        for (0..collider_count) |k| try validateCollider(object, database.rna.ownedAt(object.colliders, object.slot, k));
+        for (0..collider_count) |k| {
+            const c = abi.childAt(database.Collider, object.colliders, object.refs, collider_head, k);
+            try validateCollider(object, c);
+        }
     }
     const robot_slot = self.robot();
+    const robot_entity = &self.robot_catalog.column("entities")[robot_slot.slot];
     for (0..self.thruster_len) |index| {
-        const t = database.rna.ownedAt(self.robot_catalog.thrusters, robot_slot.slot, index);
-        if (t.body >= self.objects.len or !math.finite3(math.fromAbi3(t.position)) or !math.finite3(math.fromAbi3(t.direction)) or
+        const t = abi.childAt(database.Thruster, self.robot_catalog.column("thrusters"), self.robot_catalog.column("refs"), robot_entity.thruster_children, index);
+        if (abi.sceneBodyIndex(self.robot_catalog.column("refs"), t.scene_bodies) >= self.objects.len or !math.finite3(math.fromAbi3(t.position)) or !math.finite3(math.fromAbi3(t.direction)) or
             @abs(math.norm(math.fromAbi3(t.direction)) - 1) >= 1e-4 or !positive(t.max_rpm) or !positive(t.diameter) or !positive(t.inertia) or
             !std.math.isFinite(t.thrust) or !std.math.isFinite(t.torque) or !nonnegative(t.kp) or !nonnegative(t.ki) or
             (t.command_sign != 1 and t.command_sign != -1)) return error.InvalidThruster;
     }
-    const hull_count = database.rna.owned(self.robot_catalog.hulls, robot_slot.slot);
+    const hull_count: usize = @intCast(robot_entity.hull_children.count);
     for (0..hull_count) |index| {
-        const h = database.rna.ownedAt(self.robot_catalog.hulls, robot_slot.slot, index);
-        if (h.body >= self.objects.len or h.vertex_count == 0 or h.vertex_count % 3 != 0 or
+        const h = abi.childAt(database.Hull, self.robot_catalog.column("hulls"), self.robot_catalog.column("refs"), robot_entity.hull_children, index);
+        if (abi.sceneBodyIndex(self.robot_catalog.column("refs"), h.scene_bodies) >= self.objects.len or h.vertex_count == 0 or h.vertex_count % 3 != 0 or
             !math.finite3(math.fromAbi3(h.drag)) or !math.finite3(math.fromAbi3(h.skin)) or !math.finite3(math.fromAbi3(h.centroid)) or !nonnegative(h.volume))
             return error.InvalidHull;
         try math.validPose(database.poseOf(h.pos, h.quat));
@@ -127,10 +132,13 @@ fn validate(self: *Scene) !void {
         for (positions) |position| if (!math.finite3(math.fromAbi3(position))) return error.InvalidHull;
     }
     for (0..self.sensor_len) |index| {
-        const sensor = database.rna.ownedAt(self.robot_catalog.sensors, robot_slot.slot, index);
-        if (sensor.body >= self.objects.len or sensor.period_ticks == 0) return error.InvalidSensor;
+        const sensor = abi.childAt(database.Sensor, self.robot_catalog.column("sensors"), self.robot_catalog.column("refs"), robot_entity.sensor_children, index);
+        if (abi.sceneBodyIndex(self.robot_catalog.column("refs"), sensor.scene_bodies) >= self.objects.len or sensor.period_ticks == 0) return error.InvalidSensor;
         try math.validPose(database.poseOf(sensor.pos, sensor.quat));
-        for (0..index) |other| if (sensor.id == database.rna.ownedAt(self.robot_catalog.sensors, robot_slot.slot, other).id) return error.DuplicateSensorId;
+        for (0..index) |other| {
+            const other_sensor = abi.childAt(database.Sensor, self.robot_catalog.column("sensors"), self.robot_catalog.column("refs"), robot_entity.sensor_children, other);
+            if (sensor.id == other_sensor.id) return error.DuplicateSensorId;
+        }
         if (database.sensorKind(sensor) == .camera) {
             if (sensor.width == 0 or sensor.height == 0 or sensor.width > 65536 or sensor.height > 65536 or
                 !positive(sensor.horizontal_fov) or sensor.horizontal_fov >= 180 or
@@ -139,9 +147,10 @@ fn validate(self: *Scene) !void {
         }
         self.routing.set(database.sensorKind(sensor), @fromBackingInt(@intCast(index)));
     }
-    var routed_body: ?types.BodyIndex = null;
+    var routed_body: ?abi.BodyIndex = null;
     for (self.routing.values) |ref| if (ref) |sensor_index| {
-        const body_index: types.BodyIndex = @enumFromInt(database.rna.ownedAt(self.robot_catalog.sensors, robot_slot.slot, @intCast(@backingInt(sensor_index))).body);
+        const record = abi.childAt(database.Sensor, self.robot_catalog.column("sensors"), self.robot_catalog.column("refs"), robot_entity.sensor_children, @intCast(@backingInt(sensor_index)));
+        const body_index: abi.BodyIndex = @enumFromInt(abi.sceneBodyIndex(self.robot_catalog.column("refs"), record.scene_bodies));
         if (routed_body) |previous| if (body_index != previous) return error.InvalidSensorRouting;
         routed_body = body_index;
     };
@@ -158,10 +167,12 @@ fn validate(self: *Scene) !void {
     }
 }
 
-fn sensorIs(self: *const Scene, ref: types.SensorIndex, kind: types.SensorKind) bool {
+fn sensorIs(self: *const Scene, ref: abi.SensorIndex, kind: abi.SensorKind) bool {
     const index = @backingInt(ref);
     const robot_slot = self.robot();
-    return index < self.sensor_len and database.sensorKind(database.rna.ownedAt(self.robot_catalog.sensors, robot_slot.slot, index)) == kind;
+    const robot_entity = &self.robot_catalog.column("entities")[robot_slot.slot];
+    const record = abi.childAt(database.Sensor, self.robot_catalog.column("sensors"), self.robot_catalog.column("refs"), robot_entity.sensor_children, index);
+    return index < self.sensor_len and database.sensorKind(record) == kind;
 }
 
 fn validateCollider(slot: database.BodySlot, c: *const database.Collider) !void {

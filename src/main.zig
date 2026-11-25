@@ -1,12 +1,15 @@
 const std = @import("std");
+const AuvApplication = @import("application/Application.zig").AuvApplication;
 const MissionContext = @import("MissionContext.zig");
-
+const missions = @import("missions.zig");
 const simulator_enabled = @import("build_options").simulator;
 
 test {
-    std.testing.refAllDecls(@import("BodyControl.zig"));
-    std.testing.refAllDecls(@import("Serial.zig"));
-    std.testing.refAllDecls(MissionContext);
+    _ = @import("application/Application.zig");
+    _ = @import("AuvRobot.zig");
+    _ = @import("simulator/ReflectionWriter.zig");
+    _ = MissionContext;
+    _ = missions;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -21,65 +24,52 @@ pub fn main(init: std.process.Init) !void {
             return error.UnknownArgument;
         }
     }
-    var context: MissionContext = undefined;
-    try context.initProcess(process_allocator, init.io, windowed);
-    defer context.deinitProcess();
-    const telemetry = context.telemetry;
+    var app: AuvApplication = undefined;
+    try app.initProcess(process_allocator, init.io, windowed);
+    defer app.deinitProcess();
+    const telemetry = app.telemetry;
 
-    // Reuse mission storage across restarts without resetting the process arena.
     var mission_arena = std.heap.ArenaAllocator.init(process_allocator);
     defer mission_arena.deinit();
-    var run_mission = true;
     while (true) {
-        if (run_mission) {
-            run_mission = false;
-            defer _ = mission_arena.reset(.retain_capacity);
-            runMission(mission_arena.allocator(), &context) catch |err| switch (@as(anyerror, err)) {
-                error.WindowClosed => return,
-                error.MissionRestart => run_mission = true,
-                error.MissionStopped => telemetry.result = .stopped,
-                else => {
-                    telemetry.result = .failed;
-                    telemetry.report(err);
-                },
-            };
-        } else {
-            context.serviceWithoutFrame() catch |err| switch (@as(anyerror, err)) {
-                error.WindowClosed => return,
-                error.MissionRestart => run_mission = true,
-                error.MissionStopped => telemetry.result = .stopped,
-                else => return err,
-            };
-            if (!run_mission) try std.Io.sleep(init.io, .fromMilliseconds(10), .awake);
-        }
+        defer _ = mission_arena.reset(.retain_capacity);
+        runMission(mission_arena.allocator(), &app) catch |err| switch (@as(anyerror, err)) {
+            error.WindowClosed => return,
+            error.MissionRestart => {},
+            error.MissionStopped => telemetry.result = .stopped,
+            else => {
+                telemetry.result = .failed;
+                telemetry.report(err);
+            },
+        };
     }
 }
 
-fn runMission(allocator: std.mem.Allocator, context: *MissionContext) !void {
-    const telemetry = context.telemetry;
-    std.Io.random(context.io, std.mem.asBytes(&telemetry.run_id));
+fn runMission(allocator: std.mem.Allocator, app: *AuvApplication) !void {
+    const telemetry = app.telemetry;
+    std.Io.random(app.io, std.mem.asBytes(&telemetry.run_id));
     telemetry.run_id |= 1;
     telemetry.state = .starting;
     telemetry.result = .none;
     telemetry.last_error = .{};
     telemetry.clearCommands();
     defer {
-        context.telemetry_frame = std.mem.zeroes(@TypeOf(context.telemetry_frame));
         telemetry.state = .idle;
         telemetry.clearCommands();
     }
-    try context.init(allocator);
-    defer context.deinit();
+    try app.initMission(allocator);
+    defer app.deinitMission();
 
-    try context.yieldUntilNextFrameAndUpdate();
-    context.target_position = context.frame.camera_pose.pos;
+    var mission: MissionContext = undefined;
+    mission.init(app);
+    try mission.prime();
     telemetry.state = .running;
-    switch (context.config.mission_id) {
-        .prequalify_coco => try @import("missions.zig").cocoMission(context),
-        .prequalify_robosub => try @import("missions.zig").robosubMission(context),
-        .teleop => try @import("missions.zig").teleopMission(context),
-        .mission_control => try @import("missions.zig").missionControl(context),
-        .thruster_control => try @import("missions.zig").thrusterControl(context),
+    switch (app.config.mission_id) {
+        .prequalify_coco => try missions.cocoMission(&mission),
+        .prequalify_robosub => try missions.robosubMission(&mission),
+        .teleop => try missions.teleopMission(&mission),
+        .mission_control => try missions.missionControl(&mission),
+        .thruster_control => try missions.thrusterControl(&mission),
     }
     telemetry.result = .completed;
 }

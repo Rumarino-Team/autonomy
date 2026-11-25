@@ -1,5 +1,4 @@
 const std = @import("std");
-const types = @import("types.zig");
 const database = @import("database.zig");
 const S = @import("support.zig");
 const Scene = @import("Scene.zig");
@@ -7,7 +6,7 @@ const Session = @import("Session.zig");
 const abi = @import("abi.zig");
 const State = @This();
 
-fn extend(lo: *types.Vec3, hi: *types.Vec3, p: types.Vec3) void {
+fn extend(lo: *abi.Vec3, hi: *abi.Vec3, p: abi.Vec3) void {
     var k: usize = 0;
     while (k < 3) : (k += 1) {
         lo[k] = @min(lo[k], p[k]);
@@ -15,13 +14,14 @@ fn extend(lo: *types.Vec3, hi: *types.Vec3, p: types.Vec3) void {
     }
 }
 
-fn objectBounds(slot: database.BodySlot, lo: *types.Vec3, hi: *types.Vec3) void {
+fn objectBounds(slot: database.BodySlot, lo: *abi.Vec3, hi: *abi.Vec3) void {
     @setFloatMode(.strict);
     lo.* = @splat(std.math.inf(f64));
     hi.* = @splat(-std.math.inf(f64));
-    const count = database.rna.owned(slot.colliders, slot.slot);
+    const collider_head = slot.entities[slot.slot].collider_children;
+    const count: usize = @intCast(collider_head.count);
     for (0..count) |ki| {
-        const c = database.rna.ownedAt(slot.colliders, slot.slot, ki);
+        const c = abi.childAt(database.Collider, slot.colliders, slot.refs, collider_head, ki);
         const pose = database.poseOf(c.pos, c.quat);
         const shape = database.shapeFrom(slot, c);
         switch (shape) {
@@ -45,7 +45,7 @@ fn objectBounds(slot: database.BodySlot, lo: *types.Vec3, hi: *types.Vec3) void 
     }
 }
 
-fn cameraFrom(record: *const database.Sensor) types.Camera {
+fn cameraFrom(record: *const database.Sensor) abi.Camera {
     return .{
         .width = record.width,
         .height = record.height,
@@ -55,7 +55,7 @@ fn cameraFrom(record: *const database.Sensor) types.Camera {
     };
 }
 
-fn project(camera: types.Camera, corners: [8]types.Vec3, out: *types.Detection) bool {
+fn project(camera: abi.Camera, corners: [8]abi.Vec3, out: *abi.Detection) bool {
     @setFloatMode(.strict);
     var x0: f64 = std.math.inf(f64);
     var y0: f64 = std.math.inf(f64);
@@ -63,7 +63,7 @@ fn project(camera: types.Camera, corners: [8]types.Vec3, out: *types.Detection) 
     var y1: f64 = -std.math.inf(f64);
     const focal = @as(f64, @floatFromInt(camera.width)) * 0.5 / @tan(camera.horizontal_fov * std.math.pi / 360);
     const extendPixel = struct {
-        fn apply(px0: *f64, py0: *f64, px1: *f64, py1: *f64, cam: types.Camera, f: f64, p: types.Vec3) void {
+        fn apply(px0: *f64, py0: *f64, px1: *f64, py1: *f64, cam: abi.Camera, f: f64, p: abi.Vec3) void {
             const x = @as(f64, @floatFromInt(cam.width)) * 0.5 + f * p[0] / p[2];
             const y = @as(f64, @floatFromInt(cam.height)) * 0.5 + f * p[1] / p[2];
             px0.* = @min(px0.*, x);
@@ -109,22 +109,22 @@ fn project(camera: types.Camera, corners: [8]types.Vec3, out: *types.Detection) 
 fn cameraSample(
     scene: *const Scene,
     sensor: *const database.Sensor,
-    camera: types.Camera,
+    camera: abi.Camera,
     bodies: []const abi.BodyState,
-    objects: []types.Detection,
-    mount: types.Pose,
-) []const types.Detection {
+    objects: []abi.Detection,
+    mount: abi.Pose,
+) []const abi.Detection {
     @setFloatMode(.strict);
     var count: usize = 0;
     const inverse = S.conjugate(mount.quat);
-    const sensor_body = sensor.body;
+    const sensor_body = abi.sceneBodyIndex(scene.robot_catalog.column("refs"), sensor.scene_bodies);
     for (scene.objects, bodies, 0..) |slot, body, index| {
         const e = database.entity(slot);
         if (e.tracked == 0 or index == sensor_body) continue;
-        var lo: types.Vec3 = undefined;
-        var hi: types.Vec3 = undefined;
+        var lo: abi.Vec3 = undefined;
+        var hi: abi.Vec3 = undefined;
         objectBounds(slot, &lo, &hi);
-        var observation: types.Detection = .{
+        var observation: abi.Detection = .{
             .id = e.id,
             .cls = e.cls,
             .pose = blk2: {
@@ -133,7 +133,7 @@ fn cameraSample(
             },
             .size = S.sub(hi, lo),
         };
-        var corners: [8]types.Vec3 = undefined;
+        var corners: [8]abi.Vec3 = undefined;
         var k: u32 = 0;
         while (k < 8) : (k += 1) {
             corners[k] = S.rotate(inverse, S.sub(S.point(S.bodyPose(body), .{
@@ -150,17 +150,17 @@ fn cameraSample(
     return objects[0..count];
 }
 
-samples: []types.SensorSample,
-detections: []types.Detection,
-observation: types.Observation = .{},
+samples: []abi.SensorSample,
+detections: []abi.Detection,
+observation: abi.Observation = .{},
 
 pub fn init(allocator: std.mem.Allocator, scene: *const Scene) !State {
-    const samples = try allocator.alloc(types.SensorSample, scene.sensor_len);
+    const samples = try allocator.alloc(abi.SensorSample, scene.sensor_len);
     errdefer allocator.free(samples);
     @memset(samples, .{});
     return .{
         .samples = samples,
-        .detections = try allocator.alloc(types.Detection, scene.sensor_len * scene.objects.len),
+        .detections = try allocator.alloc(abi.Detection, scene.sensor_len * scene.objects.len),
     };
 }
 
@@ -171,18 +171,19 @@ pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
 }
 
 fn assemble(self: *State, scene: *const Scene) void {
-    @setFloatMode(.strict);
-    var out: types.Observation = .{};
+    var out: abi.Observation = .{};
     const robot = scene.robot();
+    const robot_entity = &scene.robot_catalog.column("entities")[robot.slot];
     const tracking_index = if (scene.routing.get(.pose)) |ref| @backingInt(ref) else null;
     const tracking = if (tracking_index) |index| self.samples[index].value else null;
     if (tracking) |value| {
-        const mount = database.poseOf(database.rna.ownedAt(scene.robot_catalog.sensors, robot.slot, tracking_index.?).pos, database.rna.ownedAt(scene.robot_catalog.sensors, robot.slot, tracking_index.?).quat);
+        const tracking_sensor = abi.childAt(database.Sensor, scene.robot_catalog.column("sensors"), scene.robot_catalog.column("refs"), robot_entity.sensor_children, tracking_index.?);
+        const mount = database.poseOf(tracking_sensor.pos, tracking_sensor.quat);
         out.body.quat = S.multiply(value.pose.pose.quat, S.conjugate(mount.quat));
         out.attitude_axes = value.pose.axes.attitude_axes;
     }
     if (scene.routing.get(.imu)) |ref| if (self.samples[@backingInt(ref)].value) |value| {
-        const s = database.rna.ownedAt(scene.robot_catalog.sensors, robot.slot, @intCast(@backingInt(ref)));
+        const s = abi.childAt(database.Sensor, scene.robot_catalog.column("sensors"), scene.robot_catalog.column("refs"), robot_entity.sensor_children, @intCast(@backingInt(ref)));
         const mount = database.poseOf(s.pos, s.quat);
         out.imu = S.multiply(value.imu.orientation, S.conjugate(mount.quat));
         out.gyro = S.rotate(mount.quat, value.imu.gyro);
@@ -193,7 +194,7 @@ fn assemble(self: *State, scene: *const Scene) void {
         }
     };
     if (tracking) |value| {
-        const s = database.rna.ownedAt(scene.robot_catalog.sensors, robot.slot, tracking_index.?);
+        const s = abi.childAt(database.Sensor, scene.robot_catalog.column("sensors"), scene.robot_catalog.column("refs"), robot_entity.sensor_children, tracking_index.?);
         const mount = database.poseOf(s.pos, s.quat);
         if (out.attitude_axes == 7 or S.norm(mount.pos) == 0) {
             out.body.pos = S.sub(value.pose.pose.pos, S.rotate(out.body.quat, mount.pos));
@@ -201,7 +202,7 @@ fn assemble(self: *State, scene: *const Scene) void {
         }
     }
     if (scene.routing.get(.pressure)) |ref| if (self.samples[@backingInt(ref)].value) |value| {
-        const s = database.rna.ownedAt(scene.robot_catalog.sensors, robot.slot, @intCast(@backingInt(ref)));
+        const s = abi.childAt(database.Sensor, scene.robot_catalog.column("sensors"), scene.robot_catalog.column("refs"), robot_entity.sensor_children, @intCast(@backingInt(ref)));
         const mount = database.poseOf(s.pos, s.quat);
         out.depth = value.pressure;
         out.depth_ok = true;
@@ -212,7 +213,7 @@ fn assemble(self: *State, scene: *const Scene) void {
     };
     if (scene.routing.get(.camera)) |ref| {
         const index = @backingInt(ref);
-        const record = database.rna.ownedAt(scene.robot_catalog.sensors, robot.slot, index);
+        const record = abi.childAt(database.Sensor, scene.robot_catalog.column("sensors"), scene.robot_catalog.column("refs"), robot_entity.sensor_children, index);
         const camera = cameraFrom(record);
         out.image_width = camera.width;
         out.image_height = camera.height;
@@ -233,14 +234,15 @@ pub fn sample(runtime: *Session) void {
     const tick = runtime.tick;
     const dt = scene.settings.timestep();
     const robot = scene.robot();
+    const robot_entity = &scene.robot_catalog.column("entities")[robot.slot];
     for (0..scene.sensor_len) |index| {
-        const record = database.rna.ownedAt(scene.robot_catalog.sensors, robot.slot, index);
+        const record = abi.childAt(database.Sensor, scene.robot_catalog.column("sensors"), scene.robot_catalog.column("refs"), robot_entity.sensor_children, index);
         const reading = &self.samples[index];
         if (tick != 0 and tick % record.period_ticks != 0) continue;
         reading.* = .{ .tick = tick };
         if (record.enabled == 0) continue;
 
-        const body_index = record.body;
+        const body_index = abi.sceneBodyIndex(scene.robot_catalog.column("refs"), record.scene_bodies);
         const body = bodies[body_index];
         const mount = S.compose(S.bodyPose(body), database.poseOf(record.pos, record.quat));
         const kind = database.sensorKind(record);
@@ -265,7 +267,7 @@ pub fn sample(runtime: *Session) void {
                 .objects = cameraSample(scene, record, cameraFrom(record), bodies, self.detections[index * bodies.len ..][0..bodies.len], mount),
             } },
         };
-        const sensor_index: types.SensorIndex = @fromBackingInt(@intCast(index));
+        const sensor_index: abi.SensorIndex = @fromBackingInt(@intCast(index));
         for (scene.faults) |fault| {
             if (!fault.active(tick)) continue;
             switch (fault.effect) {

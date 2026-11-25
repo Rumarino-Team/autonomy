@@ -1,11 +1,10 @@
 const std = @import("std");
 const abi = @import("abi.zig");
-const types = @import("types.zig");
 const database = @import("database.zig");
 const S = @import("support.zig");
 const Session = @import("Session.zig");
 
-pub fn evaluate(force: types.Force, runtime: *Session) !void {
+pub fn evaluate(force: abi.Force, runtime: *Session) !void {
     switch (force) {
         .gravity => gravity(runtime),
         .hydrodynamics => try hydro(runtime),
@@ -13,7 +12,7 @@ pub fn evaluate(force: types.Force, runtime: *Session) !void {
     }
 }
 
-fn coefficients(force: types.Vec3, basis: types.Quat, cd: types.Vec3, scale: f64) types.Vec3 {
+fn coefficients(force: abi.Vec3, basis: abi.Quat, cd: abi.Vec3, scale: f64) abi.Vec3 {
     const d = S.rotate(S.conjugate(basis), force);
     const len = S.norm(d);
     const factor = if (len < 1.4901161193847656e-8) 0 else scale * (@abs(d[0]) * cd[0] + @abs(d[1]) * cd[1] + @abs(d[2]) * cd[2]) / len;
@@ -43,11 +42,12 @@ fn hydro(runtime: *Session) !void {
         @memset(minz, std.math.inf(f64));
         @memset(maxz, -std.math.inf(f64));
         const Wet = struct { lo: f64 = std.math.inf(f64), hi: f64 = -std.math.inf(f64) };
-        var wet: [types.max_hulls]Wet = @splat(.{});
-        const hull_count = database.rna.owned(model.robot_catalog.hulls, robot.slot);
+        var wet: [abi.max_hulls]Wet = @splat(.{});
+        const robot_entity = &model.robot_catalog.column("entities")[robot.slot];
+        const hull_count: usize = @intCast(robot_entity.hull_children.count);
         for (0..hull_count) |hi| {
-            const h = database.rna.ownedAt(model.robot_catalog.hulls, robot.slot, hi);
-            const index = h.body;
+            const h = abi.childAt(database.Hull, model.robot_catalog.column("hulls"), model.robot_catalog.column("refs"), robot_entity.hull_children, hi);
+            const index = abi.sceneBodyIndex(model.robot_catalog.column("refs"), h.scene_bodies);
             const transform = S.compose(S.bodyPose(bodies[index]), database.poseOf(h.pos, h.quat));
             const positions = database.rna.vec3s(robot.positions, h.vertex_start, h.vertex_count);
             for (positions) |position| {
@@ -65,9 +65,9 @@ fn hydro(runtime: *Session) !void {
             S.addForce(&runtime.fluid[index], S.scale(model.settings.gravity, -model.settings.water_density * e.volume), S.point(pose, S.fromAbi3(e.buoyancy)), S.fromAbi3(body.com));
         };
         for (0..hull_count) |hi| {
-            const h = database.rna.ownedAt(model.robot_catalog.hulls, robot.slot, hi);
+            const h = abi.childAt(database.Hull, model.robot_catalog.column("hulls"), model.robot_catalog.column("refs"), robot_entity.hull_children, hi);
             const extent = wet[hi];
-            const index = h.body;
+            const index = abi.sceneBodyIndex(model.robot_catalog.column("refs"), h.scene_bodies);
             const body = bodies[index];
             if (maxz[index] <= 0) continue;
             const transform = S.compose(S.bodyPose(body), database.poseOf(h.pos, h.quat));
@@ -76,10 +76,10 @@ fn hydro(runtime: *Session) !void {
                 const fraction = if (extent.lo > 0) 1 else extent.hi / (extent.hi - extent.lo);
                 S.addForce(out, S.scale(model.settings.gravity, -fraction * h.volume * model.settings.water_density), S.point(transform, S.fromAbi3(h.centroid)), S.fromAbi3(body.com));
             }
-            var pressure_linear: types.Vec3 = @splat(0);
-            var pressure_angular: types.Vec3 = @splat(0);
-            var skin_linear: types.Vec3 = @splat(0);
-            var skin_angular: types.Vec3 = @splat(0);
+            var pressure_linear: abi.Vec3 = @splat(0);
+            var pressure_angular: abi.Vec3 = @splat(0);
+            var skin_linear: abi.Vec3 = @splat(0);
+            var skin_angular: abi.Vec3 = @splat(0);
             const positions = database.rna.vec3s(robot.positions, h.vertex_start, h.vertex_count);
             var vertex: usize = 0;
             while (vertex < positions.len) : (vertex += 3) {
@@ -124,11 +124,12 @@ fn thrusters(runtime: *Session) void {
     const bodies = runtime.backend.states;
     const dt = model.settings.timestep();
     const robot = model.robot();
+    const robot_entity = &model.robot_catalog.column("entities")[robot.slot];
     for (0..model.thruster_len) |ti| {
-        const t = database.rna.ownedAt(model.robot_catalog.thrusters, robot.slot, ti);
+        const t = abi.childAt(database.Thruster, model.robot_catalog.column("thrusters"), model.robot_catalog.column("refs"), robot_entity.thruster_children, ti);
         const rotor = &runtime.rotors[ti];
         const command = runtime.commands[ti];
-        const index = t.body;
+        const index = abi.sceneBodyIndex(model.robot_catalog.column("refs"), t.scene_bodies);
         const body = bodies[index];
         const max = t.max_rpm / 60 * 2 * std.math.pi;
         const target = t.command_sign * std.math.clamp(command, -1, 1) * max;

@@ -49,6 +49,14 @@ pub fn FixedText(comptime capacity: usize) type {
     };
 }
 
+pub fn fixedTextFromSlice(comptime capacity: usize, text: []const u8) error{InvalidTextLength}!FixedText(capacity) {
+    if (text.len > capacity or std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidTextLength;
+    var out: FixedText(capacity) = .{};
+    out.len = @intCast(text.len);
+    @memcpy(out.bytes[0..text.len], text);
+    return out;
+}
+
 pub const OdometryPid = struct {
     rotation_gate: f64,
     kp: math.Vector6f,
@@ -75,18 +83,12 @@ pub const MissionProfileId = enum(u8) {
 };
 
 pub const MissionId = enum(u8) { prequalify_coco, prequalify_robosub, teleop, mission_control, thruster_control };
-pub const SensorSource = enum(u8) { simulated, plugin };
 
-/// How the simulator loads environment objects (robot still comes from `robots.bin`).
-pub const SimSceneCatalog = enum(u8) {
-    /// Committed `src/simulator/scenes.bin`.
-    embedded_bin = 0,
-    /// Read a scene-catalog DNA document from `sim_scene_catalog_path` at runtime.
-    file = 1,
-};
 pub const path_max = 256;
 pub const name_max = 64;
 pub const control_port: u16 = 8080;
+pub const default_telemetry_addr: []const u8 = "127.0.0.1:5600";
+pub const default_telemetry_log_path: []const u8 = "";
 pub const startup_mission: MissionId = .mission_control;
 pub const startup_profile: MissionProfileId = if (simulator_default) .mujoco_sim else .stonefish_sim;
 
@@ -97,24 +99,55 @@ pub const MissionProfiles = struct {
     proteus_hwd: MissionConfig,
 };
 
-pub const MissionConfig = struct {
-    mission_id: MissionId = startup_mission,
+/// Teleop/telemetry, hardware serial, and simulation I/O — set in presets; rebuild to change.
+pub const RuntimeConfig = struct {
     mission_profile: MissionProfileId = startup_profile,
-    sensor_source: SensorSource = .simulated,
-    sensor_library: FixedText(path_max) = .fromLiteral("./zig-out/lib/libauv_proteus_hwd.so"),
+    sensor_library: FixedText(path_max) = FixedText(path_max).fromLiteral("./zig-out/lib/libauv_proteus_hwd.so"),
     serial_port: FixedText(path_max) = .{},
-    sim_robot: FixedText(name_max) = .fromLiteral("hydrus"),
-    sim_scene: FixedText(name_max) = .fromLiteral("robosub_course"),
-    sim_scene_catalog: SimSceneCatalog = .embedded_bin,
-    sim_scene_catalog_path: FixedText(path_max) = .{},
+    sim_robot: FixedText(name_max) = FixedText(name_max).fromLiteral("hydrus"),
+    sim_scene: FixedText(name_max) = FixedText(name_max).fromLiteral("robosub_course"),
     sim_realtime: bool = false,
+    teleop_port: u16 = control_port,
+    telemetry_transport: TelemetryTransport = .udp,
+    telemetry_addr: FixedText(telemetry_addr_max) = FixedText(telemetry_addr_max).fromLiteral(default_telemetry_addr),
+    telemetry_log_path: FixedText(telemetry_log_path_max) = .{},
 
-    // Startup/control connection. These values must match between the runtime
-    // and viewer built from this module.
-    teleop_port: u16,
-    telemetry_transport: TelemetryTransport,
-    telemetry_addr: FixedText(telemetry_addr_max),
-    telemetry_log_path: FixedText(telemetry_log_path_max),
+    pub fn operationallyEqual(a: *const RuntimeConfig, b: *const RuntimeConfig) bool {
+        return a.mission_profile == b.mission_profile and textEqual(a.sensor_library, b.sensor_library) and
+            textEqual(a.serial_port, b.serial_port) and
+            textEqual(a.sim_robot, b.sim_robot) and textEqual(a.sim_scene, b.sim_scene) and
+            a.sim_realtime == b.sim_realtime and
+            a.teleop_port == b.teleop_port and a.telemetry_transport == b.telemetry_transport and
+            textEqual(a.telemetry_addr, b.telemetry_addr) and textEqual(a.telemetry_log_path, b.telemetry_log_path);
+    }
+
+    pub fn telemetryAddr(self: *const RuntimeConfig) error{InvalidTextLength}![]const u8 {
+        return try self.telemetry_addr.slice();
+    }
+
+    pub fn telemetryLogPath(self: *const RuntimeConfig) error{InvalidTextLength}!?[]const u8 {
+        if (self.telemetry_log_path.len == 0) return null;
+        return try self.telemetry_log_path.slice();
+    }
+
+    pub fn validate(self: *const RuntimeConfig) MissionConfig.ValidateError!void {
+        if (self.sim_robot.len == 0 or self.sim_scene.len == 0) return error.InvalidPath;
+        if (self.sensor_library.len == 0 and self.mission_profile != .mujoco_sim) return error.InvalidPath;
+        if (self.serial_port.len != 0 and self.mission_profile != .proteus_hwd) return error.InvalidProfile;
+        if (self.teleop_port != control_port and !@import("builtin").is_test) return error.InvalidPath;
+        switch (self.telemetry_transport) {
+            .udp => _ = try self.telemetryAddr(),
+            .stdout, .disabled => {},
+        }
+        _ = try self.telemetryLogPath();
+    }
+};
+
+pub const MissionConfig = struct {
+    runtime: RuntimeConfig = .{},
+    mission_id: MissionId = startup_mission,
+    /// AUTODNA scene catalog for this profile (`@embedFile` path relative to `src/simulator/`).
+    comptime scene_catalog_embed: []const u8 = "scenes.bin",
 
     // Control tuning copied into mutable runtime state and optionally updated
     // by a validated live-control packet.
@@ -133,23 +166,15 @@ pub const MissionConfig = struct {
     clear_print_stuff: bool,
 
     pub fn operationallyEqual(a: *const MissionConfig, b: *const MissionConfig) bool {
-        return a.mission_id == b.mission_id and a.mission_profile == b.mission_profile and
-            a.sensor_source == b.sensor_source and textEqual(a.sensor_library, b.sensor_library) and
-            textEqual(a.serial_port, b.serial_port) and textEqual(a.sim_robot, b.sim_robot) and
-            textEqual(a.sim_scene, b.sim_scene) and a.sim_scene_catalog == b.sim_scene_catalog and
-            textEqual(a.sim_scene_catalog_path, b.sim_scene_catalog_path) and a.sim_realtime == b.sim_realtime;
+        return a.mission_id == b.mission_id and a.runtime.operationallyEqual(&b.runtime);
     }
 
     pub fn telemetryAddr(self: *const MissionConfig) error{InvalidTextLength}![]const u8 {
-        const text = try self.telemetry_addr.slice();
-        if (text.len == 0) return error.InvalidTextLength;
-        return text;
+        return self.runtime.telemetryAddr();
     }
 
     pub fn telemetryLogPath(self: *const MissionConfig) error{InvalidTextLength}!?[]const u8 {
-        const text = try self.telemetry_log_path.slice();
-        if (text.len == 0) return null;
-        return text;
+        return self.runtime.telemetryLogPath();
     }
 
     pub const ValidateError = error{
@@ -162,29 +187,11 @@ pub const MissionConfig = struct {
     };
 
     pub fn validate(self: *const MissionConfig) ValidateError!void {
-        if (self.tam_len != compiledProfile(self.mission_profile).tam_len) return error.InvalidProfile;
-        const library = try self.sensor_library.slice();
-        const serial = try self.serial_port.slice();
-        const robot = try self.sim_robot.slice();
-        const scene = try self.sim_scene.slice();
-        if (std.mem.indexOfScalar(u8, library, 0) != null or std.mem.indexOfScalar(u8, serial, 0) != null or
-            std.mem.indexOfScalar(u8, robot, 0) != null or std.mem.indexOfScalar(u8, scene, 0) != null) return error.InvalidPath;
-        if (self.sensor_source == .plugin and library.len == 0) return error.InvalidPath;
-        if (robot.len == 0 or scene.len == 0) return error.InvalidPath;
-        if (self.sim_scene_catalog == .file) {
-            const catalog_path = try self.sim_scene_catalog_path.slice();
-            if (catalog_path.len == 0) return error.InvalidPath;
-        }
-        if (serial.len != 0 and self.mission_profile != .proteus_hwd) return error.InvalidProfile;
-        if (self.teleop_port != control_port and !@import("builtin").is_test) return error.InvalidPath;
+        try self.runtime.validate();
+        if (self.tam_len != compiledProfile(self.runtime.mission_profile).tam_len) return error.InvalidProfile;
         if (self.tam_len == 0 or self.tam_len > thruster_count) return error.InvalidTamLen;
         if (self.queue_capacity == 0 or self.queue_capacity > queue_capacity_max) return error.InvalidQueueCapacity;
         if (self.ibvs.interaction_cols == 0 or self.ibvs.interaction_cols > max_ibvs_error_cols) return error.InvalidInteractionCols;
-        switch (self.telemetry_transport) {
-            .udp => _ = try self.telemetryAddr(),
-            .stdout, .disabled => {},
-        }
-        _ = try self.telemetryLogPath();
     }
 };
 
@@ -200,7 +207,10 @@ fn presetZeroInteraction() [math.interaction_output_len][max_ibvs_error_cols]f64
 
 fn presetBaseline() MissionConfig {
     return .{
-        .teleop_port = control_port,
+        .runtime = .{
+            .teleop_port = control_port,
+            .telemetry_transport = .udp,
+        },
         .camera_forward = .{ 0, 1, 0 },
         .rotation_limit = .{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) },
         .tam = presetZeroTam(),
@@ -223,18 +233,15 @@ fn presetBaseline() MissionConfig {
         .queue_capacity = 32,
         .print_stuff = true,
         .clear_print_stuff = true,
-        .telemetry_transport = .udp,
-        .telemetry_addr = FixedText(telemetry_addr_max).fromLiteral("127.0.0.1:5600"),
-        .telemetry_log_path = FixedText(telemetry_log_path_max).fromLiteral(""),
     };
 }
 
 fn presetStonefishSim() MissionConfig {
     var config = presetBaseline();
-    config.mission_profile = .stonefish_sim;
+    config.runtime.mission_profile = .stonefish_sim;
     config.mission_id = .prequalify_robosub;
-    config.sensor_library = .fromLiteral("./zig-out/lib/libauv_stonefish_sim.so");
-    config.telemetry_transport = .stdout;
+    config.runtime.sensor_library = FixedText(path_max).fromLiteral("./zig-out/lib/libauv_stonefish_sim.so");
+    config.runtime.telemetry_transport = .stdout;
     config.rotation_limit = .{ 0, 0, 100 };
     config.odometry = .{
         .rotation_gate = 0.292699081688714,
@@ -266,21 +273,19 @@ fn presetStonefishSim() MissionConfig {
 
 fn presetMujocoSim() MissionConfig {
     var config = presetStonefishSim();
-    config.mission_profile = .mujoco_sim;
+    config.runtime.mission_profile = .mujoco_sim;
     config.mission_id = .prequalify_robosub;
-    config.sensor_source = .simulated;
-    config.sensor_library = .{};
-    config.telemetry_transport = .udp;
-    config.sim_robot = .fromLiteral("hydrus");
-    config.sim_scene = .fromLiteral("robosub_course");
-    config.sim_scene_catalog = .embedded_bin;
+    config.runtime.sensor_library = .{};
+    config.runtime.telemetry_transport = .udp;
+    config.runtime.sim_robot = FixedText(name_max).fromLiteral("hydrus");
+    config.runtime.sim_scene = FixedText(name_max).fromLiteral("robosub_course");
     return config;
 }
 
 fn presetProteusHwd() MissionConfig {
     var config = presetBaseline();
-    config.mission_profile = .proteus_hwd;
-    config.sim_robot = .fromLiteral("proteus");
+    config.runtime.mission_profile = .proteus_hwd;
+    config.runtime.sim_robot = FixedText(name_max).fromLiteral("proteus");
     config.rotation_limit = .{ 0.3, 0, 100 };
     config.ibvs.target_height = 0.35;
     config.odometry = .{
@@ -342,6 +347,9 @@ fn assertPreset(comptime name: []const u8, comptime config: MissionConfig) void 
     }
     if (config.ibvs.interaction_cols != 3) {
         @compileError(name ++ ": interaction_cols must be 3 (image error is cx, cy, height)");
+    }
+    if (config.scene_catalog_embed.len == 0 or std.mem.indexOfScalar(u8, config.scene_catalog_embed, 0) != null) {
+        @compileError(name ++ ": scene_catalog_embed must be a non-empty path without NUL");
     }
 
     var last_nonzero: usize = 0;
@@ -409,7 +417,19 @@ fn assertPreset(comptime name: []const u8, comptime config: MissionConfig) void 
     }
 }
 
+fn assertSceneCatalogEmbedMatches(comptime name: []const u8, comptime profile: MissionProfileId) void {
+    const database = @import("simulator/database.zig");
+    const embed = compiledProfile(profile).scene_catalog_embed;
+    const table = @field(database.scene_catalog_by_profile, name);
+    if (!std.mem.eql(u8, embed, table)) {
+        @compileError("scene_catalog_embed for " ++ name ++ " must match database.scene_catalog_by_profile");
+    }
+}
+
 comptime {
+    assertSceneCatalogEmbedMatches("stonefish_sim", .stonefish_sim);
+    assertSceneCatalogEmbedMatches("mujoco_sim", .mujoco_sim);
+    assertSceneCatalogEmbedMatches("proteus_hwd", .proteus_hwd);
     if (mission_profiles.proteus_hwd.tam_len != 6) @compileError("Proteus firmware requires six TAM rows");
     assertPreset("stonefish_sim", mission_profiles.stonefish_sim);
     assertPreset("mujoco_sim", mission_profiles.mujoco_sim);

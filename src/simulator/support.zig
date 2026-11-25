@@ -1,12 +1,11 @@
 
 const std = @import("std");
-const types = @import("types.zig");
 const abi = @import("abi.zig");
 const math = @import("../math.zig");
 
-pub const Vec3 = types.Vec3;
-pub const Quat = types.Quat;
-pub const Pose = types.Pose;
+pub const Vec3 = abi.Vec3;
+pub const Quat = abi.Quat;
+pub const Pose = abi.Pose;
 
 const V3 = math.Vector3f;
 const Q4 = math.Quaternionf;
@@ -27,19 +26,19 @@ inline fn arr4(v: Q4) Quat {
     return .{ v[0], v[1], v[2], v[3] };
 }
 
-pub fn fromAbi3(v: abi.Vec3) Vec3 {
+pub fn fromAbi3(v: abi.Vec3f) Vec3 {
     return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) };
 }
 
-pub fn fromAbi4(v: abi.Quat) Quat {
+pub fn fromAbi4(v: abi.Quatf) Quat {
     return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]), @floatCast(v[3]) };
 }
 
-pub fn toAbi3(v: Vec3) abi.Vec3 {
+pub fn toAbi3(v: Vec3) abi.Vec3f {
     return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]) };
 }
 
-pub fn toAbi4(v: Quat) abi.Quat {
+pub fn toAbi4(v: Quat) abi.Quatf {
     return .{ @floatCast(v[0]), @floatCast(v[1]), @floatCast(v[2]), @floatCast(v[3]) };
 }
 

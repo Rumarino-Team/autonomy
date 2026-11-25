@@ -1,6 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
 const IO = @import("../MissionIO.zig");
+const Wire = @import("../AuvRobot.zig").Wire;
 const Config = IO.CompiledConfig;
 const Self = @This();
 const config_field_count = 6;
@@ -17,8 +18,7 @@ pending_config: ?IO.LiveConfigPacket = null,
 applying_draft: bool = false,
 last_status: f64 = -1,
 direct_values: [Config.thruster_count]f32 = @splat(0),
-direct_command: ?IO.ThrusterCommand = null,
-direct_sequence: u64 = 0,
+direct_command: ?Wire.ThrusterDoc = null,
 direct_run_id: u64 = 0,
 error_text: Config.FixedText(256) = .{},
 
@@ -47,11 +47,10 @@ pub fn acceptStatus(self: *Self, status: IO.RuntimeStatus, packet: *IO.LiveConfi
         self.direct_command = null;
         if (status.run_id != self.direct_run_id) {
             self.direct_run_id = status.run_id;
-            self.direct_sequence = 0;
             self.direct_values = @splat(0);
         }
     }
-    packet.* = status.desired;
+    packet.* = .{ .revision = status.revision, .config = status.desired };
     if (self.pending_request) |pending| {
         if (status.accepted_client_id == self.client_id and status.accepted_request_id >= pending.request_id) self.pending_request = null;
     }
@@ -67,7 +66,7 @@ pub fn acceptStatus(self: *Self, status: IO.RuntimeStatus, packet: *IO.LiveConfi
             self.applying_draft = false;
         }
     }
-    if (first or !self.dirty) self.draft = status.desired else if (old_revision != status.revision) {
+    if (first or !self.dirty) self.draft = .{ .revision = status.revision, .config = status.desired } else if (old_revision != status.revision) {
         IO.setText(&self.error_text, "Configuration changed; Revert to refresh the draft before applying.");
     }
 }
@@ -133,24 +132,18 @@ pub fn zeroThrusters(self: *Self) void {
 pub fn publishThrusters(self: *Self, status: IO.RuntimeStatus) void {
     if (status.state != .running or !status.active or status.active_config.mission_id != .thruster_control) return;
     const count = status.active_config.tam_len;
-    var values: [Config.thruster_count]f32 = @splat(0);
-    for (0..count) |i| {
-        const value = self.direct_values[i];
+    if (count > self.direct_values.len) return;
+    for (self.direct_values[0..count]) |value| {
         if (!std.math.isFinite(value) or value < -1 or value > 1) return;
-        values[i] = value;
     }
-    self.direct_sequence += 1;
-    self.direct_command = .{
-        .run_id = status.run_id,
-        .client_id = self.client_id,
-        .sequence = self.direct_sequence,
-        .count = count,
-        .values = values,
-    };
+    var command: Wire.ThrusterDoc = .{ .len = count };
+    @memcpy(command.values[0..count], self.direct_values[0..count]);
+    self.direct_command = command;
     self.error_text = .{};
 }
 
-pub fn draw(self: *Self, font: rl.Font, bounds: rl.Rectangle, packet: *const IO.LiveConfigPacket, frame: *const IO.TelemetryFrame, telemetry_live: bool, embedded: bool) void {
+pub fn draw(self: *Self, font: rl.Font, bounds: rl.Rectangle, packet: *const IO.LiveConfigPacket, frame: *const Wire.TelemetryDoc, telemetry_live: bool, embedded: bool) void {
+    _ = embedded;
     const x = bounds.x;
     const w = bounds.width;
     const ready = self.synchronized();
@@ -159,7 +152,7 @@ pub fn draw(self: *Self, font: rl.Font, bounds: rl.Rectangle, packet: *const IO.
         const label = rl.textFormat("State: %s  /  Result: %s  /  Revision: %llu", .{ @tagName(status.state).ptr, @tagName(status.result).ptr, status.revision });
         text(font, label, x, y, if (status.result == .failed) rl.Color.orange else if (ready) rl.Color.lime else rl.Color.orange);
         y += 26;
-        text(font, rl.textFormat("Desired: %s / %s  |  Active: %s / %s", .{ @tagName(status.desired.mission_id).ptr, @tagName(status.desired.mission_profile).ptr, if (status.active) @tagName(status.active_config.mission_id).ptr else "none", if (status.active) @tagName(status.active_config.mission_profile).ptr else "none" }), x, y, rl.Color.ray_white);
+        text(font, rl.textFormat("Desired: %s / %s  |  Active: %s / %s", .{ @tagName(status.desired.mission_id).ptr, @tagName(status.desired.runtime.mission_profile).ptr, if (status.active) @tagName(status.active_config.mission_id).ptr else "none", if (status.active) @tagName(status.active_config.runtime.mission_profile).ptr else "none" }), x, y, rl.Color.ray_white);
         y += 26;
         text(font, status.last_error.slice() catch "", x, y, rl.Color.orange);
     } else text(font, "Connecting to runtime control...", x, y, rl.Color.orange);
@@ -187,51 +180,22 @@ pub fn draw(self: *Self, font: rl.Font, bounds: rl.Rectangle, packet: *const IO.
     y += 40;
     text(font, self.error_text.slice() catch "", x, y, rl.Color.orange);
     y += 26;
-    if (button(font, rl.textFormat("Mission: %s", .{@tagName(self.draft.mission_id).ptr}), .{ .x = x, .y = y, .width = w * 0.48, .height = 28 }, ready)) {
-        self.draft.mission_id = @fromBackingInt(@intCast((@backingInt(self.draft.mission_id) + 1) % @typeInfo(Config.MissionId).@"enum".field_names.len));
+    if (button(font, rl.textFormat("Mission: %s", .{@tagName(self.draft.config.mission_id).ptr}), .{ .x = x, .y = y, .width = w * 0.48, .height = 28 }, ready)) {
+        self.draft.config.mission_id = @fromBackingInt(@intCast((@backingInt(self.draft.config.mission_id) + 1) % @typeInfo(Config.MissionId).@"enum".field_names.len));
         self.dirty = true;
     }
-    if (button(font, rl.textFormat("Profile: %s", .{@tagName(self.draft.mission_profile).ptr}), .{ .x = x + w * 0.5, .y = y, .width = w * 0.5, .height = 28 }, ready)) {
-        const profile: Config.MissionProfileId = switch (self.draft.mission_profile) {
-            .stonefish_sim => .mujoco_sim,
-            .mujoco_sim => .proteus_hwd,
-            .proteus_hwd => .stonefish_sim,
-        };
-        const preset = Config.compiledProfile(profile);
-        self.draft.mission_profile = profile;
-        const wire = IO.LiveConfigPacket.fromRuntimeConfig(preset);
-        self.draft.tam = wire.tam;
-        self.draft.tam_len = wire.tam_len;
-        self.draft.camera_forward = wire.camera_forward;
-        self.draft.rotation_limit = wire.rotation_limit;
-        self.draft.log_freq_div = wire.log_freq_div;
-        self.draft.queue_capacity = wire.queue_capacity;
-        self.draft.print_stuff = wire.print_stuff;
-        self.draft.clear_print_stuff = wire.clear_print_stuff;
-        self.draft.odometry = wire.odometry;
-        self.draft.ibvs = wire.ibvs;
-        self.draft.thrustor_saturate = wire.thrustor_saturate;
-        self.draft.goal_dist_threshold = wire.goal_dist_threshold;
-        self.draft.sim_robot = wire.sim_robot;
-        self.dirty = true;
-    }
+    text(font, rl.textFormat("Profile: %s (rebuild to change)", .{@tagName(self.draft.config.runtime.mission_profile).ptr}), x + w * 0.5, y + 5, rl.Color.gray);
     y += 36;
     if (self.status) |status| {
         if (status.active and status.active_config.mission_id == .thruster_control) {
             _ = frame;
             _ = telemetry_live;
-            text(font, "Stop the mission to edit sensor and transport settings.", x, y, rl.Color.gray);
+            text(font, "Compiled I/O settings (MissionConfig presets); rebuild to change.", x, y, rl.Color.gray);
             return;
         }
     }
-    text(font, rl.textFormat("Sensor source: %s (compiled)", .{@tagName(self.draft.sensor_source).ptr}), x, y + 5, rl.Color.gray);
-    if (embedded) {
-        text(font, "Simulator pacing: wall clock", x + w * 0.5, y + 5, rl.Color.gray);
-    } else if (button(font, if (self.draft.sim_realtime) "Simulator pacing: wall clock" else "Simulator pacing: accelerated", .{ .x = x + w * 0.5, .y = y, .width = w * 0.5, .height = 28 }, ready)) {
-        self.draft.sim_realtime = !self.draft.sim_realtime;
-        self.dirty = true;
-    }
-    y += 36;
+    text(font, "Compiled I/O (edit MissionConfig.zig presets and rebuild):", x, y + 2, rl.Color.gray);
+    y += 26;
     inline for (.{
         "sensor_library",
         "serial_port",
@@ -248,15 +212,23 @@ pub fn draw(self: *Self, font: rl.Font, bounds: rl.Rectangle, packet: *const IO.
             "Telemetry address",
             "Log file",
         };
-        self.editText(font, labels[i], &@field(self.draft, name), i, .{ .x = x, .y = y, .width = w, .height = 26 });
-        y += 30;
+        text(font, labels[i], x, y + 4, rl.Color.gray);
+        const path = if (std.mem.eql(u8, name, "sensor_library"))
+            self.draft.config.runtime.sensor_library.slice() catch ""
+        else if (std.mem.eql(u8, name, "serial_port"))
+            self.draft.config.runtime.serial_port.slice() catch ""
+        else if (std.mem.eql(u8, name, "sim_robot"))
+            self.draft.config.runtime.sim_robot.slice() catch ""
+        else if (std.mem.eql(u8, name, "sim_scene"))
+            self.draft.config.runtime.sim_scene.slice() catch ""
+        else if (std.mem.eql(u8, name, "telemetry_addr"))
+            self.draft.config.runtime.telemetry_addr.slice() catch ""
+        else if (std.mem.eql(u8, name, "telemetry_log_path"))
+            self.draft.config.runtime.telemetry_log_path.slice() catch ""
+        else
+            "";
+        text(font, path, x + 170, y + 4, rl.Color.ray_white);
+        y += 24;
     }
-    if (button(font, rl.textFormat("Telemetry transport: %s", .{@tagName(self.draft.telemetry_transport).ptr}), .{ .x = x, .y = y, .width = w, .height = 28 }, ready)) {
-        self.draft.telemetry_transport = switch (self.draft.telemetry_transport) {
-            .disabled => .udp,
-            .udp => .stdout,
-            .stdout => .disabled,
-        };
-        self.dirty = true;
-    }
+    text(font, rl.textFormat("Telemetry transport: %s  |  teleop port: %d", .{ @tagName(self.draft.config.runtime.telemetry_transport).ptr, Config.control_port }), x, y + 4, rl.Color.gray);
 }

@@ -3,7 +3,6 @@ const std = @import("std");
 const rl = @import("raylib");
 const Scene = @import("Scene.zig");
 const database = @import("database.zig");
-const types = @import("types.zig");
 const abi = @import("abi.zig");
 const S = @import("support.zig");
 
@@ -19,9 +18,10 @@ pub const VisualizerMeshCache = struct {
 
         for (scene.objects, 0..) |slot, body_index| {
             const entity = database.entity(slot);
-            const collider_count = database.rna.owned(slot.colliders, slot.slot);
+            const collider_head = slot.entities[slot.slot].collider_children;
+            const collider_count: usize = @intCast(collider_head.count);
             for (0..collider_count) |ki| {
-                const collider = database.rna.ownedAt(slot.colliders, slot.slot, ki);
+                const collider = abi.childAt(database.Collider, slot.colliders, slot.refs, collider_head, ki);
                 const shape = database.shapeFrom(slot, collider);
                 const entry = makeEntry(allocator, shape, collider, entity.cls, body_index) catch |err| switch (err) {
                     error.MeshTooLarge => {
@@ -89,7 +89,7 @@ fn deinitEntries(allocator: std.mem.Allocator, entries: []Entry) void {
 
 fn makeEntry(
     _: std.mem.Allocator,
-    shape: types.Shape,
+    shape: abi.Shape,
     collider: *const database.Collider,
     cls: u32,
     body_index: usize,
@@ -116,8 +116,8 @@ fn makeEntry(
 }
 
 fn uploadTriangleMesh(
-    positions: []const abi.Vec3,
-    triangles: []const types.Triangle,
+    positions: []const abi.Vec3f,
+    triangles: []const abi.Triangle,
 ) !rl.Mesh {
     if (positions.len > max_index_vertices) return error.MeshTooLarge;
     const verts = try cpu_allocator.alloc(f32, positions.len * 3);
@@ -150,11 +150,11 @@ fn entityColor(body_index: usize, cls: u8) rl.Color {
     return rl.colorFromHSV(@floatFromInt((@as(u16, cls) * 47) % 360), 0.75, 0.95);
 }
 
-fn toRay(v: types.Vec3) rl.Vector3 {
+fn toRay(v: abi.Vec3) rl.Vector3 {
     return .{ .x = @floatCast(v[0]), .y = @floatCast(-v[2]), .z = @floatCast(-v[1]) };
 }
 
-fn poseMatrix(pose: types.Pose) rl.Matrix {
+fn poseMatrix(pose: abi.Pose) rl.Matrix {
     const t = toRay(pose.pos);
     const x = toRay(S.rotate(pose.quat, .{ 1, 0, 0 }));
     const y = toRay(S.rotate(pose.quat, .{ 0, 1, 0 }));

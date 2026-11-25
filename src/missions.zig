@@ -1,18 +1,20 @@
 const std = @import("std");
 const math = @import("math.zig");
 const Auv = @import("Auv.zig");
+const Wire = @import("AuvRobot.zig").Wire;
 const MissionContext = @import("MissionContext.zig");
-const MissionIO = @import("MissionIO.zig");
+const reflection = @import("simulator/ReflectionWriter.zig");
 const c = Auv.c;
 
 pub fn teleopMission(ctx: *MissionContext) !void {
+    const state = &ctx.app.robot.state;
     var translation: math.Vector3f = .{ 0, 0, 0 };
     var orientation: math.Quaternionf = .{ 0, 0, 0, 1 };
 
     while (true) {
-        if (ctx.telemetry.takeTeleopCommand()) |command| {
-            const next_translation = MissionIO.teleopTranslation(command);
-            const next_orientation = MissionIO.teleopOrientation(command);
+        if (takeTeleop(ctx)) |command| {
+            const next_translation = command.teleop_translation orelse math.Vector3f{ 0, 0, 0 };
+            const next_orientation = command.target_orientation;
             const translation_finite = std.math.isFinite(next_translation[0]) and
                 std.math.isFinite(next_translation[1]) and
                 std.math.isFinite(next_translation[2]);
@@ -23,28 +25,28 @@ pub fn teleopMission(ctx: *MissionContext) !void {
             }
         }
 
-        ctx.use_position = false;
-        ctx.use_orientation = true;
-        ctx.target_orientation = orientation;
+        state.use_position = false;
+        state.use_orientation = true;
+        state.target_orientation = orientation;
         if (math.length3f(translation) <= 1e-4) {
-            ctx.translation = null;
+            state.teleop_translation = null;
         } else {
-            ctx.translation = translation;
+            state.teleop_translation = translation;
         }
-        try ctx.yieldUntilNextFrameAndUpdate();
+        try ctx.yieldFrame();
     }
 }
 
 pub fn thrusterControl(ctx: *MissionContext) !void {
     ctx.step = "direct_thruster_control";
-    while (true) try ctx.yieldUntilNextFrameAndUpdate();
+    while (true) try ctx.yieldFrame();
 }
 
 pub fn missionControl(ctx: *MissionContext) !void {
     while (true) {
         ctx.step = "waiting_for_mission_command";
-        try ctx.yieldUntilNextFrameAndUpdate();
-        const command = ctx.telemetry.takeMissionCommand() orelse continue;
+        try ctx.yieldFrame();
+        const command = ctx.app.telemetry.takeMissionCommand() orelse continue;
 
         switch (command.kind) {
             .point => {
@@ -96,3 +98,10 @@ pub fn robosubMission(ctx: *MissionContext) !void {
     ctx.step = "circle_marker";
     try ctx.yieldCircle(marker);
 }
+
+fn takeTeleop(ctx: *MissionContext) ?Wire.TeleopWire {
+    const bytes = ctx.app.telemetry.takeTeleopPacket() orelse return null;
+    const doc = reflection.read(Wire.TeleopDoc, bytes) catch return null;
+    return doc.command;
+}
+

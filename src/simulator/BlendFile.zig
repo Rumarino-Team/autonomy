@@ -1,6 +1,6 @@
 //! Minimal .blend reader for scene export. Pinned to Blender 4.x file format.
 const std = @import("std");
-const types = @import("types");
+const types = @import("abi");
 
 pub const pinned_version_major: u8 = 4;
 
@@ -113,8 +113,8 @@ pub const BlendFile = struct {
             }
             if (mesh.positions.len == 0 and props.hx != null and props.hy != null and props.hz != null) {
                 const box = boxMesh(props.hx.?, props.hy.?, props.hz.?);
-                mesh.positions = try self.allocator.dupe(types.Vec3, &box.positions);
-                mesh.triangles = try self.allocator.dupe(types.Triangle, &box.triangles);
+                mesh.positions = try self.allocator.dupe(abi.Vec3, &box.positions);
+                mesh.triangles = try self.allocator.dupe(abi.Triangle, &box.triangles);
             }
             try out.append(self.allocator, .{
                 .name = name,
@@ -166,8 +166,8 @@ pub const BlendFile = struct {
 
     pub const MeshExport = struct {
         name: []const u8,
-        positions: []types.Vec3,
-        triangles: []types.Triangle,
+        positions: []abi.Vec3,
+        triangles: []abi.Triangle,
     };
 
     pub fn deinitExported(self: *BlendFile, objects: []ExportedObject) void {
@@ -185,9 +185,9 @@ pub const BlendFile = struct {
         cls: u32,
         tracked: bool,
         collisions: bool,
-        pose: types.Pose,
-        positions: []types.Vec3,
-        triangles: []types.Triangle,
+        pose: abi.Pose,
+        positions: []abi.Vec3,
+        triangles: []abi.Triangle,
     };
 };
 
@@ -200,12 +200,12 @@ pub const Block = struct {
     data: []const u8,
 };
 
-fn boxMesh(hx: f64, hy: f64, hz: f64) struct { positions: [8]types.Vec3, triangles: [12]types.Triangle } {
-    const positions = [_]types.Vec3{
+fn boxMesh(hx: f64, hy: f64, hz: f64) struct { positions: [8]abi.Vec3, triangles: [12]abi.Triangle } {
+    const positions = [_]abi.Vec3{
         .{ -hx, -hy, -hz }, .{ hx, -hy, -hz }, .{ hx, hy, -hz }, .{ -hx, hy, -hz },
         .{ -hx, -hy, hz },  .{ hx, -hy, hz },  .{ hx, hy, hz },  .{ -hx, hy, hz },
     };
-    const triangles = [_]types.Triangle{
+    const triangles = [_]abi.Triangle{
         .{ .a = 0, .b = 1, .c = 2 }, .{ .a = 0, .b = 2, .c = 3 },
         .{ .a = 4, .b = 6, .c = 5 }, .{ .a = 4, .b = 7, .c = 6 },
         .{ .a = 0, .b = 4, .c = 5 }, .{ .a = 0, .b = 5, .c = 1 },
@@ -244,14 +244,14 @@ fn readSimProps(self: *BlendFile, layout: SDNAStruct, elem: []const u8) !SimProp
     };
 }
 
-fn readObjectPose(layout: SDNAStruct, elem: []const u8) types.Pose {
-    var pose: types.Pose = .{};
+fn readObjectPose(layout: SDNAStruct, elem: []const u8) abi.Pose {
+    var pose: abi.Pose = .{};
     if (layout.field("loc")) |field| pose.pos = readVec3(elem, field.offset);
     if (layout.field("rot")) |field| pose.quat = eulerToQuat(readVec3(elem, field.offset));
     return pose;
 }
 
-const MeshData = struct { positions: []types.Vec3, triangles: []types.Triangle };
+const MeshData = struct { positions: []abi.Vec3, triangles: []abi.Triangle };
 
 fn readMeshGeometry(self: *BlendFile, layout: SDNAStruct, elem: []const u8) !MeshData {
     const allocator = self.allocator;
@@ -261,9 +261,9 @@ fn readMeshGeometry(self: *BlendFile, layout: SDNAStruct, elem: []const u8) !Mes
     const loop_ptr = layout.readPointer(self.endian, self.pointer_size, elem, "mloop") orelse 0;
     const poly_ptr = layout.readPointer(self.endian, self.pointer_size, elem, "mpoly") orelse 0;
 
-    var positions: std.ArrayList(types.Vec3) = .empty;
+    var positions: std.ArrayList(abi.Vec3) = .empty;
     errdefer positions.deinit(allocator);
-    var triangles: std.ArrayList(types.Triangle) = .empty;
+    var triangles: std.ArrayList(abi.Triangle) = .empty;
     errdefer triangles.deinit(allocator);
 
     if (vert_ptr != 0 and totvert > 0) {
@@ -307,12 +307,12 @@ fn readMeshGeometry(self: *BlendFile, layout: SDNAStruct, elem: []const u8) !Mes
 
 fn emptySlices(allocator: std.mem.Allocator) !MeshData {
     return .{
-        .positions = try allocator.alloc(types.Vec3, 0),
-        .triangles = try allocator.alloc(types.Triangle, 0),
+        .positions = try allocator.alloc(abi.Vec3, 0),
+        .triangles = try allocator.alloc(abi.Triangle, 0),
     };
 }
 
-fn finishMesh(allocator: std.mem.Allocator, positions: *std.ArrayList(types.Vec3), triangles: *std.ArrayList(types.Triangle)) !MeshData {
+fn finishMesh(allocator: std.mem.Allocator, positions: *std.ArrayList(abi.Vec3), triangles: *std.ArrayList(abi.Triangle)) !MeshData {
     return .{
         .positions = try positions.toOwnedSlice(allocator),
         .triangles = try triangles.toOwnedSlice(allocator),
@@ -479,7 +479,7 @@ fn readInt(comptime T: type, endian: std.builtin.Endian, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], endian);
 }
 
-fn readVec3(elem: []const u8, offset: usize) types.Vec3 {
+fn readVec3(elem: []const u8, offset: usize) abi.Vec3 {
     return .{
         @bitCast(std.mem.readInt(u32, elem[offset..][0..4], .little)),
         @bitCast(std.mem.readInt(u32, elem[offset + 4 ..][0..4], .little)),
@@ -495,7 +495,7 @@ fn readVec3i(elem: []const u8, offset: usize) [3]i32 {
     };
 }
 
-fn eulerToQuat(euler: types.Vec3) types.Quat {
+fn eulerToQuat(euler: abi.Vec3) abi.Quat {
     const rx = euler[0];
     const ry = euler[1];
     const rz = euler[2];

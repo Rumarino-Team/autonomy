@@ -4,7 +4,6 @@ const Auv = @import("../Auv.zig");
 const math = @import("../math.zig");
 const Scene = @import("Scene.zig");
 const database = @import("database.zig");
-const types = @import("types.zig");
 const S = @import("support.zig");
 const MissionConfig = @import("../MissionConfig.zig");
 const MujocoBackend = @import("mujoco.zig").MujocoBackend;
@@ -22,21 +21,20 @@ catalogs_owned: bool,
 robot_catalog: abi.RobotCatalog,
 robot_slots: []u32,
 scene_catalog: abi.SceneCatalog,
-scene_file: []align(@alignOf(u64)) u8 = &.{},
 scene_presets: []database.ScenePreset,
 scene: Scene,
 backend: MujocoBackend,
 sensors: Sensors,
 wrenches: []abi.Wrench,
 fluid: []abi.Wrench,
-previous_linear: []abi.Vec3,
-previous_angular: []abi.Vec3,
+previous_linear: []abi.Vec3f,
+    previous_angular: []abi.Vec3f,
 scratch: []align(@alignOf(f64)) u8,
 thruster_len: u8,
-rotors: [types.thruster_count]abi.RotorState = @splat(abi.RotorState{ .omega = 0, .integral = 0, .torque = 0, .thrust = 0 }),
+rotors: [abi.thruster_count]abi.RotorState = @splat(abi.RotorState{ .omega = 0, .integral = 0, .torque = 0, .thrust = 0 }),
 preset_robot: []const u8 = "",
 preset_scene: []const u8 = "",
-commands: types.ThrusterCommands = @splat(0),
+commands: abi.ThrusterCommands = @splat(0),
 tick: u64 = 0,
 realtime: bool,
 tam_len: usize,
@@ -45,8 +43,8 @@ live: bool = false,
 started: std.Io.Clock.Timestamp,
 
 pub fn init(self: *Session, allocator: std.mem.Allocator, io: std.Io, config: *const MissionConfig.MissionConfig, tam_len: usize, realtime: bool) !void {
-    const robot_name = try config.sim_robot.slice();
-    const scene_name = try config.sim_scene.slice();
+    const robot_name = config.runtime.sim_robot.slice() catch return error.InvalidPath;
+    const scene_name = config.runtime.sim_scene.slice() catch return error.InvalidPath;
     if (tam_len == 0 or tam_len > MissionConfig.thruster_count) return error.InvalidThrusterCount;
     self.* = .{
         .io = io,
@@ -68,39 +66,25 @@ pub fn init(self: *Session, allocator: std.mem.Allocator, io: std.Io, config: *c
         .tam_len = tam_len,
         .started = undefined,
     };
-    self.robot_catalog = try database.loadRobot(allocator, database.alignedEmbed(@embedFile("robots.bin")));
-    self.robot_slots = try allocator.alloc(u32, self.robot_catalog.names.len);
-    for (self.robot_catalog.names, 0..) |name, i| {
+    self.robot_catalog = try database.readRobotCatalog(database.alignedEmbed(@embedFile("robots.bin")));
+    try database.validateRobot(&self.robot_catalog);
+    self.robot_slots = try allocator.alloc(u32, self.robot_catalog.column("names").len);
+    for (self.robot_catalog.column("names"), 0..) |name, i| {
         if (name.entity_count != 1) return error.InvalidDatabase;
         self.robot_slots[i] = name.entity_start;
     }
-    switch (config.sim_scene_catalog) {
-        .embedded_bin => {
-            self.scene_catalog = try database.loadScene(allocator, database.alignedEmbed(@embedFile("scenes.bin")));
-        },
-        .file => {
-            const path = try config.sim_scene_catalog_path.slice();
-            if (path.len == 0) return error.MissingSceneCatalogPath;
-            const bytes = try std.Io.Dir.cwd().readFileAllocOptions(io, path, allocator, .limited(std.math.maxInt(usize)), .of(u64), null);
-            self.scene_catalog = database.loadScene(allocator, bytes) catch |err| {
-                allocator.free(bytes);
-                return err;
-            };
-            if (reflection.slicesMapped(abi.SceneCatalog, self.scene_catalog, bytes)) {
-                self.scene_file = bytes;
-            } else allocator.free(bytes);
-        },
-    }
+    self.scene_catalog = try database.readSceneCatalog(database.sceneCatalogBytes(config.runtime.mission_profile));
+    try database.validateScene(&self.scene_catalog);
     self.scene_presets = try database.allocScenePresets(allocator, &self.scene_catalog);
     const robot_index: usize = blk: {
         for (self.robot_slots, 0..) |slot, i| {
-            if (std.mem.eql(u8, robot_name, database.rna.string(self.robot_catalog.strings, self.robot_catalog.entities[slot]))) break :blk i;
+            if (std.mem.eql(u8, robot_name, database.rna.string(self.robot_catalog.column("strings"), self.robot_catalog.column("entities")[slot]))) break :blk i;
         }
         return error.UnknownSimRobot;
     };
     const robot_slot = self.robot_slots[robot_index];
     const robot = database.bodySlot(&self.robot_catalog, robot_slot);
-    if (database.rna.owned(self.robot_catalog.thrusters, robot.slot) != tam_len) return error.InvalidThrusterCount;
+    if (self.robot_catalog.column("entities")[robot.slot].thruster_children.count != tam_len) return error.InvalidThrusterCount;
     const selected_scene = if (std.mem.eql(u8, scene_name, "robot_only"))
         try Scene.init(allocator, &self.robot_catalog, robot, null, &.{}, .{}, &.{})
     else blk: {
@@ -108,7 +92,7 @@ pub fn init(self: *Session, allocator: std.mem.Allocator, io: std.Io, config: *c
             for (self.scene_presets) |*p| if (std.mem.eql(u8, scene_name, p.name)) break :find_preset p;
             return error.UnknownSimScene;
         };
-        const start: ?types.Pose = if (std.mem.eql(u8, scene_name, "robosub_course"))
+        const start: ?abi.Pose = if (std.mem.eql(u8, scene_name, "robosub_course"))
             .{ .pos = .{ 0, 2, 2 }, .quat = .{ 0, 0, 1, 0 } }
         else
             null;
@@ -134,8 +118,8 @@ pub fn init(self: *Session, allocator: std.mem.Allocator, io: std.Io, config: *c
     const count = scene.objects.len;
     self.wrenches = try physics_allocator.alloc(abi.Wrench, count);
     self.fluid = try physics_allocator.alloc(abi.Wrench, count);
-    self.previous_linear = try physics_allocator.alloc(abi.Vec3, count);
-    self.previous_angular = try physics_allocator.alloc(abi.Vec3, count);
+    self.previous_linear = try physics_allocator.alloc(abi.Vec3f, count);
+    self.previous_angular = try physics_allocator.alloc(abi.Vec3f, count);
     // Hydrodynamics uses two temporary f64 extents per body.
     self.scratch = try physics_allocator.alignedAlloc(u8, .of(f64), 2 * count * @sizeOf(f64));
     try self.initializeTick();
@@ -150,14 +134,13 @@ pub fn deinit(self: *Session) void {
         return;
     }
     const allocator = self.scene.allocator;
-    if (self.scene_file.len != 0) allocator.free(self.scene_file);
     self.sensors.deinit(allocator);
     self.backend.deinit();
     self.live = false;
     self.* = undefined;
 }
 
-pub fn setThrusters(self: *Session, values: *const types.ThrusterCommandInput) !void {
+pub fn setThrusters(self: *Session, values: *const abi.ThrusterCommandInput) !void {
     for (values[0..self.tam_len]) |v| if (!std.math.isFinite(v) or v < -1 or v > 1) return error.InvalidThrust;
     for (values[0..self.tam_len], 0..) |v, i| self.commands[i] = v;
 }
@@ -171,7 +154,7 @@ pub fn reset(self: *Session, states: ?[]const abi.BodyState) !void {
     try self.initializeTick();
 }
 
-fn framePose(p: types.Pose) math.Pose {
+fn framePose(p: abi.Pose) math.Pose {
     return .{ .pos = p.pos, .quat = p.quat };
 }
 
@@ -211,7 +194,7 @@ pub fn refreshSensors(self: *Session) void {
 }
 
 /// The detection slice is valid until the next step, reset, or deinit.
-pub fn observation(self: *const Session) types.Observation {
+pub fn observation(self: *const Session) abi.Observation {
     return self.sensors.observation;
 }
 
@@ -315,17 +298,17 @@ pub fn snapshot(self: *const Session, allocator: std.mem.Allocator) ![]align(@al
     @memcpy(strings_buf[0..self.preset_robot.len], self.preset_robot);
     @memcpy(strings_buf[self.preset_robot.len..], self.preset_scene);
 
-    var rotors = self.rotors;
-    const snap = abi.SessionStateCatalog{
+    const meta = abi.SessionMeta{
+        .tick = self.tick,
+        .thruster_len = self.thruster_len,
+        .robot_name_len = @intCast(self.preset_robot.len),
+        .scene_name_len = @intCast(self.preset_scene.len),
+        .pad0 = .{ 0, 0, 0, 0, 0 },
+        .commands = self.commands,
+    };
+    return reflection.write(allocator, abi.SessionStateCatalog, .{
         .strings = strings_buf,
-        .meta = .{
-            .tick = self.tick,
-            .thruster_len = self.thruster_len,
-            .robot_name_len = @intCast(self.preset_robot.len),
-            .scene_name_len = @intCast(self.preset_scene.len),
-            .pad0 = .{ 0, 0, 0, 0, 0 },
-            .commands = self.commands,
-        },
+        .meta = @as([]const abi.SessionMeta, &.{meta}),
         .robot_catalog = robot_bytes,
         .scene_catalog = scene_bytes,
         .body_states = self.backend.states,
@@ -333,39 +316,47 @@ pub fn snapshot(self: *const Session, allocator: std.mem.Allocator) ![]align(@al
         .fluid = self.fluid,
         .previous_linear = self.previous_linear,
         .previous_angular = self.previous_angular,
-        .rotors = &rotors,
+        .rotors = self.rotors[0..],
         .contacts = self.backend.contacts.items,
-    };
-    return reflection.write(allocator, snap);
+    });
 }
 
-pub fn restoreSnapshot(self: *Session, allocator: std.mem.Allocator, bytes: []const u8) !void {
-    var snap = try reflection.read(abi.SessionStateCatalog, allocator, bytes);
-    defer reflection.free(abi.SessionStateCatalog, allocator, &snap, bytes);
-    const meta = snap.meta;
-    if (snap.strings.len != meta.robot_name_len + meta.scene_name_len) return error.InvalidSession;
-    if (!std.mem.eql(u8, snap.strings[0..meta.robot_name_len], self.preset_robot) or
-        !std.mem.eql(u8, snap.strings[meta.robot_name_len..][0..meta.scene_name_len], self.preset_scene))
+pub fn restoreSnapshot(self: *Session, bytes: []const u8) !void {
+    const snap = try reflection.read(abi.SessionStateCatalog, bytes);
+    const payload = try reflection.catalogPayloadOffset(abi.SessionStateCatalog, bytes);
+    const metas = abi.spanAs(abi.SessionMeta, bytes, payload, snap.meta);
+    if (metas.len != 1) return error.InvalidSession;
+    const meta = metas[0];
+    const strings = abi.spanBytes(bytes, payload, snap.strings);
+    if (strings.len != meta.robot_name_len + meta.scene_name_len) return error.InvalidSession;
+    if (!std.mem.eql(u8, strings[0..meta.robot_name_len], self.preset_robot) or
+        !std.mem.eql(u8, strings[meta.robot_name_len..][0..meta.scene_name_len], self.preset_scene))
         return error.SnapshotMismatch;
 
-    if (snap.body_states.len != self.backend.states.len or
-        snap.wrenches.len != self.wrenches.len or
-        snap.fluid.len != self.fluid.len or
-        snap.previous_linear.len != self.previous_linear.len or
-        snap.previous_angular.len != self.previous_angular.len)
+    const body_states = abi.spanAs(abi.BodyState, bytes, payload, snap.body_states);
+    const wrenches = abi.spanAs(abi.Wrench, bytes, payload, snap.wrenches);
+    const fluid = abi.spanAs(abi.Wrench, bytes, payload, snap.fluid);
+    const previous_linear = abi.spanAs(abi.Vec3f, bytes, payload, snap.previous_linear);
+    const previous_angular = abi.spanAs(abi.Vec3f, bytes, payload, snap.previous_angular);
+    if (body_states.len != self.backend.states.len or
+        wrenches.len != self.wrenches.len or
+        fluid.len != self.fluid.len or
+        previous_linear.len != self.previous_linear.len or
+        previous_angular.len != self.previous_angular.len)
         return error.SnapshotMismatch;
 
-    try self.backend.reset(snap.body_states);
-    @memcpy(self.wrenches, snap.wrenches);
-    @memcpy(self.fluid, snap.fluid);
-    @memcpy(self.previous_linear, snap.previous_linear);
-    @memcpy(self.previous_angular, snap.previous_angular);
-    const rotor_count = @min(snap.rotors.len, self.rotors.len);
-    @memcpy(self.rotors[0..rotor_count], snap.rotors[0..rotor_count]);
+    try self.backend.reset(body_states);
+    @memcpy(self.wrenches, wrenches);
+    @memcpy(self.fluid, fluid);
+    @memcpy(self.previous_linear, previous_linear);
+    @memcpy(self.previous_angular, previous_angular);
+    const rotors = abi.spanAs(abi.RotorState, bytes, payload, snap.rotors);
+    const rotor_count = @min(rotors.len, self.rotors.len);
+    @memcpy(self.rotors[0..rotor_count], rotors[0..rotor_count]);
     self.tick = meta.tick;
     self.commands = meta.commands;
     self.thruster_len = meta.thruster_len;
     self.backend.contacts.clearRetainingCapacity();
-    try self.backend.contacts.appendSlice(self.scene.allocator, snap.contacts);
+    try self.backend.contacts.appendSlice(self.scene.allocator, abi.spanAs(abi.Contact, bytes, payload, snap.contacts));
     self.refreshSensors();
 }

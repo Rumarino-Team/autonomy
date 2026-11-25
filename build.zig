@@ -4,19 +4,19 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
 
     const optimize = b.standardOptimizeOption(.{});
-    const sim_types = b.createModule(.{
-        .root_source_file = b.path("src/simulator/types.zig"),
+    const sim_abi = b.createModule(.{
+        .root_source_file = b.path("src/simulator/abi.zig"),
         .target = b.graph.host,
     });
     const blend_file = b.createModule(.{
         .root_source_file = b.path("src/simulator/BlendFile.zig"),
         .target = b.graph.host,
-        .imports = &.{.{ .name = "types", .module = sim_types }},
+        .imports = &.{.{ .name = "abi", .module = sim_abi }},
     });
     const mesh_export_codec = b.createModule(.{
         .root_source_file = b.path("src/simulator/MeshExportCodec.zig"),
         .target = b.graph.host,
-        .imports = &.{.{ .name = "types", .module = sim_types }},
+        .imports = &.{.{ .name = "abi", .module = sim_abi }},
     });
     const export_mesh = b.addExecutable(.{
         .name = "export_mesh",
@@ -114,6 +114,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{.{ .name = "raylib", .module = raylib }},
     });
     visualizer.addIncludePath(b.path("include"));
+    visualizer.addOptions("build_options", build_options);
     const viewer_mod = b.createModule(.{
         .root_source_file = b.path("tools/viewer/main.zig"),
         .target = target,
@@ -200,6 +201,8 @@ pub fn build(b: *std.Build) !void {
     if (mujoco_build_step) |step| exe_tests.step.dependOn(step);
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const app_test_step = b.step("test-app", "Run the Zig application tests");
+    app_test_step.dependOn(&run_exe_tests.step);
 
     // Independent test suites run in parallel.
     const test_step = b.step("test", "Run tests");
