@@ -7,7 +7,7 @@ const MissionConfig = @import("../MissionConfig.zig");
 const MissionIO = @import("../MissionIO.zig");
 const Serial = @import("../Serial.zig");
 const AuvRobot = @import("../AuvRobot.zig");
-const reflection = @import("../simulator/ReflectionWriter.zig");
+const reflection = @import("../ReflectionWriter.zig");
 
 const simulator_enabled = @import("build_options").simulator;
 const SimSession = if (simulator_enabled) @import("../simulator/Session.zig").Session else void;

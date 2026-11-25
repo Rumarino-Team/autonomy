@@ -4,7 +4,7 @@ const Io = std.Io;
 const math = @import("math.zig");
 const Auv = @import("Auv.zig");
 const MissionConfig = @import("MissionConfig.zig");
-const reflection = @import("simulator/ReflectionWriter.zig");
+const reflection = @import("ReflectionWriter.zig");
 
 pub const LiveConfigPacket = struct {
     revision: u64 = 0,

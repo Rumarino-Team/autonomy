@@ -1,7 +1,7 @@
 //! AUTODNA1 documents: the schema section records Zig row layout at build time; row bytes
 //! follow those structs. Reads require a matching schema fingerprint.
 const std = @import("std");
-const abi_mod = @import("abi.zig");
+const abi_mod = @import("simulator/abi.zig");
 
 pub const ColumnSpan = abi_mod.ColumnSpan;
 pub const rna = abi_mod.rna;

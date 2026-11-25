@@ -10,7 +10,7 @@ const MujocoBackend = @import("mujoco.zig").MujocoBackend;
 const forces = @import("forces.zig");
 const Sensors = @import("sensors.zig");
 const abi = @import("abi.zig");
-const reflection = @import("ReflectionWriter.zig");
+const reflection = @import("../ReflectionWriter.zig");
 
 pub const Session = @This();
 

@@ -3,7 +3,7 @@ const math = @import("math.zig");
 const Auv = @import("Auv.zig");
 const Wire = @import("AuvRobot.zig").Wire;
 const MissionContext = @import("MissionContext.zig");
-const reflection = @import("simulator/ReflectionWriter.zig");
+const reflection = @import("ReflectionWriter.zig");
 const c = Auv.c;
 
 pub fn teleopMission(ctx: *MissionContext) !void {

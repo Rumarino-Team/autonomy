@@ -5,7 +5,7 @@ const MissionConfig = @import("MissionConfig.zig");
 const MissionIO = @import("MissionIO.zig");
 const math = @import("math.zig");
 const bc = @import("BodyControl.zig");
-const reflection = @import("simulator/ReflectionWriter.zig");
+const reflection = @import("ReflectionWriter.zig");
 const AuvRobot = @This();
 
 pub const Observations = Auv.Frame;

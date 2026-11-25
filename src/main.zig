@@ -7,7 +7,7 @@ const simulator_enabled = @import("build_options").simulator;
 test {
     _ = @import("application/Application.zig");
     _ = @import("AuvRobot.zig");
-    _ = @import("simulator/ReflectionWriter.zig");
+    _ = @import("ReflectionWriter.zig");
     _ = @import("MissionIO.zig");
     _ = MissionContext;
     _ = missions;

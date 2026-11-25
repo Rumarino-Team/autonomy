@@ -1,7 +1,7 @@
 //! In-memory robot and scene catalogs. Entity rows list children via `LinkHead` runs in `refs`.
 const std = @import("std");
 const abi = @import("abi.zig");
-const reflection = @import("ReflectionWriter.zig");
+const reflection = @import("../ReflectionWriter.zig");
 
 pub const rna = reflection.rna;
 pub const LinkHead = abi.LinkHead;

@@ -75,6 +75,8 @@ pub const SceneDraw = struct {
     draw: *const fn (ctx: *const anyopaque) void,
 };
 
+/// Per-frame UI input. In the standalone viewer, `frame`, `telemetry_status`, and `send_error`
+/// come from `tools/viewer/main.zig` (`ViewerHost`); this module does not open sockets.
 pub const Input = struct {
     status: ?MissionIO.RuntimeStatus = null,
     frame: ?*const AuvWire.TelemetryDoc = null,
