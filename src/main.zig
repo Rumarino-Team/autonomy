@@ -1,16 +1,17 @@
 const std = @import("std");
-const AuvApplication = @import("application/Application.zig").AuvApplication;
-const MissionContext = @import("MissionContext.zig");
-const missions = @import("missions.zig");
+
+const runtime = @import("runtime.zig").App;
+const missions = @import("MissionContext.zig");
+const MissionIO = @import("MissionIO.zig");
+
 const simulator_enabled = @import("build_options").simulator;
 
 test {
-    _ = @import("application/Application.zig");
+    _ = missions;
     _ = @import("AuvRobot.zig");
     _ = @import("ReflectionWriter.zig");
-    _ = @import("MissionIO.zig");
-    _ = MissionContext;
-    _ = missions;
+    _ = MissionIO;
+    _ = runtime;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -25,52 +26,43 @@ pub fn main(init: std.process.Init) !void {
             return error.UnknownArgument;
         }
     }
-    var app: AuvApplication = undefined;
-    try app.initProcess(process_allocator, init.io, windowed);
-    defer app.deinitProcess();
-    const telemetry = app.telemetry;
+    try runtime.initApp(process_allocator, init.io, windowed, true);
+    defer runtime.deinitApp(process_allocator);
 
     var mission_arena = std.heap.ArenaAllocator.init(process_allocator);
     defer mission_arena.deinit();
     while (true) {
         defer _ = mission_arena.reset(.retain_capacity);
-        runMission(mission_arena.allocator(), &app) catch |err| switch (@as(anyerror, err)) {
+        runMission(mission_arena.allocator()) catch |err| switch (@as(anyerror, err)) {
             error.WindowClosed => return,
             error.MissionRestart => {},
-            error.MissionStopped => telemetry.result = .stopped,
+            error.MissionStopped => runtime.telemetry.result = .stopped,
             else => {
-                telemetry.result = .failed;
-                telemetry.report(err);
+                runtime.telemetry.result = .failed;
+                runtime.telemetry.report(err);
             },
         };
     }
 }
 
-fn runMission(allocator: std.mem.Allocator, app: *AuvApplication) !void {
-    const telemetry = app.telemetry;
-    std.Io.random(app.io, std.mem.asBytes(&telemetry.run_id));
-    telemetry.run_id |= 1;
-    telemetry.state = .starting;
-    telemetry.result = .none;
-    telemetry.last_error = .{};
-    telemetry.clearCommands();
+fn runMission(allocator: std.mem.Allocator) !void {
+    const telemetry_ptr = runtime.telemetry;
+    std.Io.random(runtime.io, std.mem.asBytes(&telemetry_ptr.run_id));
+    telemetry_ptr.run_id |= 1;
+    telemetry_ptr.state = .starting;
+    telemetry_ptr.result = .none;
+    telemetry_ptr.last_error = .{};
+    telemetry_ptr.clearCommands();
     defer {
-        telemetry.state = .idle;
-        telemetry.clearCommands();
+        telemetry_ptr.state = .idle;
+        telemetry_ptr.clearCommands();
+        runtime.deinitMission();
     }
-    try app.initMission(allocator);
-    defer app.deinitMission();
+    if (!runtime.mission_active) try runtime.initApp(allocator, runtime.io, runtime.visualizer != null, false);
 
-    var mission: MissionContext = undefined;
-    mission.init(app);
-    try mission.prime();
-    telemetry.state = .running;
-    switch (app.config.mission_id) {
-        .prequalify_coco => try missions.cocoMission(&mission),
-        .prequalify_robosub => try missions.robosubMission(&mission),
-        .teleop => try missions.teleopMission(&mission),
-        .mission_control => try missions.missionControl(&mission),
-        .thruster_control => try missions.thrusterControl(&mission),
-    }
-    telemetry.result = .completed;
+    missions.init();
+    try missions.prime();
+    telemetry_ptr.state = .running;
+    try missions.run(runtime.config.mission_id);
+    telemetry_ptr.result = .completed;
 }

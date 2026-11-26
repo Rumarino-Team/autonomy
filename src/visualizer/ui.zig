@@ -3,7 +3,6 @@ const rl = @import("raylib");
 const IO = @import("../MissionIO.zig");
 const Wire = @import("../AuvRobot.zig").Wire;
 
-pub const Workspace = enum { runtime, settings };
 pub const Status = enum { disabled, connecting, live, ready, stale, unavailable };
 pub const Rect = rl.Rectangle;
 const bg = color(3, 5, 4, 255);
@@ -131,7 +130,7 @@ pub const Layout = struct {
             .update = empty,
         };
     }
-    pub fn sceneContent(self: Layout, _: Workspace) Rect {
+    pub fn sceneContent(self: Layout) Rect {
         const r = self.scene;
         return rect(r.x + 8, r.y + 38, r.width - 16, r.height - 46);
     }
@@ -148,10 +147,10 @@ pub const Layout = struct {
         return rect(self.gains.x + self.gains.width - 132, self.gains.y + 8, 120, 25);
     }
     pub fn dropdownRect(self: Layout) Rect {
-        return rect(self.controls.x + 12, self.controls.y + 38, self.controls.width - 108, 30);
+        return rect(self.controls.x + 12, self.controls.y + 30, self.controls.width - 108, 30);
     }
     pub fn activateRect(self: Layout) Rect {
-        return rect(self.controls.x + self.controls.width - 88, self.controls.y + 38, 76, 30);
+        return rect(self.controls.x + self.controls.width - 88, self.controls.y + 30, 76, 30);
     }
     pub fn dropdownOption(self: Layout, i: usize) Rect {
         const r = self.dropdownRect();
@@ -160,10 +159,6 @@ pub const Layout = struct {
 
     pub fn listCapacity(r: Rect) usize {
         return @intFromFloat(@max(0, @floor((r.height - 78) / 20)));
-    }
-    pub fn navRect(self: Layout, i: usize) Rect {
-        _ = self;
-        return rect(215 + @as(f32, @floatFromInt(i)) * 100, 14, 90, 28);
     }
     pub fn fontButton(self: Layout, increase: bool) Rect {
         return rect(self.top.width - (if (increase) @as(f32, 34) else 104), 15, 25, 27);
@@ -197,7 +192,6 @@ pub fn thrusterSliderValue(mouse_x: f32, track: Rect) f32 {
 pub const Data = struct {
     font: rl.Font,
     font_percent: u8,
-    workspace: Workspace,
     layout: Layout,
     frame: *const Wire.TelemetryDoc,
     telemetry_status: Status,
@@ -406,8 +400,6 @@ fn topbar(d: Data) void {
     box(l.top, sidebar);
     text(d.font, "A", 16, 13, 20, teal);
     text(d.font, "AUTONOMY VIEWER", 42, 14, 15, white);
-    const names = [_][:0]const u8{ "Runtime", "Settings" };
-    for (names, 0..) |name, i| button(d.font, l.navRect(i), name, @backingInt(d.workspace) == i);
     const sx = @max(@as(f32, 545), l.top.width - 470);
     pill(d.font, rect(sx, 14, 108, 28), "TLM", d.telemetry_status);
     pill(d.font, rect(sx + 113, 14, 120, 28), "VIDEO", d.video_status);
@@ -419,7 +411,7 @@ fn topbar(d: Data) void {
 
 fn dashboard(d: Data) void {
     const l = d.layout;
-    scenePanel(d, l.sceneContent(.runtime));
+    scenePanel(d, l.sceneContent());
     videoPanel(d, l.video);
     statePanel(d, l.state);
     const p = l.controls;
@@ -428,8 +420,8 @@ fn dashboard(d: Data) void {
     button(d.font, l.dropdownRect(), runtimeName(d.chosen_mission), false);
     text(d.font, "v", l.dropdownRect().x + l.dropdownRect().width - 18, l.dropdownRect().y + 8, 12, muted);
     button(d.font, l.activateRect(), "Activate", true);
-    text(d.font, if (d.telemetry_status != .live) "Confirmed: unavailable" else rl.textFormat("Confirmed: %s", .{runtimeName((d.active_mission orelse d.config.config.mission_id)).ptr}), p.x + 12, p.y + 77, 11, if (d.telemetry_status == .live and !d.runtime_switch_pending) teal else amber);
-    if (d.runtime_switch_pending) text(d.font, "Request sent; awaiting telemetry", p.x + 12, p.y + 94, 10, amber);
+    text(d.font, if (d.telemetry_status != .live) "Confirmed: unavailable" else rl.textFormat("Confirmed: %s", .{runtimeName((d.active_mission orelse d.config.config.mission_id)).ptr}), p.x + 12, p.y + 65, 11, if (d.telemetry_status == .live and !d.runtime_switch_pending) teal else amber);
+    if (d.runtime_switch_pending) text(d.font, "Request sent; awaiting telemetry", p.x + 12, p.y + 82, 10, amber);
     if (d.mission_control) {
         button(d.font, l.missionButton(0), "Point P", d.mission_kind == .point);
         button(d.font, l.missionButton(1), "Object O", d.mission_kind == .object);
@@ -488,13 +480,13 @@ pub fn draw(d: Data) void {
     font_scale = @as(f32, @floatFromInt(d.font_percent)) / 100.0;
     rl.clearBackground(bg);
     topbar(d);
-    if (d.workspace == .runtime) dashboard(d);
+    dashboard(d);
 }
 
 test "workspace layouts stay within supported window sizes" {
     for ([_][2]f32{ .{ 1000, 700 }, .{ 1280, 1000 }, .{ 1920, 1080 } }) |size| {
         const l = Layout.init(size[0], size[1], true);
-        const panels = [_]Rect{ l.video, l.scene, l.state, l.thrusters, l.controls, l.objects, l.goals, l.editor, l.gains, l.observed, l.update, l.sceneContent(.runtime) };
+        const panels = [_]Rect{ l.video, l.scene, l.state, l.thrusters, l.controls, l.objects, l.goals, l.editor, l.gains, l.observed, l.update, l.sceneContent() };
         for (panels) |p| {
             try std.testing.expect(p.width > 0 and p.height > 0);
             try std.testing.expect(p.x >= 0 and p.y >= 0);

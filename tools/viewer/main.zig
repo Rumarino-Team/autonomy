@@ -201,7 +201,7 @@ const ViewerHost = struct {
             if (actions.thrusters) |command| self.sendControl(io, command) catch {
                 self.send_error = true;
             };
-            const request: MissionIO.RuntimeRequest = actions.lifecycle orelse .{
+            const request: MissionIO.RuntimeRequest = .{
                 .client_id = self.client_id,
                 .request_id = 0,
                 .action = .query,

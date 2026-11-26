@@ -48,7 +48,6 @@ mission_object_class: u8 = 0,
 mission_control: bool,
 chosen_mission: MissionConfig.MissionId,
 dropdown_open: bool = false,
-workspace: ui.Workspace,
 font_percent: u8 = ui.default_font_percent,
 mission_sent: bool = false,
 tune_sent: bool = false,
@@ -88,7 +87,6 @@ pub const Input = struct {
 
 pub const Actions = struct {
     config: ?MissionIO.LiveConfigPacket = null,
-    lifecycle: ?MissionIO.RuntimeRequest = null,
     thrusters: ?AuvWire.ThrusterDoc = null,
     mission: ?MissionIO.MissionCommand = null,
     teleop: ?AuvWire.TeleopWire = null,
@@ -117,7 +115,6 @@ pub fn init(config: *const MissionConfig.MissionConfig, client_id: u64, mission_
         .scene = try rl.loadRenderTexture(900, 470),
         .mission_control = mission_control,
         .chosen_mission = config.mission_id,
-        .workspace = .runtime,
     };
 }
 
@@ -181,37 +178,28 @@ pub fn tick(self: *Self, input: Input) !Actions {
     if (rl.isKeyPressed(.equal) or rl.isKeyPressed(.kp_add)) self.font_percent = ui.adjustFontPercent(self.font_percent, 5);
     if (rl.isKeyPressed(.minus) or rl.isKeyPressed(.kp_subtract)) self.font_percent = ui.adjustFontPercent(self.font_percent, -5);
     if (rl.isKeyPressed(.zero)) self.font_percent = ui.default_font_percent;
-    if (self.runtime_panel.editing == null and rl.isKeyPressed(.one)) self.workspace = .runtime;
-    if (self.runtime_panel.editing == null and rl.isKeyPressed(.two)) self.workspace = .settings;
     const menu_was_open = self.dropdown_open;
     if (rl.isMouseButtonPressed(.left)) {
         const mouse = rl.getMousePosition();
         if (rl.checkCollisionPointRec(mouse, layout.fontButton(false))) self.font_percent = ui.adjustFontPercent(self.font_percent, -5);
         if (rl.checkCollisionPointRec(mouse, layout.fontButton(true))) self.font_percent = ui.adjustFontPercent(self.font_percent, 5);
-        for (0..2) |i| if (rl.checkCollisionPointRec(rl.getMousePosition(), layout.navRect(i))) {
-            self.workspace = @fromBackingInt(@intCast(i));
-            self.pid_drag = null;
-            break;
-        };
-        if (self.workspace == .runtime) {
-            if (self.dropdown_open) {
-                for (0..@typeInfo(MissionConfig.MissionId).@"enum".field_names.len) |i| {
-                    if (rl.checkCollisionPointRec(mouse, layout.dropdownOption(i))) {
-                        self.chosen_mission = @fromBackingInt(@as(u8, @intCast(i)));
-                        break;
-                    }
+        if (self.dropdown_open) {
+            for (0..@typeInfo(MissionConfig.MissionId).@"enum".field_names.len) |i| {
+                if (rl.checkCollisionPointRec(mouse, layout.dropdownOption(i))) {
+                    self.chosen_mission = @fromBackingInt(@as(u8, @intCast(i)));
+                    break;
                 }
-                self.dropdown_open = false;
-            } else if (rl.checkCollisionPointRec(mouse, layout.dropdownRect())) {
-                self.dropdown_open = true;
-            } else if (rl.checkCollisionPointRec(mouse, layout.activateRect()) and self.runtime_panel.synchronized()) {
-                var request = self.config_packet;
-                request.config.mission_id = self.chosen_mission;
-                self.runtime_panel.queueConfig(request);
             }
+            self.dropdown_open = false;
+        } else if (rl.checkCollisionPointRec(mouse, layout.dropdownRect())) {
+            self.dropdown_open = true;
+        } else if (rl.checkCollisionPointRec(mouse, layout.activateRect()) and self.runtime_panel.synchronized()) {
+            var request = self.config_packet;
+            request.config.mission_id = self.chosen_mission;
+            self.runtime_panel.queueConfig(request);
         }
     }
-    const view3d = layout.sceneContent(.runtime);
+    const view3d = layout.sceneContent();
     const next_w: i32 = @max(1, @as(i32, @intFromFloat(view3d.width)));
     const next_h: i32 = @max(1, @as(i32, @intFromFloat(view3d.height)));
     if (next_w != self.scene_w or next_h != self.scene_h) {
@@ -226,7 +214,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
     const goal_max = @as(usize, telemetry.goals_len) -| list_capacity;
     self.object_scroll = @min(self.object_scroll, object_max);
     self.goal_scroll = @min(self.goal_scroll, goal_max);
-    if (self.workspace == .runtime and rl.isWindowFocused()) {
+    if (rl.isWindowFocused()) {
         const wheel = rl.getMouseWheelMove();
         if (wheel != 0) {
             const mouse = rl.getMousePosition();
@@ -238,7 +226,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
         }
     }
 
-    if (self.workspace == .runtime and rl.isKeyPressed(.t)) {
+    if (rl.isKeyPressed(.t)) {
         // Release any held teleoperation translation before leaving teleop mode.
         if (!self.mission_control) {
             actions.teleop = teleopWire(@splat(0), self.orientation);
@@ -255,7 +243,7 @@ pub fn tick(self: *Self, input: Input) !Actions {
             .{if (self.mission_control) "mission-control" else "teleop"},
         );
     }
-    const focused = rl.isWindowFocused() and self.workspace == .runtime and !self.dropdown_open and !menu_was_open;
+    const focused = rl.isWindowFocused() and !self.dropdown_open and !menu_was_open;
     const mouse_click = focused and rl.isMouseButtonPressed(.left);
     if (mouse_click and self.mission_control) {
         if (rl.checkCollisionPointRec(rl.getMousePosition(), layout.missionButton(0))) self.mission_kind = .point;
@@ -507,7 +495,6 @@ pub fn tick(self: *Self, input: Input) !Actions {
     ui.draw(.{
         .font = self.font,
         .font_percent = self.font_percent,
-        .workspace = self.workspace,
         .layout = layout,
         .frame = telemetry,
         .telemetry_status = input.telemetry_status,
@@ -542,11 +529,9 @@ pub fn tick(self: *Self, input: Input) !Actions {
         .direct_thruster_values = self.runtime_panel.direct_values[0..direct_thruster_count],
         .direct_thruster_drag = self.direct_thruster_drag,
     });
-    if (self.workspace == .settings) self.runtime_panel.draw(self.font, layout.content, &self.config_packet, telemetry, telemetry_live, self.embedded);
     rl.endDrawing();
 
     actions.config = self.runtime_panel.pending_config;
-    actions.lifecycle = self.runtime_panel.pending_request;
     if (self.runtime_panel.synchronized()) actions.thrusters = self.runtime_panel.direct_command;
     return actions;
 }

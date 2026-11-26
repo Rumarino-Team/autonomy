@@ -729,11 +729,7 @@ pub const Telemetry = struct {
         self.accepted_request_id = request.request_id;
         switch (request.action) {
             .query => unreachable,
-            .start => if (self.state == .idle or (if (self.pending_lifecycle) |pending| pending == error.MissionStopped else false)) {
-                self.pending_lifecycle = error.MissionRestart;
-            },
-            .stop => self.pending_lifecycle = error.MissionStopped,
-            .restart => self.pending_lifecycle = error.MissionRestart,
+            .start, .stop, .restart => {},
         }
     }
 
@@ -912,19 +908,18 @@ test "telemetry rejects a different schema with the same row layout" {
     try std.testing.expectError(error.UnsupportedAbiVersion, decodeTelemetryFrame(ViewerDoc, encoded));
 }
 
-test "lifecycle requests deduplicate and the latest request wins" {
+test "runtime control requests deduplicate and queries refresh accepted ids" {
     var telemetry: Telemetry = .{ .publisher = undefined, .log_file = null, .stdout_log_freq_div = 1, .state = .running };
     telemetry.acceptRequest(.{ .client_id = 1, .request_id = 1, .action = .start });
     try std.testing.expect(telemetry.pending_lifecycle == null);
     telemetry.acceptRequest(.{ .client_id = 1, .request_id = 2, .action = .restart });
-    try std.testing.expectEqual(error.MissionRestart, telemetry.pending_lifecycle.?);
+    try std.testing.expect(telemetry.pending_lifecycle == null);
     telemetry.acceptRequest(.{ .client_id = 1, .request_id = 3, .action = .stop });
+    try std.testing.expect(telemetry.pending_lifecycle == null);
     telemetry.acceptRequest(.{ .client_id = 1, .request_id = 2, .action = .restart });
-    try std.testing.expectEqual(error.MissionStopped, telemetry.pending_lifecycle.?);
-    telemetry.acceptRequest(.{ .client_id = 1, .request_id = 3, .action = .query });
     try std.testing.expectEqual(@as(u64, 3), telemetry.accepted_request_id);
-    telemetry.acceptRequest(.{ .client_id = 1, .request_id = 4, .action = .start });
-    try std.testing.expectEqual(error.MissionRestart, telemetry.pending_lifecycle.?);
+    telemetry.acceptRequest(.{ .client_id = 1, .request_id = 4, .action = .query });
+    try std.testing.expectEqual(@as(u64, 3), telemetry.accepted_request_id);
 }
 
 test "direct control works without UDP and clears commands on restart" {
